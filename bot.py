@@ -21,7 +21,7 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 
 # 2. Настройка бота
-TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(TOKEN)
 
 
