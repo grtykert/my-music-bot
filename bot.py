@@ -21,28 +21,26 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 
 # 2. Настройка бота
-TOKEN = "8957555829:AAHtDCNwFA2OIP1VQHXPunYXScETR1xM37k"
+TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(TOKEN)
 
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
-  bot.reply_to(
-      message,
-      "Привет! Напиши название трека, и я найду его для тебя в VK 🎵",
-  )
+  bot.reply_to(message, "Привет! Напиши название трека, и я попробую его найти 🎵")
 
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
   query = message.text
-  bot.reply_to(message, f"Ищу в VK: {query} 🔍")
+  sent_msg = bot.reply_to(message, f"Ищу трек: {query} 🔍")
 
-  # Меняем поиск на vksearch (вместо youtube)
+  # Используем стандартный поиск, но с таймаутами и без лишних падений
   ydl_opts = {
       "format": "bestaudio/best",
       "outtmpl": "downloads/%(title)s.%(ext)s",
-      "default_search": "vksearch1:",
+      "default_search": "ytsearch1:",
+      "noplaylist": True,
       "postprocessors": [{
           "key": "FFmpegExtractAudio",
           "preferredcodec": "mp3",
@@ -52,11 +50,15 @@ def handle_message(message):
 
   try:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-      info = ydl.extract_info(query, download=True)
-
+      info = ydl.extract_info(query, download=False)
       if "entries" in info:
         info = info["entries"][0]
 
+      # Получаем прямую ссылку на найденное видео
+      video_url = info.get("webpage_url") or info.get("url")
+
+      # Скачиваем уже конкретную ссылку, а не через поисковый запрос напрямую
+      ydl.download([video_url])
       filename = ydl.prepare_filename(info)
       base, _ = os.path.splitext(filename)
       mp3_file = base + ".mp3"
@@ -67,7 +69,11 @@ def handle_message(message):
     os.remove(mp3_file)
 
   except Exception as e:
-    bot.reply_to(message, f"Не удалось найти или скачать трек: {e}")
+    bot.edit_message_text(
+        f"Не удалось скачать трек. Ошибка: {e}",
+        chat_id=message.chat.id,
+        message_id=sent_msg.message_id,
+    )
 
 
 bot.infinity_polling()
