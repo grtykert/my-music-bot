@@ -2,7 +2,7 @@ import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 import requests
 
-API_TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(API_TOKEN)
 
 @bot.message_handler(commands=['start'])
