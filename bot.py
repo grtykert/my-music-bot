@@ -9,7 +9,7 @@ def home():
 def run_web():
     app.run(host='0.0.0.0', port=10000)
 threading.Thread(target=run_web).daemon = True
-TOKEN = "ТВОЙ_ТОКЕН_БОТА"
+TOKEN = "8957555829:AAHtDCNwFA2OIP1VQHXPunYXscEtRlxM37k"
 bot = telebot.TeleBot(TOKEN)
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
