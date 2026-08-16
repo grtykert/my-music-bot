@@ -15,7 +15,6 @@ def search_music(message):
     msg = bot.reply_to(message, "🔍 Ищу в интернете...")
     
     try:
-        # Ищем треки через открытое музыкальное API
         response = requests.get(f"https://itunes.apple.com/search?term={query}&entity=song&limit=5")
         data = response.json()
         
@@ -50,20 +49,23 @@ def callback_send_audio(call):
     track = next((t for t in tracks if t.get('trackId') == track_id), None)
     
     if not track:
-        bot.answer_callback_query(call.id, "❌ Список устарел, введи запрос заново.")
+        bot.answer_callback_query(call.id, "❌ Список устарел.")
         return
 
     audio_url = track.get("previewUrl")
-    title = f"{track.get('artistName', '')} - {track.get('trackName', 'Трек')}"
 
     bot.answer_callback_query(call.id, "🎶 Отправляю...")
     
     try:
-        # Отправляем аудиофайл напрямую по ссылке из интернета
-        bot.send_audio(call.message.chat.id, audio_url, title=title[:50])
+        bot.send_audio(
+            call.message.chat.id, 
+            audio_url, 
+            title=track.get('trackName', 'Music'), 
+            performer=track.get('artistName', 'Artist')
+        )
     except Exception as e:
         print(f"Ошибка отправки: {e}")
-        bot.send_message(call.message.chat.id, "❌ Не удалось отправить аудио.")
+        bot.send_message(call.message.chat.id, "❌ Не удалось отправить как аудио. Попробуй другой трек.")
 
 bot.infinity_polling()
 
