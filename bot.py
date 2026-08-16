@@ -6,6 +6,12 @@ import requests
 API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(API_TOKEN)
 
+user_ids = set()
+
+@bot.message_handler(commands=['stats'])
+def show_stats(message):
+    bot.reply_to(message, f"📊 Всего пользователей в боте: {len(user_ids)}")
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду его. Дам послушать превью и дам ссылку на полную версию! 🎵")
