@@ -27,18 +27,17 @@ bot = telebot.TeleBot(TOKEN)
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
-  bot.reply_to(
-      message,
-      "Привет! Отправь мне ссылку на видео/трек, и я скачаю его в MP3 🎵",
-  )
+  bot.reply_to(message, "Привет! Напиши название трека, и я найду его 🎵")
 
 
-def download_and_send(message, url):
-  sent_msg = bot.reply_to(message, "Скачиваю трек по ссылке... ⏳")
+# Фоновая функция для поиска через SoundCloud
+def download_and_send(message, query):
+  sent_msg = bot.reply_to(message, f"Ищу трек: {query} 🔍")
 
   ydl_opts = {
       "format": "bestaudio/best",
       "outtmpl": "downloads/%(title)s.%(ext)s",
+      "default_search": "scsearch1:",  # Поиск через SoundCloud вместо YouTube
       "postprocessors": [{
           "key": "FFmpegExtractAudio",
           "preferredcodec": "mp3",
@@ -48,7 +47,10 @@ def download_and_send(message, url):
 
   try:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-      info = ydl.extract_info(url, download=True)
+      info = ydl.extract_info(query, download=True)
+      if "entries" in info:
+        info = info["entries"][0]
+
       filename = ydl.prepare_filename(info)
       base, _ = os.path.splitext(filename)
       mp3_file = base + ".mp3"
@@ -61,7 +63,7 @@ def download_and_send(message, url):
 
   except Exception as e:
     bot.edit_message_text(
-        f"Не удалось скачать по ссылке. Ошибка: {e}",
+        f"Не удалось найти трек. Ошибка: {e}",
         chat_id=message.chat.id,
         message_id=sent_msg.message_id,
     )
@@ -69,9 +71,9 @@ def download_and_send(message, url):
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-  url = message.text
+  query = message.text
   threading.Thread(
-      target=download_and_send, args=(message, url), daemon=True
+      target=download_and_send, args=(message, query), daemon=True
   ).start()
 
 
