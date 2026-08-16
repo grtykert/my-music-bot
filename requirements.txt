@@ -1,2 +1,5 @@
 pyTelegramBotAPI
 requests
+flasc 
+yt-dlp
+ffmpeg-python 
