@@ -121,4 +121,4 @@ def pre_checkout_query(query):
 # Что происходит после успешной оплаты
 @bot.message_handler(content_types=['successful_payment'])
 def got_payment(message):
-    bot.reply_to(message, f"🎉 Спасибо большое за поддержку! Получено звезд: {message.successful_payment.total_amount} ⭐")2
+    bot.reply_to(message, f"🎉 Спасибо большое за поддержку! Получено звезд: {message.successful_payment.total_amount} ⭐")
