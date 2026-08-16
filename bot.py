@@ -68,21 +68,7 @@ def download_and_send(message, query):
   except Exception as e:
     bot.edit_message_text(
         f"Не удалось скачать трек. Ошибка: {e}",
-        chat_id=message.chat.id,
-        message_id=sent_msg.message_id,
-    )
-
-
-@bot.message_handler(func=lambda message: True)
-def handle_message(message):
-  query = message.text
-  # Запускаем скачивание в отдельном потоке, чтобы бот сразу был готов к новым сообщениям
-  threading.Thread(
-      target=download_and_send, args=(message, query), daemon=True
-  ).start()
-
-
-bot.infinity_polling()
+      
 
 
 
