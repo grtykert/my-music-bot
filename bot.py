@@ -27,21 +27,17 @@ bot = telebot.TeleBot(TOKEN)
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
-  bot.reply_to(message, "Привет! Напиши название трека, и я найду его 🎵")
+  bot.reply_to(message, "Привет! Напиши название трека, и я найду его в VK 🎵")
 
 
-# Фоновая функция для скачивания, чтобы бот не зависал
+# Фоновая функция для поиска и скачивания из VK
 def download_and_send(message, query):
-  sent_msg = bot.reply_to(message, f"Ищу трек: {query} 🔍")
+  sent_msg = bot.reply_to(message, f"Ищу в VK: {query} 🔍")
 
   ydl_opts = {
       "format": "bestaudio/best",
       "outtmpl": "downloads/%(title)s.%(ext)s",
-      "default_search": "ytsearch1:",
-      "user_agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-          " like Gecko) Chrome/122.0.0.0 Safari/537.36"
-      ),
+      "default_search": "vksearch1:",  # Жесткий поиск по VK
       "postprocessors": [{
           "key": "FFmpegExtractAudio",
           "preferredcodec": "mp3",
@@ -67,7 +63,7 @@ def download_and_send(message, query):
 
   except Exception as e:
     bot.edit_message_text(
-        f"Не удалось скачать трек. Ошибка: {e}",
+        f"Не удалось найти трек в VK. Ошибка: {e}",
         chat_id=message.chat.id,
         message_id=sent_msg.message_id,
     )
@@ -76,7 +72,7 @@ def download_and_send(message, query):
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
   query = message.text
-  # Запускаем обработку в фоне, бот мгновенно готов к новым сообщениям
+  # Запускаем в фоновом потоке, чтобы бот не зависал
   threading.Thread(
       target=download_and_send, args=(message, query), daemon=True
   ).start()
