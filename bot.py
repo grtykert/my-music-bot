@@ -21,7 +21,7 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 
 # 2. Настройка бота
-TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
+TOKEN = "8957555829:AAHtDCNwFA2OIP1VQHXPunYXScETR1xM37k"
 bot = telebot.TeleBot(TOKEN)
 
 
@@ -29,20 +29,20 @@ bot = telebot.TeleBot(TOKEN)
 def send_welcome(message):
   bot.reply_to(
       message,
-      "Привет! Напиши название трека или исполнителя, и я найду и скачаю его"
-      " для тебя 🎵",
+      "Привет! Напиши название трека, и я найду его для тебя в VK 🎵",
   )
 
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
   query = message.text
-  bot.reply_to(message, f"Ищу трек: {query} 🔍")
+  bot.reply_to(message, f"Ищу в VK: {query} 🔍")
 
+  # Меняем поиск на vksearch (вместо youtube)
   ydl_opts = {
       "format": "bestaudio/best",
       "outtmpl": "downloads/%(title)s.%(ext)s",
-      "default_search": "ytsearch1:",
+      "default_search": "vksearch1:",
       "postprocessors": [{
           "key": "FFmpegExtractAudio",
           "preferredcodec": "mp3",
