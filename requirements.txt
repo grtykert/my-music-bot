@@ -2,4 +2,3 @@ pyTelegramBotAPI
 yt-dlp
 flask
 ffmpeg-python
-transliterate
