@@ -8,26 +8,27 @@ bot = telebot.TeleBot(API_TOKEN)
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду его 🎵")
+    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду много вариантов 🎵")
 
 @bot.message_handler(func=lambda message: True)
 def search_music(message):
     query = message.text
-    msg = bot.reply_to(message, "🔍 Ищу в интернете...")
+    msg = bot.reply_to(message, "🔍 Ищу много вариантов в интернете...")
     
     try:
-        response = requests.get(f"https://itunes.apple.com/search?term={query}&entity=song&limit=5")
+        # Увеличили лимит с 5 до 15 вариантов
+        response = requests.get(f"https://itunes.apple.com/search?term={query}&entity=song&limit=15")
         data = response.json()
         
         results = data.get("results", [])
         if not results:
-            bot.edit_message_text("❌ Ничего не найдено.", message.chat.id, msg.message_id)
+            bot.initial_message = bot.edit_message_text("❌ Ничего не найдено.", message.chat.id, msg.message_id)
             return
             
-        markup = InlineKeyboardMarkup()
+        markup = InlineKeyboardMarkup(row_width=1)
         for track in results:
-            title = track.get("trackName", "Трек")[:35]
-            artist = track.get("artistName", "Исполнитель")[:25]
+            title = track.get("trackName", "Трек")[:30]
+            artist = track.get("artistName", "Исполнитель")[:20]
             audio_url = track.get("previewUrl")
             
             if audio_url:
@@ -37,7 +38,7 @@ def search_music(message):
             bot.tracks_cache = {}
         bot.tracks_cache[message.chat.id] = results
 
-        bot.edit_message_text("🎧 Выбери трек:", message.chat.id, msg.message_id, reply_markup=markup)
+        bot.edit_message_text("🎧 Выбери вариант из списка ниже:", message.chat.id, msg.message_id, reply_markup=markup)
     except Exception as e:
         print(f"Ошибка поиска: {e}")
         bot.edit_message_text("❌ Ошибка при поиске.", message.chat.id, msg.message_id)
@@ -57,16 +58,14 @@ def callback_send_audio(call):
     title = track.get('trackName', 'Music')
     performer = track.get('artistName', 'Artist')
 
-    bot.answer_callback_query(call.id, "🎶 Отправляю...")
+    bot.answer_callback_query(call.id, "🎶 Отправляю аудио...")
     
     filename = "audio.mp3"
     try:
-        # Скачиваем файл локально с правильным расширением .mp3
         r = requests.get(audio_url)
         with open(filename, "wb") as f:
             f.write(r.content)
 
-        # Отправляем именно как музыкальный файл
         with open(filename, "rb") as f:
             bot.send_audio(
                 call.message.chat.id, 
@@ -75,7 +74,6 @@ def callback_send_audio(call):
                 performer=performer
             )
 
-        # Удаляем файл после отправки
         if os.path.exists(filename):
             os.remove(filename)
             
