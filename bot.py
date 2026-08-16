@@ -1,22 +1,36 @@
-from flask import Flask
+import os
 import threading
 import telebot
-import yt_dlp
+from flask import Flask
+
 app = Flask(__name__)
-@app.route('/')
+
+
+@app.route("/")
 def home():
-   return "Bot is alive!"
+  return "Bot is alive!"
+
+
 def run_web():
-    app.run(host='0.0.0.0', port=10000)
-threading.Thread(target=run_web).daemon = True
+  port = int(os.environ.get("PORT", 10000))
+  app.run(host="0.0.0.0", port=port)
+
+
+threading.Thread(target=run_web, daemon=True).start()
+
 TOKEN = "8957555829:AAHtDCNwFA2OIP1VQHXPunYXscEtRlxM37k"
 bot = telebot.TeleBot(TOKEN)
-@bot.message_handler(commands=['start'])
+
+
+@bot.message_handler(commands=["start"])
 def send_welcome(message):
-    bot.reply_to(message, "Привет! Бот успешно запущен в облаке!")
+  bot.reply_to(message, "Привет! Бот успешно запущен в облаке!")
+
+
 @bot.message_handler(func=lambda message: True)
 def echo_all(message):
-    bot.reply_to(message, f"Эхо: {message.text}")
-bot.infinity_polling()
+  bot.reply_to(message, f"Эхо: {message.text}")
 
+
+bot.infinity_polling()
 
