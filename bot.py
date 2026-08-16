@@ -96,3 +96,29 @@ def callback_send_audio(call):
             os.remove(filename)
 
 bot.infinity_polling()
+
+@bot.message_handler(commands=['donate'])
+def donate_command(message):
+    markup = types.InlineKeyboardMarkup()
+    btn = types.InlineKeyboardButton(text='⭐ Поддержать на 1⭐', pay=True)
+    markup.add(btn)
+    
+    bot.send_invoice(
+        chat_id=message.chat.id,
+        title="Поддержка бота",
+        description="Спасибо за развитие проекта! ⭐",
+        invoice_payload="monthly_donate",
+        provider_token="",  # Обязательно пусто для Telegram Stars!
+        currency="XTR",     # Валюта — звезды
+        prices=[types.LabeledPrice(label="Звезда", amount=1)]  # Сумма в штуках (1 звезда)
+    )
+
+# Обязательный шаг перед оплатой
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def pre_checkout_query(query):
+    bot.answer_pre_checkout_query(query.id, ok=True)
+
+# Что происходит после успешной оплаты
+@bot.message_handler(content_types=['successful_payment'])
+def got_payment(message):
+    bot.reply_to(message, f"🎉 Спасибо большое за поддержку! Получено звезд: {message.successful_payment.total_amount} ⭐")2
