@@ -147,6 +147,45 @@ def handle_message(message):
 
 
 bot.infinity_polling()
+import os
+
+
+# Обработка нажатия на кнопку (скачивание и отправка трека)
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
+def callback_download(call):
+  video_url = call.data.replace("dl_", "")
+  bot.answer_callback_query(call.id, "📥 Скачиваю трек, погоди секунду...")
+
+  ydl_opts = {
+      "format": "bestaudio/best",
+      "postprocessors": [{
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "mp3",
+          "preferredquality": "192",
+      }],
+      "outtmpl": "song_%(id)s.%(ext)s",
+      "quiet": True,
+  }
+
+  try:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+      info = ydl.extract_info(video_url, download=True)
+      filename = ydl.prepare_filename(info)
+      mp3_filename = os.path.splitext(filename)[0] + ".mp3"
+
+    # Отправляем аудиофайл пользователю
+    with open(mp3_filename, "rb") as audio:
+      bot.send_audio(call.message.chat.id, audio)
+
+    # Удаляем файл с сервера, чтобы не забивать память
+    if os.path.exists(mp3_filename):
+      os.remove(mp3_filename)
+
+  except Exception as e:
+    bot.send_message(
+        call.message.chat.id, "❌ Ошибка при скачивании трека. Попробуй другой!"
+    )
+    print(f"Ошибка скачивания: {e}")2
       
 
 
