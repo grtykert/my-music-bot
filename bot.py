@@ -1,4 +1,4 @@
-цimport telebot
+import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 import yt_dlp
 
