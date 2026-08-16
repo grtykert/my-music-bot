@@ -21,7 +21,7 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 
 # 2. Настройка бота
-TOKEN = "8957555829:AAHtDCNwFA2OIP1VQHXPunYXScETR1xM37k"
+TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(TOKEN)
 
 
@@ -30,7 +30,7 @@ def send_welcome(message):
   bot.reply_to(message, "Привет! Напиши название трека, и я найду его 🎵")
 
 
-# Функция для скачивания в фоновом потоке, чтобы бот не зависал
+# Фоновая функция для скачивания, чтобы бот не зависал
 def download_and_send(message, query):
   sent_msg = bot.reply_to(message, f"Ищу трек: {query} 🔍")
 
@@ -40,7 +40,7 @@ def download_and_send(message, query):
       "default_search": "ytsearch1:",
       "user_agent": (
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-          " like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          " like Gecko) Chrome/122.0.0.0 Safari/537.36"
       ),
       "postprocessors": [{
           "key": "FFmpegExtractAudio",
@@ -68,6 +68,21 @@ def download_and_send(message, query):
   except Exception as e:
     bot.edit_message_text(
         f"Не удалось скачать трек. Ошибка: {e}",
+        chat_id=message.chat.id,
+        message_id=sent_msg.message_id,
+    )
+
+
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+  query = message.text
+  # Запускаем обработку в фоне, бот мгновенно готов к новым сообщениям
+  threading.Thread(
+      target=download_and_send, args=(message, query), daemon=True
+  ).start()
+
+
+bot.infinity_polling()
       
 
 
