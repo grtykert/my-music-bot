@@ -1,9 +1,8 @@
-import os
 import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 import yt_dlp
 
-API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
+API_TOKEN = "ТВОЙ_ТОКЕН_БОТА"
 bot = telebot.TeleBot(API_TOKEN)
 
 user_data = {}
@@ -11,54 +10,29 @@ user_data = {}
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
-  bot.reply_to(message, "👋 Привет! Просто напиши название трека 🎵")
-
-
-def get_tracks_keyboard(tracks, page=0):
-  markup = InlineKeyboardMarkup()
-  start_idx = page * 5
-  end_idx = start_idx + 5
-  page_tracks = tracks[start_idx:end_idx]
-
-  for i, track in enumerate(page_tracks):
-    title = track.get("title", "Без названия")[:40]
-    # Сохраняем индекс трека вместо сложной ссылки, чтобы не было ошибок
-    global_index = start_idx + i
-    markup.add(
-        InlineKeyboardButton(
-            text=f"🎵 {title}", callback_data=f"dl_{global_index}"
-        )
-    )
-
-  nav_buttons = []
-  if page > 0:
-    nav_buttons.append(
-        InlineKeyboardButton("⬅️ Назад", callback_data=f"page_{page-1}")
-    )
-  if end_idx < len(tracks):
-    nav_buttons.append(
-        InlineKeyboardButton("Вперед ➡️", callback_data=f"page_{page+1}")
-    )
-  if nav_buttons:
-    markup.row(*nav_buttons)
-  return markup
+  bot.reply_to(
+      message,
+      "👋 Привет! Напиши название трека, и я найду его на YouTube 🎵",
+  )
 
 
 @bot.message_handler(func=lambda message: True)
-def search_message(message):
+def search_music(message):
   query = message.text
-  msg = bot.reply_to(message, "🔍 Ищу варианты...")
+  msg = bot.reply_to(message, "🔍 Ищу на YouTube...")
 
   ydl_opts = {
-      "format": "bestaudio",
+      "format": "bestaudio/best",
       "quiet": True,
       "extract_flat": True,
       "force_generic_extractor": True,
   }
-  with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-    try:
-      info = ydl.extract_info(f"ytsearch10:{query}", download=False)
+
+  try:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+      info = ydl.extract_info(f"ytsearch5:{query}", download=False)
       tracks = info.get("entries", [])
+
       if not tracks:
         bot.edit_message_text(
             "❌ Ничего не найдено.", message.chat.id, msg.message_id
@@ -67,77 +41,48 @@ def search_message(message):
 
       user_data[message.chat.id] = tracks
 
+      markup = InlineKeyboardMarkup()
+      for i, track in enumerate(tracks):
+        title = track.get("title", "Без названия")[:40]
+        markup.add(
+            InlineKeyboardButton(
+                text=f"🎵 {title}", callback_data=f"yt_{i}"
+            )
+        )
+
       bot.edit_message_text(
           "🎧 Выбери трек:",
           message.chat.id,
           msg.message_id,
-          reply_markup=get_tracks_keyboard(tracks, 0),
+          reply_markup=markup,
       )
-    except Exception as e:
-      print(f"Ошибка поиска: {e}")
-      bot.edit_message_text(
-          "❌ Ошибка поиска.", message.chat.id, msg.message_id
-      )
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("page_"))
-def callback_page(call):
-  page = int(call.data.split("_")[1])
-  tracks = user_data.get(call.message.chat.id, [])
-  if not tracks:
-    bot.answer_callback_query(
-        call.id, "Список устарел, отправь запрос заново."
+  except Exception as e:
+    print(f"Ошибка поиска: {e}")
+    bot.edit_message_text(
+        "❌ Ошибка при поиске.", message.chat.id, msg.message_id
     )
-    return
-  bot.edit_message_reply_markup(
-      call.message.chat.id,
-      call.message.message_id,
-      reply_markup=get_tracks_keyboard(tracks, page),
-  )
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
-def callback_download(call):
-  index = int(call.data.replace("dl_", ""))
+@bot.callback_query_handler(func=lambda call: call.data.startswith("yt_"))
+def callback_send_track(call):
+  index = int(call.data.replace("yt_", ""))
   tracks = user_data.get(call.message.chat.id, [])
 
   if not tracks or index >= len(tracks):
-    bot.answer_callback_query(call.id, "❌ Трек не найден, попробуй снова.")
+    bot.answer_callback_query(call.id, "❌ Список устарел, введи запрос заново.")
     return
 
   track = tracks[index]
   video_url = track.get("url") or f"https://youtu.be/{track.get('id')}"
+  title = track.get("title", "Аудиозапись")
 
-  bot.answer_callback_query(call.id, "📥 Скачиваю...")
+  bot.answer_callback_query(call.id, "🎶 Отправляю ссылку...")
 
-  ydl_opts = {
-      "format": "bestaudio/best",
-      "postprocessors": [{
-          "key": "FFmpegExtractAudio",
-          "preferredcodec": "mp3",
-          "preferredquality": "192",
-      }],
-      "outtmpl": "song_%(id)s.%(ext)s",
-      "quiet": True,
-  }
-
-  try:
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-      info = ydl.extract_info(video_url, download=True)
-      filename = ydl.prepare_filename(info)
-      mp3_filename = os.path.splitext(filename)[0] + ".mp3"
-
-    with open(mp3_filename, "rb") as f:
-      bot.send_audio(call.message.chat.id, f)
-
-    if os.path.exists(mp3_filename):
-      os.remove(mp3_filename)
-  except Exception as e:
-    print(f"Ошибка загрузки: {e}")
-    bot.send_message(
-        call.message.chat.id,
-        "❌ Не удалось скачать. Попробуй другой вариант.",
-    )
+  # Отправляем карточку с треком и прямой ссылкой на YouTube,
+  # которую Telegram сам превращает в плеер для прослушивания
+  bot.send_message(
+      call.message.chat.id, f"🎵 **{title}**\n🔗 Ссылка: {video_url}", parse_mode="Markdown"
+  )
 
 
 bot.infinity_polling()
