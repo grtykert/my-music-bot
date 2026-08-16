@@ -16,7 +16,6 @@ def search_music(message):
     msg = bot.reply_to(message, "🔍 Ищу полные треки в SoundCloud...")
     
     try:
-        # Используем публичный поиск SoundCloud через API-шлюз
         r = requests.get(f"https://api-v2.soundcloud.com/search/tracks?q={query}&client_id=i15yYToGBsvhmSs7dbVyXYJJTkgbxmmg&limit=8")
         data = r.json()
         tracks = data.get("collection", [])
@@ -29,7 +28,6 @@ def search_music(message):
         valid_tracks = []
         
         for track in tracks:
-            # Проверяем, есть ли прямая ссылка на потоковое аудио
             stream_url = track.get("media", {}).get("transcodings", [{}])[0].get("url")
             if stream_url:
                 title = track.get("title", "Трек")[:30]
@@ -71,7 +69,6 @@ def callback_send_audio(call):
 
     filename = "track.mp3"
     try:
-        # Получаем реальную ссылку на аудиофайл через клиентский ID SoundCloud
         stream_meta = requests.get(f"{track['uri']}?client_id=i15yYToGBsvhmSs7dbVyXYJJTkgbxmmg").json()
         mp3_url = stream_meta.get("url")
         
@@ -101,4 +98,3 @@ def callback_send_audio(call):
             os.remove(filename)
 
 bot.infinity_polling()
-
