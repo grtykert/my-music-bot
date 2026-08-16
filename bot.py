@@ -185,6 +185,72 @@ def callback_download(call):
         call.message.chat.id, "❌ Ошибка при скачивании трека. Попробуй другой!"
     )
     print(f"Ошибка скачивания: {e}")
+    from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+
+# Перехватываем обычное сообщение, чтобы выдать кнопки с выбором треков
+@bot.message_handler(func=lambda message: True)
+def handle_message_with_buttons(message):
+  query = message.text
+  msg = bot.reply_to(message, "🔍 Ищу варианты...")
+
+  ydl_opts = {"extract_flat": True, "default_search": "ytsearch5", "quiet": True}
+
+  with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    try:
+      result = ydl.extract_info(query, download=False)
+      tracks = result.get("entries", [])
+    except Exception:
+      tracks = []
+
+  if not tracks:
+    bot.edit_message_text(
+        "❌ Ничего не найдено.", message.chat.id, msg.message_id
+    )
+    return
+
+  markup = InlineKeyboardMarkup()
+  for track in tracks:
+    title = track.get("title", "Без названия")[:40]
+    video_url = track.get("url")
+    markup.add(
+        InlineKeyboardButton(text=f"🎵 {title}", callback_data=f"dl_{video_url}")
+    )
+
+  bot.edit_message_text(
+      "🎧 Выбери трек для скачивания:",
+      message.chat.id,
+      msg.message_id,
+      reply_markup=markup,
+  )
+
+
+# Обработка нажатия на кнопку (скачивание выбранного трека)
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
+def callback_download_track(call):
+  video_url = call.data.replace("dl_", "")
+  bot.answer_callback_query(call.id, "📥 Скачиваю...")
+
+  ydl_opts = {
+      "format": "bestaudio/best",
+      "postprocessors": [{
+          "key": "FFmpegExtractAudio",
+          "preferredcodec": "mp3",
+          "preferredquality": "192",
+      }],
+      "outtmpl": "song.%(ext)s",
+      "quiet": True,
+  }
+
+  try:
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+      ydl.download([video_url])
+
+    with open("song.mp3", "rb") as audio:
+      bot.send_audio(call.message.chat.id, audio)
+    os.remove("song.mp3")
+  except Exception as e:
+    bot.send_message(call.message.chat.id, "❌ Ошибка скачивания.")
       
 
 
