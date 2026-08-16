@@ -1,6 +1,6 @@
 import os
 import telebot
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 import requests
 
 API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
@@ -10,14 +10,43 @@ user_ids = set()
 
 @bot.message_handler(commands=['stats'])
 def show_stats(message):
-    bot.reply_to(message, f"📊 Всего пользователей в боте: {len(user_ids)}")
+    bot.reply_to(message, f"📊 Всего уникальных пользователей в боте: {len(user_ids)}")
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    user_ids.add(message.from_user.id)
     bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду его. Дам послушать превью и дам ссылку на полную версию! 🎵")
+
+@bot.message_handler(commands=['donate'])
+def donate_command(message):
+    user_ids.add(message.from_user.id)
+    markup = InlineKeyboardMarkup()
+    btn = InlineKeyboardButton(text='⭐ Поддержать на 1⭐', pay=True)
+    markup.add(btn)
+    
+    bot.send_invoice(
+        chat_id=message.chat.id,
+        title="Поддержка бота",
+        description="Спасибо за развитие проекта! ⭐",
+        invoice_payload="monthly_donate",
+        provider_token="",  # Обязательно пусто для Telegram Stars!
+        currency="XTR",     # Валюта — звезды
+        prices=[LabeledPrice(label="Звезда", amount=1)]  # Сумма в штуках (1 звезда)
+    )
+
+# Обязательный шаг перед оплатой
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def pre_checkout_query(query):
+    bot.answer_pre_checkout_query(query.id, ok=True)
+
+# Что происходит после успешной оплаты
+@bot.message_handler(content_types=['successful_payment'])
+def got_payment(message):
+    bot.reply_to(message, f"🎉 Спасибо большое за поддержку! Получено звезд: {message.successful_payment.total_amount} ⭐")
 
 @bot.message_handler(func=lambda message: True)
 def search_music(message):
+    user_ids.add(message.from_user.id)
     query = message.text
     msg = bot.reply_to(message, "🔍 Ищу треки...")
     
@@ -73,7 +102,7 @@ def callback_send_audio(call):
         with open(filename, "wb") as f:
             f.write(r.content)
 
-        # Создаем клавиатуру с сылками на полные сервисы
+        # Создаем клавиатуру с ссылками на полные сервисы
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton(text="🌐 Слушать полную версию (Apple Music)", url=track_url))
 
@@ -95,30 +124,6 @@ def callback_send_audio(call):
         if os.path.exists(filename):
             os.remove(filename)
 
+# Запуск бота всегда должен быть в самом конце файла!
 bot.infinity_polling()
 
-@bot.message_handler(commands=['donate'])
-def donate_command(message):
-    markup = types.InlineKeyboardMarkup()
-    btn = types.InlineKeyboardButton(text='⭐ Поддержать на 1⭐', pay=True)
-    markup.add(btn)
-    
-    bot.send_invoice(
-        chat_id=message.chat.id,
-        title="Поддержка бота",
-        description="Спасибо за развитие проекта! ⭐",
-        invoice_payload="monthly_donate",
-        provider_token="",  # Обязательно пусто для Telegram Stars!
-        currency="XTR",     # Валюта — звезды
-        prices=[types.LabeledPrice(label="Звезда", amount=1)]  # Сумма в штуках (1 звезда)
-    )
-
-# Обязательный шаг перед оплатой
-@bot.pre_checkout_query_handler(func=lambda query: True)
-def pre_checkout_query(query):
-    bot.answer_pre_checkout_query(query.id, ok=True)
-
-# Что происходит после успешной оплаты
-@bot.message_handler(content_types=['successful_payment'])
-def got_payment(message):
-    bot.reply_to(message, f"🎉 Спасибо большое за поддержку! Получено звезд: {message.successful_payment.total_amount} ⭐")
