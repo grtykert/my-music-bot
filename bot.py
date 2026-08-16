@@ -3,7 +3,6 @@ import threading
 import telebot
 from flask import Flask
 import yt_dlp
-from transliterate import translit
 
 app = Flask(__name__)
 
