@@ -185,7 +185,7 @@ def callback_download(call):
     bot.send_message(
         call.message.chat.id, "❌ Ошибка при скачивании трека. Попробуй другой!"
     )
-    print(f"Ошибка скачивания: {e}")2
+    print(f"Ошибка скачивания: {e}")
       
 
 
