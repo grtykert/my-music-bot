@@ -1,3 +1,4 @@
+import os
 import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 import requests
@@ -53,19 +54,36 @@ def callback_send_audio(call):
         return
 
     audio_url = track.get("previewUrl")
+    title = track.get('trackName', 'Music')
+    performer = track.get('artistName', 'Artist')
 
     bot.answer_callback_query(call.id, "🎶 Отправляю...")
     
+    filename = "audio.mp3"
     try:
-        bot.send_audio(
-            call.message.chat.id, 
-            audio_url, 
-            title=track.get('trackName', 'Music'), 
-            performer=track.get('artistName', 'Artist')
-        )
+        # Скачиваем файл локально с правильным расширением .mp3
+        r = requests.get(audio_url)
+        with open(filename, "wb") as f:
+            f.write(r.content)
+
+        # Отправляем именно как музыкальный файл
+        with open(filename, "rb") as f:
+            bot.send_audio(
+                call.message.chat.id, 
+                f, 
+                title=title, 
+                performer=performer
+            )
+
+        # Удаляем файл после отправки
+        if os.path.exists(filename):
+            os.remove(filename)
+            
     except Exception as e:
         print(f"Ошибка отправки: {e}")
-        bot.send_message(call.message.chat.id, "❌ Не удалось отправить как аудио. Попробуй другой трек.")
+        bot.send_message(call.message.chat.id, "❌ Не удалось отправить аудио.")
+        if os.path.exists(filename):
+            os.remove(filename)
 
 bot.infinity_polling()
 
