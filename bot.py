@@ -39,11 +39,10 @@ def handle_message(message):
   query = message.text
   bot.reply_to(message, f"Ищу трек: {query} 🔍")
 
-  # Настройки поиска и скачивания через yt-dlp по названию
   ydl_opts = {
       "format": "bestaudio/best",
       "outtmpl": "downloads/%(title)s.%(ext)s",
-      "default_search": "ytsearch1:",  две строчки включают поиск по названию (берет 1-й результат)
+      "default_search": "ytsearch1:",
       "postprocessors": [{
           "key": "FFmpegExtractAudio",
           "preferredcodec": "mp3",
@@ -53,10 +52,8 @@ def handle_message(message):
 
   try:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-      # Передаем поисковый запрос
       info = ydl.extract_info(query, download=True)
 
-      # Если поиск шел через ytsearch, результат возвращается в виде словаря с ключом 'entries'
       if "entries" in info:
         info = info["entries"][0]
 
@@ -65,10 +62,8 @@ def handle_message(message):
       mp3_file = base + ".mp3"
 
     with open(mp3_file, "rb") as audio:
-      # Отправляем именно как музыкальный плеер (аудио)
       bot.send_audio(message.chat.id, audio)
 
-    # Удаляем файл с сервера
     os.remove(mp3_file)
 
   except Exception as e:
