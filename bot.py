@@ -20,7 +20,7 @@ def search_music(message):
   msg = bot.reply_to(message, "🔍 Ищу аудио...")
 
   ydl_opts = {
-      "format": "bestaudio/best",
+      "format": "bestaudio",
       "quiet": True,
       "extract_flat": True,
       "force_generic_extractor": True,
@@ -49,7 +49,7 @@ def search_music(message):
         )
 
       bot.edit_message_text(
-          "🎧 Выбери трек для скачивания:",
+          "🎧 Выбери трек для загрузки:",
           message.chat.id,
           msg.message_id,
           reply_markup=markup,
@@ -76,34 +76,32 @@ def callback_send_audio(call):
 
   bot.answer_callback_query(call.id, "📥 Загружаю аудио...")
 
-  # Настройки скачивания именно в mp3 без лишних конвертаций
+  # Скачиваем сразу в готовом формате без конвертации через ffmpeg
   ydl_opts = {
-      "format": "bestaudio",
-      "postprocessors": [{
-          "key": "FFmpegExtractAudio",
-          "preferredcodec": "mp3",
-          "preferredquality": "128",
-      }],
-      "outtmpl": "audio_%(id)s.%(ext)s",
+      "format": "bestaudio[ext=m4a]/bestaudio/best",
+      "outtmpl": "audio.%(ext)s",
       "quiet": True,
   }
 
   try:
+    filename = "audio.m4a"
+    if os.path.exists(filename):
+      os.remove(filename)
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
       info = ydl.extract_info(video_url, download=True)
       filename = ydl.prepare_filename(info)
-      mp3_filename = os.path.splitext(filename)[0] + ".mp3"
 
-    with open(mp3_filename, "rb") as f:
+    with open(filename, "rb") as f:
       bot.send_audio(call.message.chat.id, f, title=title[:50])
 
-    if os.path.exists(mp3_filename):
-      os.remove(mp3_filename)
+    if os.path.exists(filename):
+      os.remove(filename)
   except Exception as e:
     print(f"Ошибка загрузки аудио: {e}")
     bot.send_message(
         call.message.chat.id,
-        "❌ Не удалось отправить аудио. Попробуй другой трек.",
+        "❌ Не удалось отправить файл. Попробуй другой трек.",
     )
 
 
