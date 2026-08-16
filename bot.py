@@ -16,7 +16,10 @@ def search_music(message):
     msg = bot.reply_to(message, "🔍 Ищу полные треки в SoundCloud...")
     
     try:
-        r = requests.get(f"https://api-v2.soundcloud.com/search/tracks?q={query}&client_id=i15yYToGBsvhmSs7dbVyXYJJTkgbxmmg&limit=8")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        r = requests.get(f"https://api-v2.soundcloud.com/search/tracks?q={query}&client_id=i15yYToGBsvhmSs7dbVyXYJJTkgbxmmg&limit=8", headers=headers)
         data = r.json()
         tracks = data.get("collection", [])
         
@@ -69,14 +72,17 @@ def callback_send_audio(call):
 
     filename = "track.mp3"
     try:
-        stream_meta = requests.get(f"{track['uri']}?client_id=i15yYToGBsvhmSs7dbVyXYJJTkgbxmmg").json()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        stream_meta = requests.get(f"{track['uri']}?client_id=i15yYToGBsvhmSs7dbVyXYJJTkgbxmmg", headers=headers).json()
         mp3_url = stream_meta.get("url")
         
         if not mp3_url:
             bot.send_message(call.message.chat.id, "❌ Не удалось получить ссылку на поток.")
             return
 
-        r = requests.get(mp3_url)
+        r = requests.get(mp3_url, headers=headers)
         with open(filename, "wb") as f:
             f.write(r.content)
 
