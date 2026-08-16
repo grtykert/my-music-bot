@@ -27,17 +27,18 @@ bot = telebot.TeleBot(TOKEN)
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
-  bot.reply_to(message, "Привет! Напиши название трека, и я найду его в VK 🎵")
+  bot.reply_to(
+      message,
+      "Привет! Отправь мне ссылку на видео/трек, и я скачаю его в MP3 🎵",
+  )
 
 
-# Фоновая функция для поиска и скачивания из VK
-def download_and_send(message, query):
-  sent_msg = bot.reply_to(message, f"Ищу в VK: {query} 🔍")
+def download_and_send(message, url):
+  sent_msg = bot.reply_to(message, "Скачиваю трек по ссылке... ⏳")
 
   ydl_opts = {
       "format": "bestaudio/best",
       "outtmpl": "downloads/%(title)s.%(ext)s",
-      "default_search": "vksearch1:",  # Жесткий поиск по VK
       "postprocessors": [{
           "key": "FFmpegExtractAudio",
           "preferredcodec": "mp3",
@@ -47,10 +48,7 @@ def download_and_send(message, query):
 
   try:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-      info = ydl.extract_info(query, download=True)
-      if "entries" in info:
-        info = info["entries"][0]
-
+      info = ydl.extract_info(url, download=True)
       filename = ydl.prepare_filename(info)
       base, _ = os.path.splitext(filename)
       mp3_file = base + ".mp3"
@@ -63,7 +61,7 @@ def download_and_send(message, query):
 
   except Exception as e:
     bot.edit_message_text(
-        f"Не удалось найти трек в VK. Ошибка: {e}",
+        f"Не удалось скачать по ссылке. Ошибка: {e}",
         chat_id=message.chat.id,
         message_id=sent_msg.message_id,
     )
@@ -71,10 +69,9 @@ def download_and_send(message, query):
 
 @bot.message_handler(func=lambda message: True)
 def handle_message(message):
-  query = message.text
-  # Запускаем в фоновом потоке, чтобы бот не зависал
+  url = message.text
   threading.Thread(
-      target=download_and_send, args=(message, query), daemon=True
+      target=download_and_send, args=(message, url), daemon=True
   ).start()
 
 
