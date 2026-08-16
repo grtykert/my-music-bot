@@ -15,31 +15,39 @@ def show_stats(message):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_ids.add(message.from_user.id)
-    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду его. Дам послушать превью и дам ссылку на полную версию! 🎵")
+    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду его. Дам послушать превью и дам ссылку на полную версию! 🎵\n\n⭐ Поддержать проект: /donate")
 
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
     user_ids.add(message.from_user.id)
-    markup = InlineKeyboardMarkup()
-    btn = InlineKeyboardButton(text='⭐ Поддержать на 1⭐', pay=True)
-    markup.add(btn)
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton(text='⭐ 1 Звезда', callback_data='donate_1'),
+        InlineKeyboardButton(text='⭐ 5 Звезд', callback_data='donate_5'),
+        InlineKeyboardButton(text='⭐ 10 Звезд', callback_data='donate_10'),
+        InlineKeyboardButton(text='⭐ 25 Звезд', callback_data='donate_25')
+    )
+    bot.reply_to(message, "💖 Выбери сумму поддержки:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('donate_'))
+def process_donate_selection(call):
+    stars_count = int(call.data.replace('donate_', ''))
+    bot.answer_callback_query(call.id)
     
     bot.send_invoice(
-        chat_id=message.chat.id,
+        chat_id=call.message.chat.id,
         title="Поддержка бота",
-        description="Спасибо за развитие проекта! ⭐",
-        invoice_payload="monthly_donate",
-        provider_token="",  # Обязательно пусто для Telegram Stars!
-        currency="XTR",     # Валюта — звезды
-        prices=[LabeledPrice(label="Звезда", amount=1)]  # Сумма в штуках (1 звезда)
+        description=f"Спасибо за развитие проекта! Поддержка на {stars_count} ⭐",
+        invoice_payload=f"donate_{stars_count}_stars",
+        provider_token="",  
+        currency="XTR",     
+        prices=[LabeledPrice(label=f"{stars_count} Звезд(ы)", amount=stars_count)]
     )
 
-# Обязательный шаг перед оплатой
 @bot.pre_checkout_query_handler(func=lambda query: True)
 def pre_checkout_query(query):
     bot.answer_pre_checkout_query(query.id, ok=True)
 
-# Что происходит после успешной оплаты
 @bot.message_handler(content_types=['successful_payment'])
 def got_payment(message):
     bot.reply_to(message, f"🎉 Спасибо большое за поддержку! Получено звезд: {message.successful_payment.total_amount} ⭐")
@@ -65,7 +73,6 @@ def search_music(message):
             artist = track.get("artistName", "Исполнитель")[:20]
             track_id = track.get("trackId")
             
-            # Кнопка для отправки 30 секунд в чат
             btn_play = InlineKeyboardButton(text=f"🎧 Демо: {artist} - {title}", callback_data=f"play_{track_id}")
             markup.add(btn_play)
         
@@ -102,7 +109,6 @@ def callback_send_audio(call):
         with open(filename, "wb") as f:
             f.write(r.content)
 
-        # Создаем клавиатуру с ссылками на полные сервисы
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton(text="🌐 Слушать полную версию (Apple Music)", url=track_url))
 
@@ -124,6 +130,6 @@ def callback_send_audio(call):
         if os.path.exists(filename):
             os.remove(filename)
 
-# Запуск бота всегда должен быть в самом конце файла!
 bot.infinity_polling()
+2
 
