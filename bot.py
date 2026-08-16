@@ -8,12 +8,12 @@ bot = telebot.TeleBot(API_TOKEN)
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду полные версии из SoundCloud 🎵")
+    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду его и пришлю аудиофайлом 🎵")
 
 @bot.message_handler(func=lambda message: True)
 def search_music(message):
     query = message.text
-    msg = bot.reply_to(message, "🔍 Ищу полные треки в SoundCloud...")
+    msg = bot.reply_to(message, "🔍 Ищу трек...")
     
     try:
         headers = {
@@ -53,7 +53,7 @@ def search_music(message):
             bot.sc_cache = {}
         bot.sc_cache[message.chat.id] = valid_tracks
 
-        bot.edit_message_text("🎧 Выбери трек для скачивания полной версии:", message.chat.id, msg.message_id, reply_markup=markup)
+        bot.edit_message_text("🎧 Выбери трек для загрузки:", message.chat.id, msg.message_id, reply_markup=markup)
     except Exception as e:
         print(f"Ошибка поиска: {e}")
         bot.edit_message_text("❌ Ошибка при поиске треков.", message.chat.id, msg.message_id)
@@ -68,9 +68,9 @@ def callback_send_audio(call):
         return
 
     track = tracks[track_index]
-    bot.answer_callback_query(call.id, "📥 Скачиваю полную версию...")
+    bot.answer_callback_query(call.id, "📥 Скачиваю трек...")
 
-    filename = "track.mp3"
+    filename = f"track_{call.message.chat.id}.mp3"
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
