@@ -26,55 +26,58 @@ tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
 
-# Статистика
-bot_start_time = time.time()
-total_downloads = 0
-
-# Работа с базой пользователей (храним ID в файле, чтобы не терялись)
+# Файлы для сохранения данных
 USERS_FILE = "users.json"
+STATS_FILE = "stats.json"
 
-def load_users():
-    if os.path.exists(USERS_FILE):
+def load_json(filename, default_value):
+    if os.path.exists(filename):
         try:
-            with open(USERS_FILE, "r") as f:
-                return set(json.load(f))
+            with open(filename, "r") as f:
+                return json.load(f)
         except:
             pass
-    return set()
+    return default_value
 
-def save_users(users_set):
+def save_json(filename, data):
     try:
-        with open(USERS_FILE, "w") as f:
-            json.dump(list(users_set), f)
+        with open(filename, "w") as f:
+            json.dump(data, f)
     except:
         pass
 
-active_users = load_users()
+# Загружаем постоянные данные
+active_users = set(load_json(USERS_FILE, []))
+
+# Время запуска (сбрасывается при перезагрузке)
+bot_start_time = time.time()
+
+# Загружаем статистику скачиваний из файла
+stats_data = load_json(STATS_FILE, {"total_downloads": 0})
+
+def register_user(chat_id):
+    if chat_id not in active_users:
+        active_users.add(chat_id)
+        save_json(USERS_FILE, list(active_users))
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     chat_id = message.chat.id
-    if chat_id not in active_users:
-        active_users.add(chat_id)
-        save_users(active_users)
-
+    register_user(chat_id)
     bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n💰 Поддержать разработчика: /donate\n📊 Статистика бота: /stats")
 
-# Отслеживание блокировки бота пользователем
 @bot.my_chat_member_handler()
 def handle_chat_member(message):
     chat_id = message.chat.id
     new_status = message.new_chat_member.status
     if new_status in ['kicked', 'left']:
-        # Пользователь заблокировал бота или вышел
         if chat_id in active_users:
             active_users.remove(chat_id)
-            save_users(active_users)
+            save_json(USERS_FILE, list(active_users))
     elif new_status == 'member':
-        # Пользователь разблокировал или зашел
         if chat_id not in active_users:
             active_users.add(chat_id)
-            save_users(active_users)
+            save_json(USERS_FILE, list(active_users))
 
 # --- КОМАНДА СТАТИСТИКИ ---
 @bot.message_handler(commands=['stats'])
@@ -87,7 +90,7 @@ def stats_command(message):
         f"📊 **Статистика бота:**\n\n"
         f"👥 Активных пользователей: `{len(active_users)}`\n"
         f"⏱ Время работы: `{hours}ч {minutes}м`\n"
-        f"📥 Скачано треков: `{total_downloads}`\n"
+        f"📥 Скачано треков: `{stats_data['total_downloads']}`\n"
         f"🟢 Статус: `Онлайн (Render)`"
     )
     bot.reply_to(message, stats_text, parse_mode="Markdown")
@@ -96,6 +99,7 @@ def stats_command(message):
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
     chat_id = message.chat.id
+    register_user(chat_id)
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton(text="⭐ 5 звёзд", callback_data="donate_5"),
@@ -153,6 +157,7 @@ def got_payment(message):
 @bot.message_handler(func=lambda message: not message.text.startswith('/'))
 def text_handler(message):
     chat_id = message.chat.id
+    register_user(chat_id)
     
     if chat_id in waiting_for_custom_stars:
         waiting_for_custom_stars.remove(chat_id)
@@ -247,7 +252,6 @@ def handle_navigation(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def callback_download_track(call):
-    global total_downloads
     index = int(call.data.replace("dl_", ""))
     user_tracks = tracks_cache.get(call.message.chat.id, [])
     if index >= len(user_tracks):
@@ -294,7 +298,9 @@ def callback_download_track(call):
             if thumb_file:
                 thumb_file.close()
 
-        total_downloads += 1
+        stats_data["total_downloads"] += 1
+        save_json(STATS_FILE, stats_data)
+        
         bot.delete_message(call.message.chat.id, msg.message_id)
     except Exception as e:
         print(f"Ошибка скачивания: {e}")
@@ -309,6 +315,7 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+    
     
         
             
