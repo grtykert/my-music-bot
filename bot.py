@@ -76,17 +76,18 @@ def got_payment(message):
 def search_music(message):
     user_ids.add(message.from_user.id)
     query = message.text
-    msg = bot.reply_to(message, "🔍 Ищу варианты треков...")
+    msg = bot.reply_to(message, "🔍 Ищу варианты треков на YouTube...")
     
     ydl_opts = {
         "extract_flat": True, 
-        "default_search": "ytsearch5", # ТЕПЕРЬ ИЩЕМ В YOUTUBE
         "quiet": True
     }
 
     try:
+        # Жестко приказываем искать 5 видео именно через поисковик YouTube
+        search_query = f"ytsearch5:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            result = ydl.extract_info(query, download=False)
+            result = ydl.extract_info(search_query, download=False)
             tracks = result.get("entries", [])
             
         if not tracks:
@@ -152,7 +153,10 @@ def callback_download_track(call):
         print(f"Ошибка скачивания: {e}")
         bot.edit_message_text("❌ Не удалось скачать трек.", call.message.chat.id, msg.message_id)
 
+# Эта строчка сбрасывает конфликты при перезапуске сервера
+bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+
 
     
 
