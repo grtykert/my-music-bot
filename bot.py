@@ -5,116 +5,103 @@ import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ---
+# --- ВЕБ-СЕРВЕР (Для Render) ---
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header('Content-type', 'text/html')
         self.end_headers()
-        self.wfile.write(b"Bot is active and running!")
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
-    server_address = ('0.0.0.0', port)
-    httpd = HTTPServer(server_address, DummyHandler)
-    httpd.serve_forever()
+    HTTPServer(('0.0.0.0', port), DummyHandler).serve_forever()
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
-# ----------------------------
 
+# --- БОТ ---
 API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(API_TOKEN)
-
-user_ids = set()
 tracks_cache = {}
-
-@bot.message_handler(commands=['stats'])
-def show_stats(message):
-    bot.reply_to(message, f"📊 Всего уникальных пользователей в боте: {len(user_ids)}")
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    user_ids.add(message.from_user.id)
-    bot.reply_to(message, "👋 Привет! Напиши название трека, я найду 10 вариантов, и ты сможешь скачать любой в один клик! 🎵\n\n⭐ Поддержать проект: /donate")
-
-@bot.message_handler(commands=['donate'])
-def donate_command(message):
-    user_ids.add(message.from_user.id)
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton(text='⭐ 1 Звезда', callback_data='donate_1'),
-        InlineKeyboardButton(text='⭐ 5 Звезд', callback_data='donate_5'),
-        InlineKeyboardButton(text='⭐ 10 Звезд', callback_data='donate_10'),
-        InlineKeyboardButton(text='⭐ 25 Звезд', callback_data='donate_25')
-    )
-    bot.reply_to(message, "💖 Выбери сумму поддержки:", reply_markup=markup)
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('donate_'))
-def process_donate_selection(call):
-    stars_count = int(call.data.replace('donate_', ''))
-    bot.answer_callback_query(call.id)
-    bot.send_invoice(
-        chat_id=call.message.chat.id,
-        title="Поддержка бота",
-        description=f"Спасибо за развитие проекта! Поддержка на {stars_count} ⭐",
-        invoice_payload=f"donate_{stars_count}_stars",
-        provider_token="",  
-        currency="XTR",     
-        prices=[LabeledPrice(label=f"{stars_count} Звезд(ы)", amount=stars_count)]
-    )
-
-@bot.pre_checkout_query_handler(func=lambda query: True)
-def pre_checkout_query(query):
-    bot.answer_pre_checkout_query(query.id, ok=True)
-
-@bot.message_handler(content_types=['successful_payment'])
-def got_payment(message):
-    bot.reply_to(message, f"🎉 Спасибо большое за поддержку! Получено звезд: {message.successful_payment.total_amount} ⭐")
+    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Теперь можно листать страницы и включать фильтры Speed Up/Slowed! 🎵")
 
 @bot.message_handler(func=lambda message: True)
-def search_music(message):
-    user_ids.add(message.from_user.id)
-    query = message.text
-    msg = bot.reply_to(message, "🔍 Ищу 10 вариантов трека в SoundCloud...")
+def search_music_handler(message):
+    search_music(message, query=message.text, page=1)
+
+def search_music(message, query, page=1):
+    # Если это сообщение, редактируем его, если коллбэк - редактируем сообщение из него
+    message_id = message.message_id if hasattr(message, 'message_id') else message.message.message_id
+    chat_id = message.chat.id
     
-    ydl_opts = {"extract_flat": True, "quiet": True}
+    msg = bot.edit_message_text if hasattr(message, 'message_id') else bot.send_message
+    if hasattr(message, 'message_id'):
+        bot.edit_message_text("🔍 Ищу варианты...", chat_id, message_id)
+    else:
+        msg = bot.reply_to(message, "🔍 Ищу варианты...")
+        message_id = msg.message_id
 
     try:
-        search_query = f"scsearch10:{query}"
+        ydl_opts = {"extract_flat": True, "quiet": True}
+        search_query = f"scsearch20:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(search_query, download=False)
-            tracks = result.get("entries", [])
+            all_tracks = result.get("entries", [])
+            
+        start = (page - 1) * 10
+        tracks = all_tracks[start:start + 10]
             
         if not tracks:
-            bot.edit_message_text("❌ Ничего не найдено.", message.chat.id, msg.message_id)
+            bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, message_id)
             return
             
-        tracks_cache[message.chat.id] = tracks
+        tracks_cache[chat_id] = tracks
         markup = InlineKeyboardMarkup(row_width=1)
         
         for i, track in enumerate(tracks):
             title = track.get("title", "Без названия")[:35]
             markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"dl_{i}"))
+        
+        # Навигация
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}_{query}"))
+        nav_buttons.append(InlineKeyboardButton(text="🔄 Ещё", callback_data=f"page_{page+1}_{query}"))
+        
+        markup.row(*nav_buttons)
+        # Фильтры
+        markup.row(
+            InlineKeyboardButton(text="⚡ Speed Up", callback_data=f"filter_{query}_speedup"),
+            InlineKeyboardButton(text="🐢 Slowed", callback_data=f"filter_{query}_slowed")
+        )
 
-        bot.edit_message_text("🎧 Выбери трек для скачивания:", message.chat.id, msg.message_id, reply_markup=markup)
+        bot.edit_message_text(f"🎧 Страница {page}. Запрос: {query}", chat_id, message_id, reply_markup=markup)
     except Exception as e:
-        print(f"Ошибка поиска: {e}")
-        bot.edit_message_text("❌ Ошибка при поиске треков.", message.chat.id, msg.message_id)
+        bot.edit_message_text("❌ Ошибка поиска.", chat_id, message_id)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "filter_")))
+def handle_navigation(call):
+    data = call.data.split("_")
+    if data[0] == "page":
+        page, query = int(data[1]), "_".join(data[2:])
+        search_music(call, query=query, page=page)
+    elif data[0] == "filter":
+        query, filter_type = data[1], data[2]
+        new_query = f"{query} {filter_type}"
+        search_music(call, query=new_query, page=1)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def callback_download_track(call):
     index = int(call.data.replace("dl_", ""))
-
     user_tracks = tracks_cache.get(call.message.chat.id, [])
     if index >= len(user_tracks):
-        bot.answer_callback_query(call.id, "❌ Список устарел, отправь запрос заново.")
+        bot.answer_callback_query(call.id, "❌ Список устарел.")
         return
 
     track = user_tracks[index]
-    video_url = track.get("url")
-    
     bot.answer_callback_query(call.id, "📥 Скачиваю...")
-    msg = bot.send_message(call.message.chat.id, "⏳ Загружаю трек, подожди пару секунд...", parse_mode="Markdown")
+    msg = bot.send_message(call.message.chat.id, "⏳ Подожди, конвертирую...")
 
     audio_filename = None
     try:
@@ -122,37 +109,24 @@ def callback_download_track(call):
             "format": "bestaudio/best",
             "outtmpl": f"song_{call.message.chat.id}_%(id)s.%(ext)s",
             "quiet": True,
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }]
+            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
         }
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(video_url, download=True)
+            info = ydl.extract_info(track['url'], download=True)
             filename = ydl.prepare_filename(info)
             audio_filename = os.path.splitext(filename)[0] + ".mp3"
             
-        title = info.get('title', 'Music')
-        uploader = info.get('uploader', 'Artist')
-
         with open(audio_filename, "rb") as audio:
-            bot.send_audio(call.message.chat.id, audio, title=title, performer=uploader)
-
+            bot.send_audio(call.message.chat.id, audio, title=info.get('title'), performer=info.get('uploader'))
         bot.delete_message(call.message.chat.id, msg.message_id)
-
-    except Exception as e:
-        print(f"Ошибка скачивания: {e}")
-        bot.edit_message_text("❌ Не удалось скачать этот трек.", call.message.chat.id, msg.message_id)
-
+    except:
+        bot.edit_message_text("❌ Не удалось скачать.", call.message.chat.id, msg.message_id)
     finally:
         if audio_filename and os.path.exists(audio_filename):
-            try:
-                os.remove(audio_filename)
-            except:
-                pass
+            os.remove(audio_filename)
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+        
+        
 
