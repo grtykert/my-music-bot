@@ -35,7 +35,7 @@ def show_stats(message):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_ids.add(message.from_user.id)
-    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду его полный вариант! 🎵\n\n⭐ Поддержать проект: /donate")
+    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду его! 🎵\n\n⭐ Поддержать проект: /donate")
 
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
@@ -75,12 +75,13 @@ def got_payment(message):
 def search_music(message):
     user_ids.add(message.from_user.id)
     query = message.text
-    msg = bot.reply_to(message, "🔍 Ищу варианты треков на YouTube...")
+    msg = bot.reply_to(message, "🔍 Ищу треки в SoundCloud...")
     
     ydl_opts = {"extract_flat": True, "quiet": True}
 
     try:
-        search_query = f"ytsearch5:{query}"
+        # Ищем через SoundCloud, он не блокирует сервера
+        search_query = f"scsearch5:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(search_query, download=False)
             tracks = result.get("entries", [])
@@ -116,7 +117,6 @@ def callback_download_track(call):
     bot.answer_callback_query(call.id, "📥 Скачиваю...")
     msg = bot.send_message(call.message.chat.id, "⏳ Качаю трек, секунду...")
 
-    # Скачиваем сразу лучший доступный аудиофайл без конвертации через ffmpeg
     ydl_opts = {
         "format": "bestaudio",
         "outtmpl": f"song_{call.message.chat.id}_%(id)s.%(ext)s",
@@ -147,12 +147,3 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
-
-
-
-    
-
-        
-
-                
-
