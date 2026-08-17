@@ -2,6 +2,8 @@ import os
 import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 import requests
+from bs4 import BeautifulSoup
+from urllib.parse import quote
 
 API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(API_TOKEN)
@@ -15,7 +17,7 @@ def show_stats(message):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_ids.add(message.from_user.id)
-    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду его. Дам послушать превью и дам ссылку на полную версию! 🎵\n\n⭐ Поддержать проект: /donate")
+    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду готовую полную версию! 🎵\n\n⭐ Поддержать проект: /donate")
 
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
@@ -56,80 +58,96 @@ def got_payment(message):
 def search_music(message):
     user_ids.add(message.from_user.id)
     query = message.text
-    msg = bot.reply_to(message, "🔍 Ищу треки...")
+    msg = bot.reply_to(message, "🔍 Ищу треки в MP3-архиве...")
     
     try:
-        response = requests.get(f"https://itunes.apple.com/search?term={query}&entity=song&limit=10")
-        data = response.json()
+        # Ищем музыку на открытом mp3-сайте
+        url = f"https://ru.hitmotop.com/search?q={quote(query)}"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        # Берем первые 5 результатов
+        tracks = soup.find_all('li', class_='tracks__item')[:5]
         
-        results = data.get("results", [])
-        if not results:
+        if not tracks:
             bot.edit_message_text("❌ Ничего не найдено.", message.chat.id, msg.message_id)
             return
-            
-        markup = InlineKeyboardMarkup(row_width=1)
-        for track in results:
-            title = track.get("trackName", "Трек")[:28]
-            artist = track.get("artistName", "Исполнитель")[:20]
-            track_id = track.get("trackId")
-            
-            btn_play = InlineKeyboardButton(text=f"🎧 Демо: {artist} - {title}", callback_data=f"play_{track_id}")
-            markup.add(btn_play)
-        
-        if not hasattr(bot, 'tracks_cache'):
-            bot.tracks_cache = {}
-        bot.tracks_cache[message.chat.id] = results
 
-        bot.edit_message_text("🎧 Выбери трек для прослушивания демо:", message.chat.id, msg.message_id, reply_markup=markup)
+        markup = InlineKeyboardMarkup(row_width=1)
+        results = []
+        
+        for i, track in enumerate(tracks):
+            title_elem = track.find('div', class_='track__title')
+            desc_elem = track.find('div', class_='track__desc')
+            download_elem = track.find('a', class_='track__download-btn')
+            
+            if title_elem and download_elem:
+                title = title_elem.text.strip()
+                artist = desc_elem.text.strip() if desc_elem else "Неизвестен"
+                mp3_url = download_elem.get('href')
+                
+                results.append({'url': mp3_url, 'title': title, 'artist': artist})
+                
+                btn = InlineKeyboardButton(text=f"🎵 {artist} - {title}", callback_data=f"dl_{i}")
+                markup.add(btn)
+        
+        if not hasattr(bot, 'mp3_cache'):
+            bot.mp3_cache = {}
+        bot.mp3_cache[message.chat.id] = results
+
+        if not results:
+             bot.edit_message_text("❌ Не удалось найти ссылки на скачивание.", message.chat.id, msg.message_id)
+             return
+
+        bot.edit_message_text("🎧 Выбери трек для скачивания (полная версия):", message.chat.id, msg.message_id, reply_markup=markup)
+        
     except Exception as e:
         print(f"Ошибка поиска: {e}")
         bot.edit_message_text("❌ Ошибка при поиске.", message.chat.id, msg.message_id)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("play_"))
-def callback_send_audio(call):
-    track_id = int(call.data.replace("play_", ""))
-    tracks = getattr(bot, 'tracks_cache', {}).get(call.message.chat.id, [])
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
+def callback_download_track(call):
+    index = int(call.data.replace("dl_", ""))
+    tracks = getattr(bot, 'mp3_cache', {}).get(call.message.chat.id, [])
     
-    track = next((t for t in tracks if t.get('trackId') == track_id), None)
-    
-    if not track:
+    if index >= len(tracks):
         bot.answer_callback_query(call.id, "❌ Список устарел, введи запрос заново.")
         return
 
-    audio_url = track.get("previewUrl")
-    title = track.get('trackName', 'Music')
-    performer = track.get('artistName', 'Artist')
-    track_url = track.get('trackViewUrl', 'https://music.apple.com')
-
-    bot.answer_callback_query(call.id, "🎶 Отправляю...")
+    track = tracks[index]
+    bot.answer_callback_query(call.id, "🎶 Загружаю трек...")
+    msg = bot.send_message(call.message.chat.id, "⏳ Скачиваю файл, подожди немного...")
     
-    filename = "audio.mp3"
+    filename = f"track_{call.message.chat.id}.mp3"
+    
     try:
-        r = requests.get(audio_url)
-        with open(filename, "wb") as f:
-            f.write(r.content)
-
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton(text="🌐 Слушать полную версию (Apple Music)", url=track_url))
-
-        with open(filename, "rb") as f:
+        # Скачиваем файл по прямой ссылке
+        response = requests.get(track['url'], stream=True, headers={'User-Agent': 'Mozilla/5.0'})
+        with open(filename, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+                
+        # Отправляем готовый MP3 в чат
+        with open(filename, 'rb') as audio:
             bot.send_audio(
                 call.message.chat.id, 
-                f, 
-                title=title, 
-                performer=performer,
-                reply_markup=markup
+                audio, 
+                title=track['title'], 
+                performer=track['artist']
             )
-
+            
+        bot.delete_message(call.message.chat.id, msg.message_id)
         if os.path.exists(filename):
             os.remove(filename)
             
     except Exception as e:
         print(f"Ошибка отправки: {e}")
-        bot.send_message(call.message.chat.id, "❌ Не удалось отправить аудио.")
+        bot.edit_message_text("❌ Не удалось скачать или отправить трек.", call.message.chat.id, msg.message_id)
         if os.path.exists(filename):
             os.remove(filename)
 
 bot.infinity_polling()
-2
+                
 
