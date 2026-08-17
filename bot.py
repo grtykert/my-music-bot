@@ -1,9 +1,7 @@
 import os
 import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import quote
+import yt_dlp
 
 API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(API_TOKEN)
@@ -58,96 +56,78 @@ def got_payment(message):
 def search_music(message):
     user_ids.add(message.from_user.id)
     query = message.text
-    msg = bot.reply_to(message, "🔍 Ищу треки в MP3-архиве...")
+    msg = bot.reply_to(message, "🔍 Ищу треки на SoundCloud...")
     
-    try:
-        # Ищем музыку на открытом mp3-сайте
-        url = f"https://ru.hitmotop.com/search?q={quote(query)}"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        response = requests.get(url, headers=headers, timeout=10)
-        soup = BeautifulSoup(response.text, 'html.parser')
+    # Ищем 5 вариантов трека именно на SoundCloud
+    ydl_opts = {
+        "extract_flat": True, 
+        "default_search": "scsearch5", 
+        "quiet": True
+    }
 
-        # Берем первые 5 результатов
-        tracks = soup.find_all('li', class_='tracks__item')[:5]
-        
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            result = ydl.extract_info(query, download=False)
+            tracks = result.get("entries", [])
+            
         if not tracks:
             bot.edit_message_text("❌ Ничего не найдено.", message.chat.id, msg.message_id)
             return
-
-        markup = InlineKeyboardMarkup(row_width=1)
-        results = []
-        
-        for i, track in enumerate(tracks):
-            title_elem = track.find('div', class_='track__title')
-            desc_elem = track.find('div', class_='track__desc')
-            download_elem = track.find('a', class_='track__download-btn')
             
-            if title_elem and download_elem:
-                title = title_elem.text.strip()
-                artist = desc_elem.text.strip() if desc_elem else "Неизвестен"
-                mp3_url = download_elem.get('href')
-                
-                results.append({'url': mp3_url, 'title': title, 'artist': artist})
-                
-                btn = InlineKeyboardButton(text=f"🎵 {artist} - {title}", callback_data=f"dl_{i}")
-                markup.add(btn)
-        
-        if not hasattr(bot, 'mp3_cache'):
-            bot.mp3_cache = {}
-        bot.mp3_cache[message.chat.id] = results
-
-        if not results:
-             bot.edit_message_text("❌ Не удалось найти ссылки на скачивание.", message.chat.id, msg.message_id)
-             return
+        markup = InlineKeyboardMarkup(row_width=1)
+        for track in tracks:
+            title = track.get("title", "Без названия")[:40]
+            uploader = track.get("uploader", "Неизвестен")[:20]
+            video_url = track.get("url")
+            
+            if video_url:
+                markup.add(InlineKeyboardButton(text=f"🎵 {uploader} - {title}", callback_data=f"dl_{video_url}"))
 
         bot.edit_message_text("🎧 Выбери трек для скачивания (полная версия):", message.chat.id, msg.message_id, reply_markup=markup)
-        
     except Exception as e:
         print(f"Ошибка поиска: {e}")
-        bot.edit_message_text("❌ Ошибка при поиске.", message.chat.id, msg.message_id)
-
+        bot.edit_message_text("❌ Ошибка при поиске треков.", message.chat.id, msg.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def callback_download_track(call):
-    index = int(call.data.replace("dl_", ""))
-    tracks = getattr(bot, 'mp3_cache', {}).get(call.message.chat.id, [])
+    video_url = call.data.replace("dl_", "")
+    bot.answer_callback_query(call.id, "📥 Скачиваю полную версию...")
     
-    if index >= len(tracks):
-        bot.answer_callback_query(call.id, "❌ Список устарел, введи запрос заново.")
-        return
+    msg = bot.send_message(call.message.chat.id, "⏳ Качаю трек, подожди пару секунд...")
 
-    track = tracks[index]
-    bot.answer_callback_query(call.id, "🎶 Загружаю трек...")
-    msg = bot.send_message(call.message.chat.id, "⏳ Скачиваю файл, подожди немного...")
-    
-    filename = f"track_{call.message.chat.id}.mp3"
-    
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }],
+        "outtmpl": f"song_{call.message.chat.id}_%(id)s.%(ext)s",
+        "quiet": True,
+    }
+
     try:
-        # Скачиваем файл по прямой ссылке
-        response = requests.get(track['url'], stream=True, headers={'User-Agent': 'Mozilla/5.0'})
-        with open(filename, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-                
-        # Отправляем готовый MP3 в чат
-        with open(filename, 'rb') as audio:
-            bot.send_audio(
-                call.message.chat.id, 
-                audio, 
-                title=track['title'], 
-                performer=track['artist']
-            )
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=True)
+            filename = ydl.prepare_filename(info)
+            mp3_filename = os.path.splitext(filename)[0] + ".mp3"
             
+            title = info.get('title', 'Музыка')
+            uploader = info.get('uploader', 'Исполнитель')
+
+        with open(mp3_filename, "rb") as audio:
+            bot.send_audio(call.message.chat.id, audio, title=title, performer=uploader)
+
         bot.delete_message(call.message.chat.id, msg.message_id)
-        if os.path.exists(filename):
-            os.remove(filename)
+
+        if os.path.exists(mp3_filename):
+            os.remove(mp3_filename)
             
     except Exception as e:
-        print(f"Ошибка отправки: {e}")
-        bot.edit_message_text("❌ Не удалось скачать или отправить трек.", call.message.chat.id, msg.message_id)
-        if os.path.exists(filename):
-            os.remove(filename)
+        print(f"Ошибка скачивания: {e}")
+        bot.edit_message_text("❌ Не удалось скачать трек.", call.message.chat.id, msg.message_id)
 
 bot.infinity_polling()
+
                 
 
