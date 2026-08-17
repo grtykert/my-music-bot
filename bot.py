@@ -1,6 +1,6 @@
 import os
 import telebot
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
 import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -21,38 +21,40 @@ threading.Thread(target=run_dummy_server, daemon=True).start()
 API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(API_TOKEN)
 tracks_cache = {}
+original_queries = {} # Сохраняем исходный запрос пользователя
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Теперь можно листать страницы и включать фильтры Speed Up/Slowed! 🎵")
+    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵")
 
-# Обработчик обычного текста (названий песен)
 @bot.message_handler(func=lambda message: not message.text.startswith('/'))
 def text_search_handler(message):
-    search_music_by_query(message, query=message.text, page=1)
+    original_queries[message.chat.id] = message.text
+    search_music_by_query(message, query=message.text, page=1, is_new=True)
 
-def search_music_by_query(message, query, page=1):
+def search_music_by_query(message, query, page=1, is_new=False, is_filter=False):
     chat_id = message.chat.id
     
-    # Определяем, откуда вызов: из сообщения или со старого сообщения бота при пагинации
-    if hasattr(message, 'message_id') and message.content_type != 'text':
-        msg = message
-        bot.edit_message_text("🔍 Ищу варианты...", chat_id, msg.message_id)
-    else:
+    if is_new:
         msg = bot.reply_to(message, "🔍 Ищу варианты...")
+    else:
+        msg = message # Это объект сообщения для редактирования при нажатии инлайн-кнопок
 
     try:
         ydl_opts = {"extract_flat": True, "quiet": True}
         search_query = f"scsearch20:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            result = ydl.extract_info(search_query, download=False)
+            result = yt_dlp.YoutubeDL(ydl_opts).extract_info(search_query, download=False)
             all_tracks = result.get("entries", [])
             
         start = (page - 1) * 10
         tracks = all_tracks[start:start + 10]
             
         if not tracks:
-            bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id)
+            if is_new:
+                bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id)
+            else:
+                bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id, reply_markup=None)
             return
             
         tracks_cache[chat_id] = tracks
@@ -62,7 +64,7 @@ def search_music_by_query(message, query, page=1):
             title = track.get("title", "Без названия")[:35]
             markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"dl_{i}"))
         
-        # Навигация (Кнопки Назад / Ещё)
+        # Навигация (Назад / Ещё)
         nav_buttons = []
         if page > 1:
             nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}_{query}"))
@@ -70,29 +72,50 @@ def search_music_by_query(message, query, page=1):
         
         markup.row(*nav_buttons)
         
-        # Быстрые фильтры
-        markup.row(
-            InlineKeyboardButton(text="⚡ Speed Up", callback_data=f"filter_{query}_speedup"),
-            InlineKeyboardButton(text="🐢 Slowed", callback_data=f"filter_{query}_slowed")
-        )
+        # Кнопки фильтров или кнопка возврата назад
+        orig_q = original_queries.get(chat_id, query)
+        if is_filter:
+            markup.row(InlineKeyboardButton(text="🔙 Назад к обычному", callback_data=f"back_{orig_q}"))
+        else:
+            markup.row(
+                InlineKeyboardButton(text="⚡ Speed Up", callback_data=f"filter_{orig_q}_speedup"),
+                InlineKeyboardButton(text="🐢 Slowed", callback_data=f"filter_{orig_q}_slowed")
+            )
 
-        bot.edit_message_text(f"🎧 Страница {page}. Запрос: {query}", chat_id, msg.message_id, reply_markup=markup)
+        text_content = f"🎧 Страница {page}. Запрос: {query}"
+        
+        if is_new:
+            bot.edit_message_text(text_content, chat_id, msg.message_id, reply_markup=markup)
+        else:
+            bot.edit_message_text(text_content, chat_id, msg.message_id, reply_markup=markup)
+            
     except Exception as e:
         print(f"Ошибка поиска: {e}")
-        bot.edit_message_text("❌ Ошибка поиска.", chat_id, msg.message_id)
+        try:
+            bot.edit_message_text("❌ Ошибка поиска.", chat_id, msg.message_id)
+        except:
+            pass
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "filter_")))
+@bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "filter_", "back_")))
 def handle_navigation(call):
     data = call.data.split("_")
+    chat_id = call.message.chat.id
+    
     if data[0] == "page":
         page = int(data[1])
         query = "_".join(data[2:])
-        search_music_by_query(call.message, query=query, page=page)
+        is_filt = "speedup" in query or "slowed" in query
+        search_music_by_query(call.message, query=query, page=page, is_new=False, is_filter=is_filt)
+        
     elif data[0] == "filter":
         filter_type = data[-1]
         query = "_".join(data[1:-1])
         new_query = f"{query} {filter_type}"
-        search_music_by_query(call.message, query=new_query, page=1)
+        search_music_by_query(call.message, query=new_query, page=1, is_new=False, is_filter=True)
+        
+    elif data[0] == "back":
+        query = "_".join(data[1:])
+        search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def callback_download_track(call):
@@ -134,6 +157,7 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+
 
         
         
