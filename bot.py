@@ -26,9 +26,13 @@ tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
 
+# Твой Telegram ID для админ-панели (замени на свой!)
+ADMIN_ID = 123456789  # <--- ВПИШИ СВОЙ ID СЮДА
+
 # Файлы для сохранения данных
 USERS_FILE = "users.json"
 STATS_FILE = "stats.json"
+HISTORY_FILE = "user_history.json"
 
 def load_json(filename, default_value):
     if os.path.exists(filename):
@@ -48,6 +52,7 @@ def save_json(filename, data):
 
 # Загружаем постоянные данные
 active_users = set(load_json(USERS_FILE, []))
+user_history = load_json(HISTORY_FILE, {})
 
 # Время запуска (сбрасывается при перезагрузке)
 bot_start_time = time.time()
@@ -59,6 +64,14 @@ def register_user(chat_id):
     if chat_id not in active_users:
         active_users.add(chat_id)
         save_json(USERS_FILE, list(active_users))
+
+def save_user_action(chat_id, query):
+    chat_id_str = str(chat_id)
+    if chat_id_str not in user_history:
+        user_history[chat_id_str] = []
+    user_history[chat_id_str].append(query)
+    user_history[chat_id_str] = user_history[chat_id_str][-10:] # Оставляем последние 10 запросов
+    save_json(HISTORY_FILE, user_history)
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -94,6 +107,23 @@ def stats_command(message):
         f"🟢 Статус: `Онлайн (Render)`"
     )
     bot.reply_to(message, stats_text, parse_mode="Markdown")
+
+# --- АДМИН-ПАНЕЛЬ ---
+@bot.message_handler(commands=['admin'])
+def admin_panel(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.reply_to(message, "❌ У тебя нет доступа к этой команде.")
+        return
+    
+    text = "🛠 **Панель администратора:**\n\n"
+    text += f"👥 Всего пользователей: `{len(active_users)}`\n\n"
+    text += "📜 **Последняя активность пользователей:**\n"
+    
+    for uid, queries in list(user_history.items())[-10:]:
+        last_query = queries[-1] if queries else "нет запросов"
+        text += f"• ID `{uid}`: искал `{last_query}`\n"
+        
+    bot.reply_to(message, text, parse_mode="Markdown")
 
 # --- КОМАНДА ДОНАТА ---
 @bot.message_handler(commands=['donate'])
@@ -168,6 +198,9 @@ def text_handler(message):
         else:
             bot.reply_to(message, "❌ Пожалуйста, введи корректное число (например, 30). Попробуй снова через /donate")
         return
+
+    # Сохраняем запрос в историю для админки
+    save_user_action(chat_id, message.text)
 
     original_queries[chat_id] = message.text
     search_music_by_query(message, query=message.text, page=1, is_new=True)
@@ -315,6 +348,7 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+        
     
     
         
