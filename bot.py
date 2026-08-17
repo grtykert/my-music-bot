@@ -35,7 +35,7 @@ def show_stats(message):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_ids.add(message.from_user.id)
-    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду его варианты! 🎵\n\n⭐ Поддержать проект: /donate")
+    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду 10 вариантов с режимами скорости! 🎵\n\n⭐ Поддержать проект: /donate")
 
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
@@ -113,7 +113,6 @@ def callback_select_track(call):
     track = user_tracks[index]
     title = track.get("title", "Музыка")[:30]
 
-    # Меню с расширенными режимами на английском
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
         InlineKeyboardButton(text="▶️ Normal", callback_data=f"dl_{index}_normal"),
@@ -168,27 +167,26 @@ def callback_download_track(call):
     bot.answer_callback_query(call.id, f"📥 Downloading ({current_mode_name})...")
     msg = bot.send_message(call.message.chat.id, f"⏳ Processing *{current_mode_name}*, please wait...", parse_mode="Markdown")
 
+    # Исправленные параметры: принудительное перекодирование через ffmpeg без конфликтов
     ydl_opts = {
-        "format": "bestaudio",
+        "format": "bestaudio/best",
         "outtmpl": f"song_{call.message.chat.id}_%(id)s.%(ext)s",
         "quiet": True,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }]
     }
 
-    # Настройки аудиофильтров для каждого режима
     if mode == "slowed":
-        ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
-        ydl_opts["postprocessor_args"] = ["-ar", "44100", "-af", "atempo=0.8,asetrate=44100*0.8"]
+        ydl_opts["postprocessor_args"] = ["-af", "atempo=0.8,asetrate=44100*0.8"]
     elif mode == "superslowed":
-        ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
-        ydl_opts["postprocessor_args"] = ["-ar", "44100", "-af", "atempo=0.65,asetrate=44100*0.65"]
+        ydl_opts["postprocessor_args"] = ["-af", "atempo=0.65,asetrate=44100*0.65"]
     elif mode == "speedup":
-        ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
-        ydl_opts["postprocessor_args"] = ["-ar", "44100", "-af", "atempo=1.25,asetrate=44100*1.25"]
+        ydl_opts["postprocessor_args"] = ["-af", "atempo=1.25,asetrate=44100*1.25"]
     elif mode == "superfast":
-        ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
-        ydl_opts["postprocessor_args"] = ["-ar", "44100", "-af", "atempo=1.5,asetrate=44100*1.5"]
-    else:
-        ydl_opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
+        ydl_opts["postprocessor_args"] = ["-af", "atempo=1.5,asetrate=44100*1.5"]
 
     audio_filename = None
     try:
@@ -216,5 +214,6 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+    
     
 
