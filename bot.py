@@ -26,21 +26,20 @@ tracks_cache = {}
 def send_welcome(message):
     bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Теперь можно листать страницы и включать фильтры Speed Up/Slowed! 🎵")
 
-@bot.message_handler(func=lambda message: True)
-def search_music_handler(message):
-    search_music(message, query=message.text, page=1)
+# Обработчик обычного текста (названий песен)
+@bot.message_handler(func=lambda message: not message.text.startswith('/'))
+def text_search_handler(message):
+    search_music_by_query(message, query=message.text, page=1)
 
-def search_music(message, query, page=1):
-    # Если это сообщение, редактируем его, если коллбэк - редактируем сообщение из него
-    message_id = message.message_id if hasattr(message, 'message_id') else message.message.message_id
+def search_music_by_query(message, query, page=1):
     chat_id = message.chat.id
     
-    msg = bot.edit_message_text if hasattr(message, 'message_id') else bot.send_message
-    if hasattr(message, 'message_id'):
-        bot.edit_message_text("🔍 Ищу варианты...", chat_id, message_id)
+    # Определяем, откуда вызов: из сообщения или со старого сообщения бота при пагинации
+    if hasattr(message, 'message_id') and message.content_type != 'text':
+        msg = message
+        bot.edit_message_text("🔍 Ищу варианты...", chat_id, msg.message_id)
     else:
         msg = bot.reply_to(message, "🔍 Ищу варианты...")
-        message_id = msg.message_id
 
     try:
         ydl_opts = {"extract_flat": True, "quiet": True}
@@ -53,7 +52,7 @@ def search_music(message, query, page=1):
         tracks = all_tracks[start:start + 10]
             
         if not tracks:
-            bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, message_id)
+            bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id)
             return
             
         tracks_cache[chat_id] = tracks
@@ -63,33 +62,37 @@ def search_music(message, query, page=1):
             title = track.get("title", "Без названия")[:35]
             markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"dl_{i}"))
         
-        # Навигация
+        # Навигация (Кнопки Назад / Ещё)
         nav_buttons = []
         if page > 1:
             nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}_{query}"))
         nav_buttons.append(InlineKeyboardButton(text="🔄 Ещё", callback_data=f"page_{page+1}_{query}"))
         
         markup.row(*nav_buttons)
-        # Фильтры
+        
+        # Быстрые фильтры
         markup.row(
             InlineKeyboardButton(text="⚡ Speed Up", callback_data=f"filter_{query}_speedup"),
             InlineKeyboardButton(text="🐢 Slowed", callback_data=f"filter_{query}_slowed")
         )
 
-        bot.edit_message_text(f"🎧 Страница {page}. Запрос: {query}", chat_id, message_id, reply_markup=markup)
+        bot.edit_message_text(f"🎧 Страница {page}. Запрос: {query}", chat_id, msg.message_id, reply_markup=markup)
     except Exception as e:
-        bot.edit_message_text("❌ Ошибка поиска.", chat_id, message_id)
+        print(f"Ошибка поиска: {e}")
+        bot.edit_message_text("❌ Ошибка поиска.", chat_id, msg.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "filter_")))
 def handle_navigation(call):
     data = call.data.split("_")
     if data[0] == "page":
-        page, query = int(data[1]), "_".join(data[2:])
-        search_music(call, query=query, page=page)
+        page = int(data[1])
+        query = "_".join(data[2:])
+        search_music_by_query(call.message, query=query, page=page)
     elif data[0] == "filter":
-        query, filter_type = data[1], data[2]
+        filter_type = data[-1]
+        query = "_".join(data[1:-1])
         new_query = f"{query} {filter_type}"
-        search_music(call, query=new_query, page=1)
+        search_music_by_query(call.message, query=new_query, page=1)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def callback_download_track(call):
@@ -119,14 +122,19 @@ def callback_download_track(call):
         with open(audio_filename, "rb") as audio:
             bot.send_audio(call.message.chat.id, audio, title=info.get('title'), performer=info.get('uploader'))
         bot.delete_message(call.message.chat.id, msg.message_id)
-    except:
+    except Exception as e:
+        print(f"Ошибка скачивания: {e}")
         bot.edit_message_text("❌ Не удалось скачать.", call.message.chat.id, msg.message_id)
     finally:
         if audio_filename and os.path.exists(audio_filename):
-            os.remove(audio_filename)
+            try:
+                os.remove(audio_filename)
+            except:
+                pass
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+
         
         
 
