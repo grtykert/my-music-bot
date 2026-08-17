@@ -7,6 +7,7 @@ API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(API_TOKEN)
 
 user_ids = set()
+tracks_cache = {}
 
 @bot.message_handler(commands=['stats'])
 def show_stats(message):
@@ -15,7 +16,7 @@ def show_stats(message):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_ids.add(message.from_user.id)
-    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду готовую полную версию! 🎵\n\n⭐ Поддержать проект: /donate")
+    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду варианты для скачивания! 🎵\n\n⭐ Поддержать проект: /donate")
 
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
@@ -56,9 +57,8 @@ def got_payment(message):
 def search_music(message):
     user_ids.add(message.from_user.id)
     query = message.text
-    msg = bot.reply_to(message, "🔍 Ищу треки на SoundCloud...")
+    msg = bot.reply_to(message, "🔍 Ищу варианты треков...")
     
-    # Ищем 5 вариантов трека именно на SoundCloud
     ydl_opts = {
         "extract_flat": True, 
         "default_search": "scsearch5", 
@@ -74,26 +74,32 @@ def search_music(message):
             bot.edit_message_text("❌ Ничего не найдено.", message.chat.id, msg.message_id)
             return
             
+        tracks_cache[message.chat.id] = tracks
         markup = InlineKeyboardMarkup(row_width=1)
-        for track in tracks:
-            title = track.get("title", "Без названия")[:40]
-            uploader = track.get("uploader", "Неизвестен")[:20]
-            video_url = track.get("url")
-            
-            if video_url:
-                markup.add(InlineKeyboardButton(text=f"🎵 {uploader} - {title}", callback_data=f"dl_{video_url}"))
+        
+        for i, track in enumerate(tracks):
+            title = track.get("title", "Без названия")[:38]
+            markup.add(InlineKeyboardButton(text=f"🎵 {title}", callback_data=f"dl_{i}"))
 
-        bot.edit_message_text("🎧 Выбери трек для скачивания (полная версия):", message.chat.id, msg.message_id, reply_markup=markup)
+        bot.edit_message_text("🎧 Выбери трек для скачивания:", message.chat.id, msg.message_id, reply_markup=markup)
     except Exception as e:
         print(f"Ошибка поиска: {e}")
         bot.edit_message_text("❌ Ошибка при поиске треков.", message.chat.id, msg.message_id)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def callback_download_track(call):
-    video_url = call.data.replace("dl_", "")
-    bot.answer_callback_query(call.id, "📥 Скачиваю полную версию...")
+    index = int(call.data.replace("dl_", ""))
+    user_tracks = tracks_cache.get(call.message.chat.id, [])
     
-    msg = bot.send_message(call.message.chat.id, "⏳ Качаю трек, подожди пару секунд...")
+    if index >= len(user_tracks):
+        bot.answer_callback_query(call.id, "❌ Список устарел, отправь запрос заново.")
+        return
+
+    track = user_tracks[index]
+    video_url = track.get("url")
+    
+    bot.answer_callback_query(call.id, "📥 Скачиваю...")
+    msg = bot.send_message(call.message.chat.id, "⏳ Качаю выбранный трек, подожди немного...")
 
     ydl_opts = {
         "format": "bestaudio/best",
@@ -128,6 +134,7 @@ def callback_download_track(call):
         bot.edit_message_text("❌ Не удалось скачать трек.", call.message.chat.id, msg.message_id)
 
 bot.infinity_polling()
+        
 
                 
 
