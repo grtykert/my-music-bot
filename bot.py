@@ -5,7 +5,7 @@ import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ ОБХОДА БЛОКИРОВОК RENDER ---
+# --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ---
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -20,7 +20,7 @@ def run_dummy_server():
     httpd.serve_forever()
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
-# --------------------------------------------------------
+# ----------------------------
 
 API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(API_TOKEN)
@@ -53,7 +53,6 @@ def donate_command(message):
 def process_donate_selection(call):
     stars_count = int(call.data.replace('donate_', ''))
     bot.answer_callback_query(call.id)
-    
     bot.send_invoice(
         chat_id=call.message.chat.id,
         title="Поддержка бота",
@@ -78,13 +77,9 @@ def search_music(message):
     query = message.text
     msg = bot.reply_to(message, "🔍 Ищу варианты треков на YouTube...")
     
-    ydl_opts = {
-        "extract_flat": True, 
-        "quiet": True
-    }
+    ydl_opts = {"extract_flat": True, "quiet": True}
 
     try:
-        # Жестко приказываем искать 5 видео именно через поисковик YouTube
         search_query = f"ytsearch5:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(search_query, download=False)
@@ -119,43 +114,40 @@ def callback_download_track(call):
     video_url = track.get("url")
     
     bot.answer_callback_query(call.id, "📥 Скачиваю...")
-    msg = bot.send_message(call.message.chat.id, "⏳ Качаю выбранный трек, подожди немного...")
+    msg = bot.send_message(call.message.chat.id, "⏳ Качаю трек, секунду...")
 
+    # Скачиваем сразу лучший доступный аудиофайл без конвертации через ffmpeg
     ydl_opts = {
-        "format": "bestaudio/best",
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
+        "format": "bestaudio",
         "outtmpl": f"song_{call.message.chat.id}_%(id)s.%(ext)s",
         "quiet": True,
     }
 
+    audio_filename = None
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
-            filename = ydl.prepare_filename(info)
-            mp3_filename = os.path.splitext(filename)[0] + ".mp3"
-            
+            audio_filename = ydl.prepare_filename(info)
             title = info.get('title', 'Музыка')
             uploader = info.get('uploader', 'Исполнитель')
 
-        with open(mp3_filename, "rb") as audio:
+        with open(audio_filename, "rb") as audio:
             bot.send_audio(call.message.chat.id, audio, title=title, performer=uploader)
 
         bot.delete_message(call.message.chat.id, msg.message_id)
 
-        if os.path.exists(mp3_filename):
-            os.remove(mp3_filename)
+        if audio_filename and os.path.exists(audio_filename):
+            os.remove(audio_filename)
             
     except Exception as e:
         print(f"Ошибка скачивания: {e}")
         bot.edit_message_text("❌ Не удалось скачать трек.", call.message.chat.id, msg.message_id)
+        if audio_filename and os.path.exists(audio_filename):
+            os.remove(audio_filename)
 
-# Эта строчка сбрасывает конфликты при перезапуске сервера
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+
 
 
     
