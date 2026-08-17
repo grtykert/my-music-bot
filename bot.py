@@ -4,6 +4,7 @@ from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPri
 import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import time
 
 # --- ВЕБ-СЕРВЕР (Для Render) ---
 class DummyHandler(BaseHTTPRequestHandler):
@@ -24,11 +25,30 @@ tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
 
+# Статистика
+bot_start_time = time.time()
+total_downloads = 0
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n💰 Поддержать разработчика: /donate")
+    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n💰 Поддержать разработчика: /donate\n📊 Статистика бота: /stats")
 
-# --- КОМАНДА ДОНАТА (Меню выбора) ---
+# --- КОМАНДА СТАТИСТИКИ ---
+@bot.message_handler(commands=['stats'])
+def stats_command(message):
+    uptime_seconds = int(time.time() - bot_start_time)
+    hours = uptime_seconds // 3600
+    minutes = (uptime_seconds % 3600) // 60
+    
+    stats_text = (
+        f"📊 **Статистика бота:**\n\n"
+        f"⏱ Время работы: `{hours}ч {minutes}м`\n"
+        f"📥 Скачано треков: `{total_downloads}`\n"
+        f"🟢 Статус: `Онлайн (Render)`"
+    )
+    bot.reply_to(message, stats_text, parse_mode="Markdown")
+
+# --- КОМАНДА ДОНАТА ---
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
     chat_id = message.chat.id
@@ -46,7 +66,6 @@ def donate_command(message):
         reply_markup=markup
     )
 
-# Обработка нажатий на кнопки доната
 @bot.callback_query_handler(func=lambda call: call.data.startswith("donate_"))
 def handle_donate_callback(call):
     chat_id = call.message.chat.id
@@ -87,12 +106,10 @@ def checkout(pre_checkout_query):
 def got_payment(message):
     bot.reply_to(message, "🎉 Ура! Огромное спасибо за донат! Твоя поддержка бесценна ❤️")
 
-# Перехват текста для кастомного ввода звёзд или поиска музыки
 @bot.message_handler(func=lambda message: not message.text.startswith('/'))
 def text_handler(message):
     chat_id = message.chat.id
     
-    # Если пользователь до этого нажал "Своё количество" и пишет число
     if chat_id in waiting_for_custom_stars:
         waiting_for_custom_stars.remove(chat_id)
         text = message.text.strip()
@@ -103,7 +120,6 @@ def text_handler(message):
             bot.reply_to(message, "❌ Пожалуйста, введи корректное число (например, 30). Попробуй снова через /donate")
         return
 
-    # Обычный поиск музыки
     original_queries[chat_id] = message.text
     search_music_by_query(message, query=message.text, page=1, is_new=True)
 
@@ -187,6 +203,7 @@ def handle_navigation(call):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def callback_download_track(call):
+    global total_downloads
     index = int(call.data.replace("dl_", ""))
     user_tracks = tracks_cache.get(call.message.chat.id, [])
     if index >= len(user_tracks):
@@ -198,31 +215,58 @@ def callback_download_track(call):
     msg = bot.send_message(call.message.chat.id, "⏳ Подожди, конвертирую...")
 
     audio_filename = None
+    thumbnail_filename = None
     try:
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": f"song_{call.message.chat.id}_%(id)s.%(ext)s",
+            "writethumbnail": True, # Скачиваем обложку трека
             "quiet": True,
-            "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}]
+            "postprocessors": [
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
+                {"key": "EmbedThumbnail"} # Вшиваем обложку в mp3 теги
+            ]
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(track['url'], download=True)
             filename = ydl.prepare_filename(info)
             audio_filename = os.path.splitext(filename)[0] + ".mp3"
             
+            # Ищем скачанную обложку для отправки миниатюрой в плеер Telegram
+            base_name = os.path.splitext(filename)[0]
+            for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                if os.path.exists(base_name + ext):
+                    thumbnail_filename = base_name + ext
+                    break
+
+        # Отправляем аудиофайл с обложкой
         with open(audio_filename, "rb") as audio:
-            bot.send_audio(call.message.chat.id, audio, title=info.get('title'), performer=info.get('uploader'))
+            thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
+            bot.send_audio(
+                call.message.chat.id, 
+                audio, 
+                title=info.get('title'), 
+                performer=info.get('uploader'),
+                thumb=thumb_file
+            )
+            if thumb_file:
+                thumb_file.close()
+
+        total_downloads += 1
         bot.delete_message(call.message.chat.id, msg.message_id)
     except Exception as e:
         print(f"Ошибка скачивания: {e}")
         bot.edit_message_text("❌ Не удалось скачать.", call.message.chat.id, msg.message_id)
     finally:
+        # Убираем за собой временные файлы
         if audio_filename and os.path.exists(audio_filename):
-            try:
-                os.remove(audio_filename)
-            except:
-                pass
+            try: os.remove(audio_filename)
+            except: pass
+        if thumbnail_filename and os.path.exists(thumbnail_filename):
+            try: os.remove(thumbnail_filename)
+            except: pass
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+        
             
