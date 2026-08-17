@@ -35,7 +35,7 @@ def show_stats(message):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_ids.add(message.from_user.id)
-    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду 10 вариантов с режимами скорости! 🎵\n\n⭐ Поддержать проект: /donate")
+    bot.reply_to(message, "👋 Привет! Напиши название трека, я найду 10 вариантов, и ты сможешь скачать любой в один клик! 🎵\n\n⭐ Поддержать проект: /donate")
 
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
@@ -94,58 +94,16 @@ def search_music(message):
         
         for i, track in enumerate(tracks):
             title = track.get("title", "Без названия")[:35]
-            markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"sel_{i}"))
+            markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"dl_{i}"))
 
-        bot.edit_message_text("🎧 Выбери трек из списка:", message.chat.id, msg.message_id, reply_markup=markup)
+        bot.edit_message_text("🎧 Выбери трек для скачивания:", message.chat.id, msg.message_id, reply_markup=markup)
     except Exception as e:
         print(f"Ошибка поиска: {e}")
         bot.edit_message_text("❌ Ошибка при поиске треков.", message.chat.id, msg.message_id)
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("sel_"))
-def callback_select_track(call):
-    index = int(call.data.replace("sel_", ""))
-    user_tracks = tracks_cache.get(call.message.chat.id, [])
-    
-    if index >= len(user_tracks):
-        bot.answer_callback_query(call.id, "❌ Список устарел, отправь запрос заново.")
-        return
-
-    track = user_tracks[index]
-    title = track.get("title", "Музыка")[:30]
-
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        InlineKeyboardButton(text="▶️ Normal", callback_data=f"dl_{index}_normal"),
-        InlineKeyboardButton(text="🐌 Slowed", callback_data=f"dl_{index}_slowed"),
-        InlineKeyboardButton(text="🧊 Super Slowed", callback_data=f"dl_{index}_superslowed"),
-        InlineKeyboardButton(text="⚡ Speed Up", callback_data=f"dl_{index}_speedup"),
-        InlineKeyboardButton(text="🔥 Super Fast", callback_data=f"dl_{index}_superfast")
-    )
-    markup.add(InlineKeyboardButton(text="⬅️ Back to list", callback_data="back_to_list"))
-
-    bot.edit_message_text(f"🎶 Track: *{title}*\n\nSelect playback mode:", 
-                          call.message.chat.id, call.message.message_id, 
-                          reply_markup=markup, parse_mode="Markdown")
-
-@bot.callback_query_handler(func=lambda call: call.data == "back_to_list")
-def callback_back_to_list(call):
-    user_tracks = tracks_cache.get(call.message.chat.id, [])
-    if not user_tracks:
-        bot.answer_callback_query(call.id, "❌ Список пуст, сделай поиск заново.")
-        return
-        
-    markup = InlineKeyboardMarkup(row_width=1)
-    for i, track in enumerate(user_tracks):
-        title = track.get("title", "Без названия")[:35]
-        markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"sel_{i}"))
-        
-    bot.edit_message_text("🎧 Выбери трек из списка:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def callback_download_track(call):
-    data_parts = call.data.split("_")
-    index = int(data_parts[1])
-    mode = data_parts[2]
+    index = int(call.data.replace("dl_", ""))
 
     user_tracks = tracks_cache.get(call.message.chat.id, [])
     if index >= len(user_tracks):
@@ -155,17 +113,8 @@ def callback_download_track(call):
     track = user_tracks[index]
     video_url = track.get("url")
     
-    mode_names = {
-        "normal": "Normal", 
-        "slowed": "Slowed", 
-        "superslowed": "Super Slowed",
-        "speedup": "Speed Up",
-        "superfast": "Super Fast"
-    }
-    
-    current_mode_name = mode_names.get(mode, "Normal")
-    bot.answer_callback_query(call.id, f"📥 Downloading ({current_mode_name})...")
-    msg = bot.send_message(call.message.chat.id, f"⏳ Processing *{current_mode_name}*, please wait...", parse_mode="Markdown")
+    bot.answer_callback_query(call.id, "📥 Скачиваю...")
+    msg = bot.send_message(call.message.chat.id, "⏳ Загружаю трек, подожди пару секунд...", parse_mode="Markdown")
 
     audio_filename = None
     try:
@@ -180,22 +129,12 @@ def callback_download_track(call):
             }]
         }
 
-        # Используем стабильный фильтр atempo (работает без сбоев на любых дорожках)
-        if mode == "slowed":
-            ydl_opts["postprocessor_args"] = ["-af", "atempo=0.8"]
-        elif mode == "superslowed":
-            ydl_opts["postprocessor_args"] = ["-af", "atempo=0.7"]
-        elif mode == "speedup":
-            ydl_opts["postprocessor_args"] = ["-af", "atempo=1.25"]
-        elif mode == "superfast":
-            ydl_opts["postprocessor_args"] = ["-af", "atempo=1.4"]
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
             filename = ydl.prepare_filename(info)
             audio_filename = os.path.splitext(filename)[0] + ".mp3"
             
-        title = f"{info.get('title', 'Music')} [{current_mode_name}]"
+        title = info.get('title', 'Music')
         uploader = info.get('uploader', 'Artist')
 
         with open(audio_filename, "rb") as audio:
@@ -204,8 +143,8 @@ def callback_download_track(call):
         bot.delete_message(call.message.chat.id, msg.message_id)
 
     except Exception as e:
-        print(f"Ошибка обработки: {e}")
-        bot.edit_message_text("❌ Failed to process track.", call.message.chat.id, msg.message_id)
+        print(f"Ошибка скачивания: {e}")
+        bot.edit_message_text("❌ Не удалось скачать этот трек.", call.message.chat.id, msg.message_id)
 
     finally:
         if audio_filename and os.path.exists(audio_filename):
@@ -216,7 +155,4 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
-        
-    
-    
 
