@@ -167,53 +167,56 @@ def callback_download_track(call):
     bot.answer_callback_query(call.id, f"📥 Downloading ({current_mode_name})...")
     msg = bot.send_message(call.message.chat.id, f"⏳ Processing *{current_mode_name}*, please wait...", parse_mode="Markdown")
 
-    # Исправленные параметры: принудительное перекодирование через ffmpeg без конфликтов
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": f"song_{call.message.chat.id}_%(id)s.%(ext)s",
-        "quiet": True,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }]
-    }
-
-    if mode == "slowed":
-        ydl_opts["postprocessor_args"] = ["-af", "atempo=0.8,asetrate=44100*0.8"]
-    elif mode == "superslowed":
-        ydl_opts["postprocessor_args"] = ["-af", "atempo=0.65,asetrate=44100*0.65"]
-    elif mode == "speedup":
-        ydl_opts["postprocessor_args"] = ["-af", "atempo=1.25,asetrate=44100*1.25"]
-    elif mode == "superfast":
-        ydl_opts["postprocessor_args"] = ["-af", "atempo=1.5,asetrate=44100*1.5"]
-
     audio_filename = None
     try:
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": f"song_{call.message.chat.id}_%(id)s.%(ext)s",
+            "quiet": True,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }]
+        }
+
+        # Используем стабильный фильтр atempo (работает без сбоев на любых дорожках)
+        if mode == "slowed":
+            ydl_opts["postprocessor_args"] = ["-af", "atempo=0.8"]
+        elif mode == "superslowed":
+            ydl_opts["postprocessor_args"] = ["-af", "atempo=0.7"]
+        elif mode == "speedup":
+            ydl_opts["postprocessor_args"] = ["-af", "atempo=1.25"]
+        elif mode == "superfast":
+            ydl_opts["postprocessor_args"] = ["-af", "atempo=1.4"]
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
             filename = ydl.prepare_filename(info)
             audio_filename = os.path.splitext(filename)[0] + ".mp3"
             
-            title = f"{info.get('title', 'Music')} [{current_mode_name}]"
-            uploader = info.get('uploader', 'Artist')
+        title = f"{info.get('title', 'Music')} [{current_mode_name}]"
+        uploader = info.get('uploader', 'Artist')
 
         with open(audio_filename, "rb") as audio:
             bot.send_audio(call.message.chat.id, audio, title=title, performer=uploader)
 
         bot.delete_message(call.message.chat.id, msg.message_id)
 
-        if audio_filename and os.path.exists(audio_filename):
-            os.remove(audio_filename)
-            
     except Exception as e:
-        print(f"Ошибка скачивания/обработки: {e}")
+        print(f"Ошибка обработки: {e}")
         bot.edit_message_text("❌ Failed to process track.", call.message.chat.id, msg.message_id)
+
+    finally:
         if audio_filename and os.path.exists(audio_filename):
-            os.remove(audio_filename)
+            try:
+                os.remove(audio_filename)
+            except:
+                pass
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+        
     
     
 
