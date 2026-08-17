@@ -5,6 +5,7 @@ import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
+import json
 
 # --- ВЕБ-СЕРВЕР (Для Render) ---
 class DummyHandler(BaseHTTPRequestHandler):
@@ -29,9 +30,51 @@ waiting_for_custom_stars = set()
 bot_start_time = time.time()
 total_downloads = 0
 
+# Работа с базой пользователей (храним ID в файле, чтобы не терялись)
+USERS_FILE = "users.json"
+
+def load_users():
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r") as f:
+                return set(json.load(f))
+        except:
+            pass
+    return set()
+
+def save_users(users_set):
+    try:
+        with open(USERS_FILE, "w") as f:
+            json.dump(list(users_set), f)
+    except:
+        pass
+
+active_users = load_users()
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
+    chat_id = message.chat.id
+    if chat_id not in active_users:
+        active_users.add(chat_id)
+        save_users(active_users)
+
     bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n💰 Поддержать разработчика: /donate\n📊 Статистика бота: /stats")
+
+# Отслеживание блокировки бота пользователем
+@bot.my_chat_member_handler()
+def handle_chat_member(message):
+    chat_id = message.chat.id
+    new_status = message.new_chat_member.status
+    if new_status in ['kicked', 'left']:
+        # Пользователь заблокировал бота или вышел
+        if chat_id in active_users:
+            active_users.remove(chat_id)
+            save_users(active_users)
+    elif new_status == 'member':
+        # Пользователь разблокировал или зашел
+        if chat_id not in active_users:
+            active_users.add(chat_id)
+            save_users(active_users)
 
 # --- КОМАНДА СТАТИСТИКИ ---
 @bot.message_handler(commands=['stats'])
@@ -42,6 +85,7 @@ def stats_command(message):
     
     stats_text = (
         f"📊 **Статистика бота:**\n\n"
+        f"👥 Активных пользователей: `{len(active_users)}`\n"
         f"⏱ Время работы: `{hours}ч {minutes}м`\n"
         f"📥 Скачано треков: `{total_downloads}`\n"
         f"🟢 Статус: `Онлайн (Render)`"
@@ -220,11 +264,11 @@ def callback_download_track(call):
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": f"song_{call.message.chat.id}_%(id)s.%(ext)s",
-            "writethumbnail": True, # Скачиваем обложку трека
+            "writethumbnail": True,
             "quiet": True,
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
-                {"key": "EmbedThumbnail"} # Вшиваем обложку в mp3 теги
+                {"key": "EmbedThumbnail"}
             ]
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -232,14 +276,12 @@ def callback_download_track(call):
             filename = ydl.prepare_filename(info)
             audio_filename = os.path.splitext(filename)[0] + ".mp3"
             
-            # Ищем скачанную обложку для отправки миниатюрой в плеер Telegram
             base_name = os.path.splitext(filename)[0]
             for ext in ['.jpg', '.jpeg', '.png', '.webp']:
                 if os.path.exists(base_name + ext):
                     thumbnail_filename = base_name + ext
                     break
 
-        # Отправляем аудиофайл с обложкой
         with open(audio_filename, "rb") as audio:
             thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
             bot.send_audio(
@@ -258,7 +300,6 @@ def callback_download_track(call):
         print(f"Ошибка скачивания: {e}")
         bot.edit_message_text("❌ Не удалось скачать.", call.message.chat.id, msg.message_id)
     finally:
-        # Убираем за собой временные файлы
         if audio_filename and os.path.exists(audio_filename):
             try: os.remove(audio_filename)
             except: pass
@@ -268,5 +309,6 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+    
         
             
