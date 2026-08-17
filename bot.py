@@ -2,6 +2,27 @@ import os
 import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 import yt_dlp
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# --- ФЕЙКОВЫЙ ВЕБ-СЕРВЕР ДЛЯ ОБХОДА БЛОКИРОВОК RENDER ---
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b"Bot is active and running!")
+
+def run_dummy_server():
+    # Render автоматически задает порт, мы его перехватываем
+    port = int(os.environ.get("PORT", 10000))
+    server_address = ('0.0.0.0', port)
+    httpd = HTTPServer(server_address, DummyHandler)
+    httpd.serve_forever()
+
+# Запускаем наш фейковый сервер в отдельном фоновом потоке
+threading.Thread(target=run_dummy_server, daemon=True).start()
+# --------------------------------------------------------
 
 API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(API_TOKEN)
@@ -134,6 +155,7 @@ def callback_download_track(call):
         bot.edit_message_text("❌ Не удалось скачать трек.", call.message.chat.id, msg.message_id)
 
 bot.infinity_polling()
+    
 
         
 
