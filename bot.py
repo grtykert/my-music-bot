@@ -1,6 +1,6 @@
 import os
 import telebot
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -21,11 +21,41 @@ threading.Thread(target=run_dummy_server, daemon=True).start()
 API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(API_TOKEN)
 tracks_cache = {}
-original_queries = {} # Сохраняем исходный запрос пользователя
+original_queries = {}
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
-    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵")
+    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n💰 Поддержать разработчика: /donate")
+
+# --- КОМАНДА ДОНАТА ---
+@bot.message_handler(commands=['donate'])
+def donate_command(message):
+    chat_id = message.chat.id
+    # Отправляем инвойс на тестовую звезду Telegram (или кастомную валюту XTR / копейки)
+    # Здесь используется Telegram Stars (XTR) или тестовый платеж
+    try:
+        prices = [LabeledPrice(label='Поддержать бота ☕', amount=1)] # 1 единица (можно изменить)
+        bot.send_invoice(
+            chat_id=chat_id,
+            title='Поддержка проекта',
+            description='Спасибо за развитие бота! Эти деньги пойдут на оплату стабильной работы.',
+            invoice_payload='donate_payload',
+            provider_token='', # Пусто для Telegram Stars (XTR)
+            currency='XTR',
+            prices=prices,
+            start_parameter='donate'
+        )
+    except Exception as e:
+        # Если Telegram Stars недоступны, отправляем текстом
+        bot.reply_to(message, "☕ Огромное спасибо за желание поддержать проект! Пока что донаты настраиваются через Telegram Stars, либо ты можешь просто пользоваться ботом и рекомендовать его друзьям!")
+
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def checkout(pre_checkout_query):
+    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@bot.message_handler(content_types=['successful_payment'])
+def got_payment(message):
+    bot.reply_to(message, "🎉 Ура! Огромное спасибо за донат! Твоя поддержка очень важна для проекта ❤️")
 
 @bot.message_handler(func=lambda message: not message.text.startswith('/'))
 def text_search_handler(message):
@@ -38,13 +68,13 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
     if is_new:
         msg = bot.reply_to(message, "🔍 Ищу варианты...")
     else:
-        msg = message # Это объект сообщения для редактирования при нажатии инлайн-кнопок
+        msg = message
 
     try:
         ydl_opts = {"extract_flat": True, "quiet": True}
         search_query = f"scsearch20:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            result = yt_dlp.YoutubeDL(ydl_opts).extract_info(search_query, download=False)
+            result = ydl.extract_info(search_query, download=False)
             all_tracks = result.get("entries", [])
             
         start = (page - 1) * 10
@@ -64,7 +94,6 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
             title = track.get("title", "Без названия")[:35]
             markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"dl_{i}"))
         
-        # Навигация (Назад / Ещё)
         nav_buttons = []
         if page > 1:
             nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}_{query}"))
@@ -72,7 +101,6 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
         
         markup.row(*nav_buttons)
         
-        # Кнопки фильтров или кнопка возврата назад
         orig_q = original_queries.get(chat_id, query)
         if is_filter:
             markup.row(InlineKeyboardButton(text="🔙 Назад к обычному", callback_data=f"back_{orig_q}"))
@@ -83,11 +111,7 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
             )
 
         text_content = f"🎧 Страница {page}. Запрос: {query}"
-        
-        if is_new:
-            bot.edit_message_text(text_content, chat_id, msg.message_id, reply_markup=markup)
-        else:
-            bot.edit_message_text(text_content, chat_id, msg.message_id, reply_markup=markup)
+        bot.edit_message_text(text_content, chat_id, msg.message_id, reply_markup=markup)
             
     except Exception as e:
         print(f"Ошибка поиска: {e}")
@@ -99,7 +123,6 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
 @bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "filter_", "back_")))
 def handle_navigation(call):
     data = call.data.split("_")
-    chat_id = call.message.chat.id
     
     if data[0] == "page":
         page = int(data[1])
@@ -157,8 +180,3 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
-
-
-        
-        
-
