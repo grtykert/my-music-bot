@@ -22,32 +22,62 @@ API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
 bot = telebot.TeleBot(API_TOKEN)
 tracks_cache = {}
 original_queries = {}
+waiting_for_custom_stars = set()
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n💰 Поддержать разработчика: /donate")
 
-# --- КОМАНДА ДОНАТА ---
+# --- КОМАНДА ДОНАТА (Меню выбора) ---
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
     chat_id = message.chat.id
-    # Отправляем инвойс на тестовую звезду Telegram (или кастомную валюту XTR / копейки)
-    # Здесь используется Telegram Stars (XTR) или тестовый платеж
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton(text="⭐ 5 звёзд", callback_data="donate_5"),
+        InlineKeyboardButton(text="⭐ 10 звёзд", callback_data="donate_10"),
+        InlineKeyboardButton(text="⭐ 15 звёзд", callback_data="donate_15"),
+        InlineKeyboardButton(text="⭐ 25 звёзд", callback_data="donate_25"),
+        InlineKeyboardButton(text="✍️ Своё количество", callback_data="donate_custom")
+    )
+    bot.send_message(
+        chat_id, 
+        "💖 Спасибо за желание поддержать проект!\nВыбери сумму в звёздах или введи своё количество:", 
+        reply_markup=markup
+    )
+
+# Обработка нажатий на кнопки доната
+@bot.callback_query_handler(func=lambda call: call.data.startswith("donate_"))
+def handle_donate_callback(call):
+    chat_id = call.message.chat.id
+    action = call.data.replace("donate_", "")
+
+    if action == "custom":
+        waiting_for_custom_stars.add(chat_id)
+        bot.answer_callback_query(call.id)
+        bot.send_message(chat_id, "✍️ Напиши в чат число — сколько звёзд ты хочешь отправить (например: `50`):")
+        return
+
     try:
-        prices = [LabeledPrice(label='Поддержать бота ☕', amount=1)] # 1 единица (можно изменить)
-        bot.send_invoice(
-            chat_id=chat_id,
-            title='Поддержка проекта',
-            description='Спасибо за развитие бота! Эти деньги пойдут на оплату стабильной работы.',
-            invoice_payload='donate_payload',
-            provider_token='', # Пусто для Telegram Stars (XTR)
-            currency='XTR',
-            prices=prices,
-            start_parameter='donate'
-        )
+        stars_count = int(action)
+        send_invoice_stars(chat_id, stars_count)
+        bot.answer_callback_query(call.id)
     except Exception as e:
-        # Если Telegram Stars недоступны, отправляем текстом
-        bot.reply_to(message, "☕ Огромное спасибо за желание поддержать проект! Пока что донаты настраиваются через Telegram Stars, либо ты можешь просто пользоваться ботом и рекомендовать его друзьям!")
+        print(f"Ошибка инвойса: {e}")
+        bot.answer_callback_query(call.id, "❌ Произошла ошибка.")
+
+def send_invoice_stars(chat_id, amount):
+    prices = [LabeledPrice(label=f'Поддержка на {amount} ⭐', amount=amount)]
+    bot.send_invoice(
+        chat_id=chat_id,
+        title='Поддержка проекта',
+        description=f'Спасибо за донат в размере {amount} ⭐! Эти средства пойдут на развитие бота.',
+        invoice_payload=f'donate_{amount}',
+        provider_token='',
+        currency='XTR',
+        prices=prices,
+        start_parameter='donate'
+    )
 
 @bot.pre_checkout_query_handler(func=lambda query: True)
 def checkout(pre_checkout_query):
@@ -55,11 +85,26 @@ def checkout(pre_checkout_query):
 
 @bot.message_handler(content_types=['successful_payment'])
 def got_payment(message):
-    bot.reply_to(message, "🎉 Ура! Огромное спасибо за донат! Твоя поддержка очень важна для проекта ❤️")
+    bot.reply_to(message, "🎉 Ура! Огромное спасибо за донат! Твоя поддержка бесценна ❤️")
 
+# Перехват текста для кастомного ввода звёзд или поиска музыки
 @bot.message_handler(func=lambda message: not message.text.startswith('/'))
-def text_search_handler(message):
-    original_queries[message.chat.id] = message.text
+def text_handler(message):
+    chat_id = message.chat.id
+    
+    # Если пользователь до этого нажал "Своё количество" и пишет число
+    if chat_id in waiting_for_custom_stars:
+        waiting_for_custom_stars.remove(chat_id)
+        text = message.text.strip()
+        if text.isdigit() and int(text) > 0:
+            stars_count = int(text)
+            send_invoice_stars(chat_id, stars_count)
+        else:
+            bot.reply_to(message, "❌ Пожалуйста, введи корректное число (например, 30). Попробуй снова через /donate")
+        return
+
+    # Обычный поиск музыки
+    original_queries[chat_id] = message.text
     search_music_by_query(message, query=message.text, page=1, is_new=True)
 
 def search_music_by_query(message, query, page=1, is_new=False, is_filter=False):
@@ -180,3 +225,4 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+            
