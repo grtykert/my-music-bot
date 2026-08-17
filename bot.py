@@ -27,7 +27,7 @@ original_queries = {}
 waiting_for_custom_stars = set()
 
 # Твой Telegram ID для админ-панели (замени на свой!)
-ADMIN_ID = 123456789  # <--- ВПИШИ СВОЙ ID СЮДА
+ADMIN_ID = 5378591975# <--- ВПИШИ СВОЙ ID СЮДА
 
 # Файлы для сохранения данных
 USERS_FILE = "users.json"
