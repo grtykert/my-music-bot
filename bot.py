@@ -16,7 +16,7 @@ def show_stats(message):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_ids.add(message.from_user.id)
-    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду варианты для скачивания! 🎵\n\n⭐ Поддержать проект: /donate")
+    bot.reply_to(message, "👋 Привет! Напиши название трека, и я найду его полный вариант! 🎵\n\n⭐ Поддержать проект: /donate")
 
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
@@ -134,6 +134,7 @@ def callback_download_track(call):
         bot.edit_message_text("❌ Не удалось скачать трек.", call.message.chat.id, msg.message_id)
 
 bot.infinity_polling()
+
         
 
                 
