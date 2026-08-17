@@ -14,13 +14,11 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot is active and running!")
 
 def run_dummy_server():
-    # Render автоматически задает порт, мы его перехватываем
     port = int(os.environ.get("PORT", 10000))
     server_address = ('0.0.0.0', port)
     httpd = HTTPServer(server_address, DummyHandler)
     httpd.serve_forever()
 
-# Запускаем наш фейковый сервер в отдельном фоновом потоке
 threading.Thread(target=run_dummy_server, daemon=True).start()
 # --------------------------------------------------------
 
@@ -82,7 +80,7 @@ def search_music(message):
     
     ydl_opts = {
         "extract_flat": True, 
-        "default_search": "scsearch5", 
+        "default_search": "ytsearch5", # ТЕПЕРЬ ИЩЕМ В YOUTUBE
         "quiet": True
     }
 
@@ -155,6 +153,7 @@ def callback_download_track(call):
         bot.edit_message_text("❌ Не удалось скачать трек.", call.message.chat.id, msg.message_id)
 
 bot.infinity_polling()
+
     
 
         
