@@ -109,10 +109,22 @@ def handle_chat_member(message):
             active_users.add(chat_id)
             save_json(USERS_FILE, list(active_users))
 
-# --- КОМАНДА СТАТИСТИКИ ---
+# --- ОБНОВЛЁННАЯ КОМАНДА СТАТИСТИКИ ---
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
-    register_user(message.chat.id)
+    chat_id = message.chat.id
+    register_user(chat_id)
+    
+    # 1. Измерение пинга до Telegram API
+    start_ping = time.time()
+    bot.get_me()
+    ping_ms = int((time.time() - start_ping) * 1000)
+    
+    # 2. Определение порядкового номера пользователя
+    users_list = list(active_users)
+    user_number = users_list.index(chat_id) + 1 if chat_id in users_list else len(users_list)
+    
+    # 3. Расчёт времени работы
     uptime_seconds = int(time.time() - bot_start_time)
     hours = uptime_seconds // 3600
     minutes = (uptime_seconds % 3600) // 60
@@ -122,6 +134,8 @@ def stats_command(message):
         f"👥 Активных пользователей: `{len(active_users)}`\n"
         f"⏱ Время работы: `{hours}ч {minutes}м`\n"
         f"📥 Скачано треков: `{stats_data['total_downloads']}`\n"
+        f"⚡️ Пинг сервера: `{ping_ms} мс`\n"
+        f"👤 Твой номер в системе: `#{user_number}`\n\n"
         f"🟢 Статус: `Онлайн (Render)`"
     )
     bot.reply_to(message, stats_text, parse_mode="Markdown")
@@ -376,10 +390,9 @@ def callback_download_track(call):
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
 
+
     
     
         
     
     
-        
-            
