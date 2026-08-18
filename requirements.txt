@@ -3,4 +3,3 @@ requests
 yt-dlp
 urllib3
 certifi
-imageio_ffmpeg
