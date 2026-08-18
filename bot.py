@@ -6,6 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import json
+import imageio_ffmpeg
 
 # --- ВЕБ-СЕРВЕР (Для Render) ---
 class DummyHandler(BaseHTTPRequestHandler):
@@ -20,7 +21,7 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- БОТ И БЭКАП ГРУППА ---
-API_TOKEN = os.environ.get("BOT_TOKEN", "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY")
+API_TOKEN = os.environ.get("BOT_TOKEN")
 BACKUP_CHANNEL_ID = -1004445455425
 
 bot = telebot.TeleBot(API_TOKEN)
@@ -175,6 +176,7 @@ def handle_chosen_inline(chosen):
             "writethumbnail": True,
             "quiet": True,
             "socket_timeout": 15,
+            "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
                 {"key": "EmbedThumbnail"}
@@ -399,126 +401,95 @@ def handle_navigation(call):
         filter_type = data[-1]
         query = "_".join(data[1:-1])
         new_query = f"{query} {filter_type}"
-        search_music_Привет!
+        search_music_by_query(call.message, query=new_query, page=1, is_new=False, is_filter=True)
+        
+    elif data[0] == "back":
+        query = "_".join(data[1:])
+        search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False)
 
-Я также посмотрел прикрепленный файл 1000010121.jpg. Твой `requirements.txt` на GitHub собран правильно: `pyTelegramBotAPI`, `requests`, `yt-dlp`, `urllib3`, `certifi` и `imageio_ffmpeg` — это ровно то, что нужно для работы этого скрипта. Использование `imageio_ffmpeg` — отличный ход для деплоя на облачные платформы вроде Render, где установка системного FFmpeg иногда вызывает проблемы.
-
-### ⚠️ Важно: Безопасность токена
-В отправленном тобой коде **засветился боевой токен бота** (`8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY`). 
-Его нужно **срочно сбросить**, иначе кто угодно сможет перехватить управление твоим ботом! Для этого зайди в `@BotFather`, выбери своего бота и нажми `/revoke`. Новый токен пропиши в настройках Environment Variables на Render.
-
-Вот твой код с убранным токеном и небольшими косметическими правками для безопасности:
-
-```python
-import os
-import telebot
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, InputMediaAudio
-import yt_dlp
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import time
-import json
-import imageio_ffmpeg
-
-# --- ВЕБ-СЕРВЕР (Для Render) ---
-class DummyHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-
-def run_dummy_server():
-    port = int(os.environ.get("PORT", 10000))
-    HTTPServer(('0.0.0.0', port), DummyHandler).serve_forever()
-
-threading.Thread(target=run_dummy_server, daemon=True).start()
-
-# --- БОТ И БЭКАП ГРУППА ---
-# Токен теперь берется ТОЛЬКО из переменных окружения. Не вписывай его сюда текстом!
-API_TOKEN = os.environ.get("BOT_TOKEN") 
-BACKUP_CHANNEL_ID = -1004445455425
-
-bot = telebot.TeleBot(API_TOKEN)
-tracks_cache = {}
-inline_tracks_cache = {}
-original_queries = {}
-waiting_for_custom_stars = set()
-
-# Переменные хранения данных
-active_users = set()
-stats_data = {"total_downloads": 0}
-audio_cache = {}
-
-# --- СИСТЕМА ЕДИНОГО БЭКАПА ЧЕРЕЗ ЗАКРЕП ---
-def restore_all_data():
-    global active_users, stats_data, audio_cache
-    try:
-        chat = bot.get_chat(BACKUP_CHANNEL_ID)
-        if chat.pinned_message and chat.pinned_message.document:
-            file_info = bot.get_file(chat.pinned_message.document.file_id)
-            downloaded_file = bot.download_file(file_info.file_path)
-            data = json.loads(downloaded_file.decode('utf-8'))
-            
-            active_users = set(data.get("users", []))
-            stats_data = data.get("stats", {"total_downloads": 0})
-            audio_cache = data.get("cache", {})
-            print("✅ Все данные успешно восстановлены из закрепа!")
-    except Exception as e:
-        print(f"⚠️ Ошибка или отсутствие закрепа при автовосстановлении: {e}")
-
-def save_all_data():
-    try:
-        data = {
-            "users": list(active_users),
-            "stats": stats_data,
-            "cache": audio_cache
-        }
-        with open("data.json", "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-            
-        with open("data.json", "rb") as f:
-            msg = bot.send_document(BACKUP_CHANNEL_ID, f, caption="💾 Бэкап базы данных")
-            try:
-                bot.pin_chat_message(BACKUP_CHANNEL_ID, msg.message_id, disable_notification=True)
-            except Exception as pe:
-                print(f"Ошибка закрепления: {pe}")
-    except Exception as e:
-        print(f"Ошибка сохранения бэкапа: {e}")
-
-# Восстанавливаем данные перед стартом бота
-restore_all_data()
-bot_start_time = time.time()
-
-def register_user(chat_id):
-    if chat_id not in active_users:
-        active_users.add(chat_id)
-        save_all_data()
-
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    chat_id = message.chat.id
+@bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
+def handle_download_callback(call):
+    chat_id = call.message.chat.id
     register_user(chat_id)
-    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n🔎 Можешь искать музыку прямо в любых чатах, просто написав: `@DevMusicSearch_bot название`\n\n💰 Поддержать разработчика: /donate\n📊 Статистика бота: /stats")
-
-@bot.my_chat_member_handler()
-def handle_chat_member(message):
-    chat_id = message.chat.id
-    new_status = message.new_chat_member.status
-    if new_status in ['kicked', 'left']:
-        if chat_id in active_users:
-            active_users.remove(chat_id)
-            save_all_data()
-    elif new_status == 'member':
-        if chat_id not in active_users:
-            active_users.add(chat_id)
-            save_all_data()
-
-# --- ИНЛАЙН-РЕЖИМ ПОИСКА ВО ВСЕХ ЧАТАХ ---1
-@bot.inline_handler(func=lambda query: True)
-def inline_query(query):
-    search_text = query.query.strip()
-    if not search_text:
-        return
+    index = int(call.data.replace("dl_", ""))
+    user_tracks = tracks_cache.get(chat_id, [])
     
+    if index >= len(user_tracks):
+        bot.answer_callback_query(call.id, "❌ Трек не найден в кэше.")
+        return
+        
+    track = user_tracks[index]
+    track_url = track['url']
+    title = track.get('title', 'Трек')
+    uploader = track.get('uploader', 'Музыка')
+    
+    bot.answer_callback_query(call.id, f"📥 Скачиваю: {title[:30]}...")
+    msg = bot.send_message(chat_id, f"⏳ Загружаю трек: {title[:40]}...")
+    
+    if track_url in audio_cache and audio_cache[track_url].startswith("http") == False:
+        try:
+            bot.send_audio(chat_id, audio_cache[track_url], title=title, performer=uploader)
+            bot.delete_message(chat_id, msg.message_id)
+            stats_data["total_downloads"] += 1
+            save_all_data()
+            return
+        except Exception as e:
+            print(f"Ошибка отправки из кэша: {e}")
+
+    audio_filename = None
+    thumbnail_filename = None
     try:
-        ydl_opts = {"extract_flat": True, "quiet": True}
-        search_query = f"scsearch10:{search_text
+        ydl_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
+            "writethumbnail": True,
+            "quiet": True,
+            "socket_timeout": 15,
+            "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
+            "postprocessors": [
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
+                {"key": "EmbedThumbnail"}
+            ]
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(track_url, download=True)
+            filename = ydl.prepare_filename(info)
+            audio_filename = os.path.splitext(filename)[0] + ".mp3"
+            
+            base_name = os.path.splitext(filename)[0]
+            for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                if os.path.exists(base_name + ext):
+                    thumbnail_filename = base_name + ext
+                    break
+
+        with open(audio_filename, "rb") as audio:
+            thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
+            
+            sent_msg = bot.send_audio(
+                chat_id, 
+                audio, 
+                title=info.get('title', title), 
+                performer=info.get('uploader', uploader),
+                thumbnail=thumb_file
+            )
+            if thumb_file:
+                thumb_file.close()
+            
+            audio_cache[track_url] = sent_msg.audio.file_id
+
+        bot.delete_message(chat_id, msg.message_id)
+        stats_data["total_downloads"] += 1
+        save_all_data()
+    except Exception as e:
+        print(f"Ошибка скачивания: {e}")
+        bot.edit_message_text("❌ Не удалось скачать трек.", chat_id, msg.message_id)
+    finally:
+        if audio_filename and os.path.exists(audio_filename):
+            try: os.remove(audio_filename)
+            except: pass
+        if thumbnail_filename and os.path.exists(thumbnail_filename):
+            try: os.remove(thumbnail_filename)
+            except: pass
+
+bot.infinity_polling()
+            
