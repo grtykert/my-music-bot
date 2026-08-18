@@ -1,6 +1,6 @@
 import os
 import telebot
-from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, InputMediaAudio
 import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -84,7 +84,7 @@ def register_user(chat_id):
 def send_welcome(message):
     chat_id = message.chat.id
     register_user(chat_id)
-    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n🔎 Можешь искать музыку прямо в любых чатах, просто написав: `@твой_юзнейм_бота название`\n\n💰 Поддержать разработчика: /donate\n📊 Статистика бота: /stats")
+    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n🔎 Можешь искать музыку прямо в любых чатах, просто написав: `@DevMusicSearch_bot название`\n\n💰 Поддержать разработчика: /donate\n📊 Статистика бота: /stats")
 
 @bot.my_chat_member_handler()
 def handle_chat_member(message):
@@ -124,9 +124,9 @@ def inline_query(query):
                 telebot.types.InlineQueryResultArticle(
                     id=str(i),
                     title=title[:50],
-                    description=f"Автор: {uploader} | Нажми для отправки",
+                    description=f"Автор: {uploader} | Нажми для отправки в чат",
                     input_message_content=telebot.types.InputTextMessageContent(
-                        message_text=f"🎵 Выбран трек: {title}"
+                        message_text=f"⏳ Загружаю трек: {title[:40]}..."
                     )
                 )
             )
@@ -148,11 +148,20 @@ def handle_chosen_inline(chosen):
     track_url = track['url']
     title = track.get('title', 'Трек')
     uploader = track.get('uploader', 'Музыка')
+    inline_msg_id = chosen.inline_message_id
     
     # 1. ПРОВЕРКА КЭША
     if track_url in audio_cache:
         try:
-            bot.send_audio(user_id, audio_cache[track_url], title=title, performer=uploader)
+            # Если трек есть в кэше, сразу заменяем текст в чате на аудио из file_id
+            bot.edit_message_media(
+                media=InputMediaAudio(
+                    media=audio_cache[track_url],
+                    title=title,
+                    performer=uploader
+                ),
+                inline_message_id=inline_msg_id
+            )
             stats_data["total_downloads"] += 1
             save_all_data()
             return
@@ -187,24 +196,33 @@ def handle_chosen_inline(chosen):
         with open(audio_filename, "rb") as audio:
             thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
             
-            sent_msg = bot.send_audio(
-                user_id, 
-                audio, 
-                title=info.get('title', title), 
-                performer=info.get('uploader', uploader),
-                thumb=thumb_file
+            # Заменяем сообщение в группе на скачанный аудиофайл с обложкой
+            sent_media = bot.edit_message_media(
+                media=InputMediaAudio(
+                    media=audio,
+                    title=info.get('title', title),
+                    performer=info.get('uploader', uploader)
+                ),
+                inline_message_id=inline_msg_id
             )
             if thumb_file:
                 thumb_file.close()
 
-            if sent_msg and sent_msg.audio:
-                audio_cache[track_url] = sent_msg.audio.file_id
+            # Сохраняем file_id в кэш (если Telegram вернул объект сообщения со старой структурой редактирования)
+            # При edit_message_media file_id можно получить или кэшировать по URL
+            audio_cache[track_url] = audio_filename # на будущее или file_id если доступен
 
         stats_data["total_downloads"] += 1
         save_all_data()
     except Exception as e:
         print(f"Ошибка скачивания (инлайн): {e}")
-        bot.send_message(user_id, "❌ Не удалось скачать выбранный трек.")
+        try:
+            bot.edit_message_text(
+                text="❌ Не удалось скачать выбранный трек.",
+                inline_message_id=inline_msg_id
+            )
+        except:
+            pass
     finally:
         if audio_filename and os.path.exists(audio_filename):
             try: os.remove(audio_filename)
@@ -484,6 +502,7 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+    
     
 
 
