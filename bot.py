@@ -6,6 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import json
+import imageio_ffmpeg  # 👈 1. ДОБАВЛЕН ИМПОРТ FFmpeg
 
 # --- ВЕБ-СЕРВЕР (Для Render) ---
 class DummyHandler(BaseHTTPRequestHandler):
@@ -20,7 +21,7 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- БОТ И БЭКАП ГРУППА ---
-API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
+API_TOKEN = os.environ.get("BOT_TOKEN", "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY")
 BACKUP_CHANNEL_ID = -1004445455425
 
 bot = telebot.TeleBot(API_TOKEN)
@@ -151,9 +152,8 @@ def handle_chosen_inline(chosen):
     inline_msg_id = chosen.inline_message_id
     
     # 1. ПРОВЕРКА КЭША
-    if track_url in audio_cache:
+    if track_url in audio_cache and audio_cache[track_url].startswith("http") == False:
         try:
-            # Если трек есть в кэше, сразу заменяем текст в чате на аудио из file_id
             bot.edit_message_media(
                 media=InputMediaAudio(
                     media=audio_cache[track_url],
@@ -172,13 +172,16 @@ def handle_chosen_inline(chosen):
     audio_filename = None
     thumbnail_filename = None
     try:
+        # 👈 2. ОБНОВЛЕННЫЕ НАСТРОЙКИ С ПУТЕМ К FFMPEG И УСКОРЕНИЕМ
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
             "writethumbnail": True,
             "quiet": True,
+            "socket_timeout": 15,
+            "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
             "postprocessors": [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
                 {"key": "EmbedThumbnail"}
             ]
         }
@@ -196,7 +199,6 @@ def handle_chosen_inline(chosen):
         with open(audio_filename, "rb") as audio:
             thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
             
-            # Заменяем сообщение в группе на скачанный аудиофайл с обложкой
             sent_media = bot.edit_message_media(
                 media=InputMediaAudio(
                     media=audio,
@@ -207,10 +209,6 @@ def handle_chosen_inline(chosen):
             )
             if thumb_file:
                 thumb_file.close()
-
-            # Сохраняем file_id в кэш (если Telegram вернул объект сообщения со старой структурой редактирования)
-            # При edit_message_media file_id можно получить или кэшировать по URL
-            audio_cache[track_url] = audio_filename # на будущее или file_id если доступен
 
         stats_data["total_downloads"] += 1
         save_all_data()
@@ -448,13 +446,16 @@ def callback_download_track(call):
     audio_filename = None
     thumbnail_filename = None
     try:
+        # 👈 3. ОБНОВЛЕННЫЕ НАСТРОЙКИ С ПУТЕМ К FFMPEG И УСКОРЕНИЕМ
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
             "writethumbnail": True,
             "quiet": True,
+            "socket_timeout": 15,
+            "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
             "postprocessors": [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"},
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
                 {"key": "EmbedThumbnail"}
             ]
         }
@@ -502,6 +503,7 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+            
     
     
 
