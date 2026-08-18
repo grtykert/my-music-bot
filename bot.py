@@ -1,4 +1,4 @@
-mport os
+import os
 import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, InputMediaAudio
 import yt_dlp
