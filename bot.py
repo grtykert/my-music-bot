@@ -19,8 +19,10 @@ def run_dummy_server():
 
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
-# --- БОТ ---
+# --- БОТ И БЭКАП ГРУППА ---
 API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
+BACKUP_CHANNEL_ID = -1004445455425
+
 bot = telebot.TeleBot(API_TOKEN)
 tracks_cache = {}
 original_queries = {}
@@ -31,21 +33,49 @@ USERS_FILE = "users.json"
 STATS_FILE = "stats.json"
 AUDIO_CACHE_FILE = "audio_cache.json"  # Файл для хранения file_id отправленных треков
 
+# --- ФУНКЦИИ БЭКАПА И ВОССТАНОВЛЕНИЯ ---
+def restore_from_channel(filename):
+    try:
+        messages = bot.get_chat_history(BACKUP_CHANNEL_ID, limit=10)
+        for msg in messages:
+            if msg.document and msg.document.file_name == filename:
+                file_info = bot.get_file(msg.document.file_id)
+                downloaded_file = bot.download_file(file_info.file_path)
+                with open(filename, 'wb') as f:
+                    f.write(downloaded_file)
+                print(f"Успешно восстановлен файл {filename} из бэкапа.")
+                return True
+    except Exception as e:
+        print(f"Ошибка восстановления {filename}: {e}")
+    return False
+
+def backup_to_channel(filename):
+    try:
+        if os.path.exists(filename):
+            with open(filename, 'rb') as f:
+                bot.send_document(BACKUP_CHANNEL_ID, f)
+    except Exception as e:
+        print(f"Ошибка отправки бэкапа {filename}: {e}")
+
 def load_json(filename, default_value):
+    if not os.path.exists(filename):
+        restore_from_channel(filename)
+
     if os.path.exists(filename):
         try:
             with open(filename, "r") as f:
                 return json.load(f)
-        except:
-            pass
+        except Exception as e:
+            print(f"Ошибка чтения {filename}: {e}")
     return default_value
 
 def save_json(filename, data):
     try:
         with open(filename, "w") as f:
             json.dump(data, f)
-    except:
-        pass
+        backup_to_channel(filename)
+    except Exception as e:
+        print(f"Ошибка сохранения {filename}: {e}")
 
 # Загружаем постоянные данные
 active_users = set(load_json(USERS_FILE, []))
@@ -82,6 +112,7 @@ def handle_chat_member(message):
 # --- КОМАНДА СТАТИСТИКИ ---
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
+    register_user(message.chat.id)
     uptime_seconds = int(time.time() - bot_start_time)
     hours = uptime_seconds // 3600
     minutes = (uptime_seconds % 3600) // 60
@@ -154,7 +185,8 @@ def checkout(pre_checkout_query):
 def got_payment(message):
     bot.reply_to(message, "🎉 Ура! Огромное спасибо за донат! Твоя поддержка бесценна ❤️")
 
-@bot.message_handler(func=lambda message: not message.text.startswith('/'))
+# Работает только в ЛИЧНЫХ сообщениях (в группе бэкапов молчит)
+@bot.message_handler(func=lambda message: message.chat.type == 'private' and not message.text.startswith('/'))
 def text_handler(message):
     chat_id = message.chat.id
     register_user(chat_id)
@@ -343,6 +375,8 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+
+    
     
         
     
