@@ -21,7 +21,7 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- БОТ И БЭКАП ГРУППА ---
-API_TOKEN = os.environ.get("BOT_TOKEN")
+API_TOKEN = os.environ.get("8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY")
 BACKUP_CHANNEL_ID = -1004445455425
 
 bot = telebot.TeleBot(API_TOKEN)
