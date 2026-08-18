@@ -26,13 +26,10 @@ tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
 
-# Твой Telegram ID для админ-панели (замени на свой!)
-ADMIN_ID = 5378591975# <--- ВПИШИ СВОЙ ID СЮДА
-
 # Файлы для сохранения данных
 USERS_FILE = "users.json"
 STATS_FILE = "stats.json"
-HISTORY_FILE = "user_history.json"
+AUDIO_CACHE_FILE = "audio_cache.json"  # Файл для хранения file_id отправленных треков
 
 def load_json(filename, default_value):
     if os.path.exists(filename):
@@ -52,26 +49,16 @@ def save_json(filename, data):
 
 # Загружаем постоянные данные
 active_users = set(load_json(USERS_FILE, []))
-user_history = load_json(HISTORY_FILE, {})
+stats_data = load_json(STATS_FILE, {"total_downloads": 0})
+audio_cache = load_json(AUDIO_CACHE_FILE, {})  # Загрузка базы кэша
 
 # Время запуска (сбрасывается при перезагрузке)
 bot_start_time = time.time()
-
-# Загружаем статистику скачиваний из файла
-stats_data = load_json(STATS_FILE, {"total_downloads": 0})
 
 def register_user(chat_id):
     if chat_id not in active_users:
         active_users.add(chat_id)
         save_json(USERS_FILE, list(active_users))
-
-def save_user_action(chat_id, query):
-    chat_id_str = str(chat_id)
-    if chat_id_str not in user_history:
-        user_history[chat_id_str] = []
-    user_history[chat_id_str].append(query)
-    user_history[chat_id_str] = user_history[chat_id_str][-10:] # Оставляем последние 10 запросов
-    save_json(HISTORY_FILE, user_history)
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -107,23 +94,6 @@ def stats_command(message):
         f"🟢 Статус: `Онлайн (Render)`"
     )
     bot.reply_to(message, stats_text, parse_mode="Markdown")
-
-# --- АДМИН-ПАНЕЛЬ ---
-@bot.message_handler(commands=['admin'])
-def admin_panel(message):
-    if message.from_user.id != ADMIN_ID:
-        bot.reply_to(message, "❌ У тебя нет доступа к этой команде.")
-        return
-    
-    text = "🛠 **Панель администратора:**\n\n"
-    text += f"👥 Всего пользователей: `{len(active_users)}`\n\n"
-    text += "📜 **Последняя активность пользователей:**\n"
-    
-    for uid, queries in list(user_history.items())[-10:]:
-        last_query = queries[-1] if queries else "нет запросов"
-        text += f"• ID `{uid}`: искал `{last_query}`\n"
-        
-    bot.reply_to(message, text, parse_mode="Markdown")
 
 # --- КОМАНДА ДОНАТА ---
 @bot.message_handler(commands=['donate'])
@@ -198,9 +168,6 @@ def text_handler(message):
         else:
             bot.reply_to(message, "❌ Пожалуйста, введи корректное число (например, 30). Попробуй снова через /donate")
         return
-
-    # Сохраняем запрос в историю для админки
-    save_user_action(chat_id, message.text)
 
     original_queries[chat_id] = message.text
     search_music_by_query(message, query=message.text, page=1, is_new=True)
@@ -283,24 +250,45 @@ def handle_navigation(call):
         query = "_".join(data[1:])
         search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False)
 
+# --- ИЗМЕНЕННАЯ ФУНКЦИЯ СКАЧИВАНИЯ С КЭШЕМ ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def callback_download_track(call):
     index = int(call.data.replace("dl_", ""))
-    user_tracks = tracks_cache.get(call.message.chat.id, [])
+    chat_id = call.message.chat.id
+    user_tracks = tracks_cache.get(chat_id, [])
+    
     if index >= len(user_tracks):
         bot.answer_callback_query(call.id, "❌ Список устарел.")
         return
 
     track = user_tracks[index]
+    track_url = track['url']
+
+    # 1. ПРОВЕРКА КЭША (отправка за 1 секунду)
+    if track_url in audio_cache:
+        bot.answer_callback_query(call.id, "⚡ Моментальная отправка...")
+        msg = bot.send_message(chat_id, "🚀 Отправляю из кэша...")
+        try:
+            bot.send_audio(chat_id, audio_cache[track_url])
+            stats_data["total_downloads"] += 1
+            save_json(STATS_FILE, stats_data)
+            bot.delete_message(chat_id, msg.message_id)
+            return
+        except Exception as e:
+            print(f"Ошибка отправки из кэша: {e}")
+            del audio_cache[track_url]
+            save_json(AUDIO_CACHE_FILE, audio_cache)
+
+    # 2. ЕСЛИ В КЭШЕ НЕТ - СКАЧИВАЕМ (первый раз занимает время)
     bot.answer_callback_query(call.id, "📥 Скачиваю...")
-    msg = bot.send_message(call.message.chat.id, "⏳ Подожди, конвертирую...")
+    msg = bot.send_message(chat_id, "⏳ Подожди, загружаю с сервера...")
 
     audio_filename = None
     thumbnail_filename = None
     try:
         ydl_opts = {
             "format": "bestaudio/best",
-            "outtmpl": f"song_{call.message.chat.id}_%(id)s.%(ext)s",
+            "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
             "writethumbnail": True,
             "quiet": True,
             "postprocessors": [
@@ -309,7 +297,7 @@ def callback_download_track(call):
             ]
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(track['url'], download=True)
+            info = ydl.extract_info(track_url, download=True)
             filename = ydl.prepare_filename(info)
             audio_filename = os.path.splitext(filename)[0] + ".mp3"
             
@@ -321,8 +309,10 @@ def callback_download_track(call):
 
         with open(audio_filename, "rb") as audio:
             thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
-            bot.send_audio(
-                call.message.chat.id, 
+            
+            # Сохраняем результат отправки в переменную sent_msg
+            sent_msg = bot.send_audio(
+                chat_id, 
                 audio, 
                 title=info.get('title'), 
                 performer=info.get('uploader'),
@@ -331,13 +321,18 @@ def callback_download_track(call):
             if thumb_file:
                 thumb_file.close()
 
+            # 3. ДОБАВЛЯЕМ FILE_ID В КЭШ ДЛЯ СЛЕДУЮЩИХ РАЗОВ
+            if sent_msg and sent_msg.audio:
+                audio_cache[track_url] = sent_msg.audio.file_id
+                save_json(AUDIO_CACHE_FILE, audio_cache)
+
         stats_data["total_downloads"] += 1
         save_json(STATS_FILE, stats_data)
         
-        bot.delete_message(call.message.chat.id, msg.message_id)
+        bot.delete_message(chat_id, msg.message_id)
     except Exception as e:
         print(f"Ошибка скачивания: {e}")
-        bot.edit_message_text("❌ Не удалось скачать.", call.message.chat.id, msg.message_id)
+        bot.edit_message_text("❌ Не удалось скачать.", chat_id, msg.message_id)
     finally:
         if audio_filename and os.path.exists(audio_filename):
             try: os.remove(audio_filename)
@@ -348,6 +343,7 @@ def callback_download_track(call):
 
 bot.delete_webhook(drop_pending_updates=True)
 bot.infinity_polling()
+    
         
     
     
