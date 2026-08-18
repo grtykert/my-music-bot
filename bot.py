@@ -399,7 +399,7 @@ def handle_navigation(call):
         filter_type = data[-1]
         query = "_".join(data[1:-1])
         new_query = f"{query} {filter_type}"
-        search_music_Привет! Код выглядит очень достойно. Система поиска и скачивания музыки реализована грамотно, а идея делать бэкап базы данных прямо в закреплённое сообщение Telegram-канала — это крутое и нестандартное решение, которое избавляет от необходимости поднимать отдельную СУБД.
+        search_music_Привет!
 
 Я также посмотрел прикрепленный файл 1000010121.jpg. Твой `requirements.txt` на GitHub собран правильно: `pyTelegramBotAPI`, `requests`, `yt-dlp`, `urllib3`, `certifi` и `imageio_ffmpeg` — это ровно то, что нужно для работы этого скрипта. Использование `imageio_ffmpeg` — отличный ход для деплоя на облачные платформы вроде Render, где установка системного FFmpeg иногда вызывает проблемы.
 
@@ -512,7 +512,7 @@ def handle_chat_member(message):
             active_users.add(chat_id)
             save_all_data()
 
-# --- ИНЛАЙН-РЕЖИМ ПОИСКА ВО ВСЕХ ЧАТАХ ---
+# --- ИНЛАЙН-РЕЖИМ ПОИСКА ВО ВСЕХ ЧАТАХ ---1
 @bot.inline_handler(func=lambda query: True)
 def inline_query(query):
     search_text = query.query.strip()
