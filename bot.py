@@ -105,7 +105,7 @@ def register_user(chat_id):
 def send_welcome(message):
     chat_id = message.chat.id
     register_user(chat_id)
-    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n🔎 Можешь искать музыку прямо в любых чатах, просто написав: `@DevMusicSearch_bot название`\n\n💰 Поддержать разработчика: /donate\n📊 Статистика бота: /stats")
+    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n🔎 Можешь искать музыку прямо в любых чатах, просто написав: `@DevMusicSearch_bot название`\nВ группах используй команду: `/m название`\n\n💰 Поддержать разработчика: /donate\n📊 Статистика бота: /stats")
 
 @bot.my_chat_member_handler()
 def handle_chat_member(message):
@@ -328,6 +328,22 @@ def checkout(pre_checkout_query):
 def got_payment(message):
     bot.reply_to(message, "🎉 Ура! Огромное спасибо за донат! Твоя поддержка бесценна ❤️")
 
+# --- ДОБАВЛЕНО: КОМАНДА ДЛЯ ГРУПП ---
+@bot.message_handler(commands=['m', 'play', 'music'])
+def handle_group_music(message):
+    chat_id = message.chat.id
+    register_user(chat_id)
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.reply_to(message, "❗️ Напиши название трека после команды.\nПример: `/m terranova`", parse_mode="Markdown")
+        return
+        
+    query = args[1]
+    original_queries[chat_id] = query
+    search_music_by_query(message, query=query, page=1, is_new=True)
+
+# --- ОБРАБОТЧИК ТЕКСТА В ЛС ---
 @bot.message_handler(func=lambda message: message.chat.type == 'private' and not message.text.startswith('/'))
 def text_handler(message):
     chat_id = message.chat.id
@@ -509,4 +525,4 @@ def handle_download_callback(call):
             except: pass
 
 bot.infinity_polling()
-        
+            
