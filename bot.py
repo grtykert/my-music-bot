@@ -105,7 +105,14 @@ def register_user(chat_id):
 def send_welcome(message):
     chat_id = message.chat.id
     register_user(chat_id)
-    bot.reply_to(message, "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n🔎 Можешь искать музыку прямо в любых чатах просто написав:`/m название`\n\n💰 Поддержать разработчика: /donate\n📊 Статистика бота: /stats")
+    bot.reply_to(
+        message, 
+        "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n"
+        "🔎 Можешь искать музыку прямо в любых чатах просто написав:`/m название`\n"
+        "💬 Наш канал: https://t.me/teruteg\n\n"
+        "💰 Поддержать разработчика: /donate\n"
+        "📊 Статистика бота: /stats"
+    )
 
 @bot.my_chat_member_handler()
 def handle_chat_member(message):
@@ -525,4 +532,5 @@ def handle_download_callback(call):
             except: pass
 
 bot.infinity_polling()
+    
             
