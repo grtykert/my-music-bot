@@ -21,8 +21,9 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- БОТ И БЭКАП ГРУППА ---
-API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zraY"
+API_TOKEN = "8957555829:AAFXEQ7b24M5YMbnZpRB8cYLnSi-VL6zray"
 BACKUP_CHANNEL_ID = -1004445455425
+ADMIN_ID = 5378591975  # Твой ID всегда на 1-м месте
 
 bot = telebot.TeleBot(API_TOKEN)
 tracks_cache = {}
@@ -30,8 +31,8 @@ inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
 
-# Переменные хранения данных
-active_users = set()
+# Переменные хранения данных (теперь список для контроля порядка)
+active_users = []
 stats_data = {"total_downloads": 0}
 audio_cache = {}
 
@@ -45,17 +46,31 @@ def restore_all_data():
             downloaded_file = bot.download_file(file_info.file_path)
             data = json.loads(downloaded_file.decode('utf-8'))
             
-            active_users = set(data.get("users", []))
+            active_users = data.get("users", [])
             stats_data = data.get("stats", {"total_downloads": 0})
             audio_cache = data.get("cache", {})
+            
+            # Гарантируем, что ты всегда первый в списке при загрузке бэкапа
+            if ADMIN_ID in active_users:
+                active_users.remove(ADMIN_ID)
+            active_users.insert(0, ADMIN_ID)
+            
             print("✅ Все данные успешно восстановлены из закрепа!")
     except Exception as e:
         print(f"⚠️ Ошибка или отсутствие закрепа при автовосстановлении: {e}")
+        # Если бэкапа нет, сразу добавляем тебя
+        if ADMIN_ID not in active_users:
+            active_users.insert(0, ADMIN_ID)
 
 def save_all_data():
     try:
+        # Перед сохранением убеждаемся, что ты на 1-м месте
+        if ADMIN_ID in active_users:
+            active_users.remove(ADMIN_ID)
+        active_users.insert(0, ADMIN_ID)
+
         data = {
-            "users": list(active_users),
+            "users": active_users,
             "stats": stats_data,
             "cache": audio_cache
         }
@@ -77,8 +92,13 @@ restore_all_data()
 bot_start_time = time.time()
 
 def register_user(chat_id):
-    if chat_id not in active_users:
-        active_users.add(chat_id)
+    if chat_id == ADMIN_ID:
+        if chat_id in active_users:
+            active_users.remove(chat_id)
+        active_users.insert(0, chat_id)
+        save_all_data()
+    elif chat_id not in active_users:
+        active_users.append(chat_id)
         save_all_data()
 
 @bot.message_handler(commands=['start'])
@@ -92,13 +112,11 @@ def handle_chat_member(message):
     chat_id = message.chat.id
     new_status = message.new_chat_member.status
     if new_status in ['kicked', 'left']:
-        if chat_id in active_users:
+        if chat_id in active_users and chat_id != ADMIN_ID:
             active_users.remove(chat_id)
             save_all_data()
     elif new_status == 'member':
-        if chat_id not in active_users:
-            active_users.add(chat_id)
-            save_all_data()
+        register_user(chat_id)
 
 # --- ИНЛАЙН-РЕЖИМ ПОИСКА ВО ВСЕХ ЧАТАХ ---
 @bot.inline_handler(func=lambda query: True)
@@ -235,8 +253,7 @@ def stats_command(message):
     bot.get_me()
     ping_ms = int((time.time() - start_ping) * 1000)
     
-    users_list = list(active_users)
-    user_number = users_list.index(chat_id) + 1 if chat_id in users_list else len(users_list)
+    user_number = active_users.index(chat_id) + 1 if chat_id in active_users else len(active_users) + 1
     
     uptime_seconds = int(time.time() - bot_start_time)
     hours = uptime_seconds // 3600
@@ -492,4 +509,4 @@ def handle_download_callback(call):
             except: pass
 
 bot.infinity_polling()
-            
+        
