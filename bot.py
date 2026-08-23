@@ -111,7 +111,8 @@ def send_welcome(message):
         "🔎 Можешь искать музыку прямо в любых чатах просто написав:`/m название`\n"
         "💬 Наш канал: https://t.me/teruteg\n\n"
         "💰 Поддержать разработчика: /donate\n"
-        "📊 Статистика бота: /stats"
+        "📊 Статистика бота: /stats\n"
+        "🧑‍🎤 Поиск по автору: /author Имя"
     )
 
 # --- АДМИНСКАЯ КОМАНДА ДЛЯ ОЧИСТКИ КЭША ТРЕКОВ ---
@@ -360,6 +361,24 @@ def handle_group_music(message):
     query = args[1]
     original_queries[chat_id] = query
     search_music_by_query(message, query=query, page=1, is_new=True)
+
+# ---> НОВЫЙ БЛОК ДЛЯ ПОИСКА ПО АВТОРУ <---
+@bot.message_handler(commands=['author', 'artist', 'a'])
+def handle_author_music(message):
+    chat_id = message.chat.id
+    register_user(chat_id)
+    
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        bot.reply_to(message, "❗️ Напиши имя исполнителя после команды.\nПример: `/author Miyagi`", parse_mode="Markdown")
+        return
+        
+    author_name = args[1]
+    original_queries[chat_id] = author_name
+    
+    # Передаем имя автора в твою готовую функцию поиска
+    search_music_by_query(message, query=author_name, page=1, is_new=True)
+# ---> КОНЕЦ НОВОГО БЛОКА <---
 
 @bot.message_handler(func=lambda message: message.chat.type == 'private' and not message.text.startswith('/'))
 def text_handler(message):
