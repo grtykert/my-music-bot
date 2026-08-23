@@ -114,6 +114,17 @@ def send_welcome(message):
         "📊 Статистика бота: /stats"
     )
 
+# --- АДМИНСКАЯ КОМАНДА ДЛЯ ОЧИСТКИ КЭША ТРЕКОВ ---
+@bot.message_handler(commands=['clearcache'])
+def clear_bot_cache(message):
+    if message.chat.id == ADMIN_ID:
+        global audio_cache
+        audio_cache.clear()
+        save_all_data()
+        bot.reply_to(message, "✅ Кэш треков успешно очищен! Статистика и пользователи сохранены. Теперь старые треки скачаются заново с нормальными обложками.")
+    else:
+        bot.reply_to(message, "❌ У вас нет прав для этой команды.")
+
 @bot.my_chat_member_handler()
 def handle_chat_member(message):
     chat_id = message.chat.id
@@ -204,7 +215,7 @@ def handle_chosen_inline(chosen):
             "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
-                {"key": "FFmpegThumbnailsConvertor", "format": "jpg"}, # ДОБАВЛЕНА КОНВЕРТАЦИЯ В JPG
+                {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
                 {"key": "EmbedThumbnail"}
             ]
         }
@@ -336,7 +347,6 @@ def checkout(pre_checkout_query):
 def got_payment(message):
     bot.reply_to(message, "🎉 Ура! Огромное спасибо за донат! Твоя поддержка бесценна ❤️")
 
-# --- ДОБАВЛЕНО: КОМАНДА ДЛЯ ГРУПП ---
 @bot.message_handler(commands=['m', 'play', 'music'])
 def handle_group_music(message):
     chat_id = message.chat.id
@@ -351,7 +361,6 @@ def handle_group_music(message):
     original_queries[chat_id] = query
     search_music_by_query(message, query=query, page=1, is_new=True)
 
-# --- ОБРАБОТЧИК ТЕКСТА В ЛС ---
 @bot.message_handler(func=lambda message: message.chat.type == 'private' and not message.text.startswith('/'))
 def text_handler(message):
     chat_id = message.chat.id
@@ -489,7 +498,7 @@ def handle_download_callback(call):
             "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
-                {"key": "FFmpegThumbnailsConvertor", "format": "jpg"}, # ДОБАВЛЕНА КОНВЕРТАЦИЯ В JPG
+                {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
                 {"key": "EmbedThumbnail"}
             ]
         }
@@ -520,20 +529,7 @@ def handle_download_callback(call):
             audio_cache[track_url] = sent_msg.audio.file_id
 
         bot.delete_message(chat_id, msg.message_id)
-        stats_data["total_downloads"] += 1
-        save_all_data()
-    except Exception as e:
-        print(f"Ошибка скачивания: {e}")
-        bot.edit_message_text("❌ Не удалось скачать трек.", chat_id, msg.message_id)
-    finally:
-        if audio_filename and os.path.exists(audio_filename):
-            try: os.remove(audio_filename)
-            except: pass
-        if thumbnail_filename and os.path.exists(thumbnail_filename):
-            try: os.remove(thumbnail_filename)
-            except: pass
-
-bot.infinity_polling()
+        stats_data["total_download
 
     
             
