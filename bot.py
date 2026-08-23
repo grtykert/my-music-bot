@@ -529,7 +529,22 @@ def handle_download_callback(call):
             audio_cache[track_url] = sent_msg.audio.file_id
 
         bot.delete_message(chat_id, msg.message_id)
-        stats_data["total_download
+        stats_data["total_downloads"] += 1
+                save_all_data()
+    except Exception as e:
+        print(f"Ошибка скачивания: {e}")
+        bot.edit_message_text("❌ Не удалось скачать трек.", chat_id, msg.message_id)
+    finally:
+        if audio_filename and os.path.exists(audio_filename):
+            try: os.remove(audio_filename)
+            except: pass
+        if thumbnail_filename and os.path.exists(thumbnail_filename):
+            try: os.remove(thumbnail_filename)
+            except: pass
+
+bot.infinity_polling()
+
+        
 
     
             
