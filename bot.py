@@ -35,6 +35,10 @@ inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
 
+# Определяем точный путь к файлу cookies.txt рядом со скриптом
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+COOKIE_PATH = os.path.join(BASE_DIR, "cookies.txt")
+
 # Переменные хранения данных (теперь список для контроля порядка)
 active_users = []
 stats_data = {"total_downloads": 0}
@@ -149,6 +153,9 @@ def inline_query(query):
     
     try:
         ydl_opts = {"extract_flat": True, "quiet": True}
+        if os.path.exists(COOKIE_PATH):
+            ydl_opts["cookiefile"] = COOKIE_PATH
+
         search_query = f"ytsearch10:{search_text}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(search_query, download=False)
@@ -212,7 +219,6 @@ def handle_chosen_inline(chosen):
     try:
         ydl_opts = {
             "format": "bestaudio/best",
-            "cookiefile": "cookies.txt",
             "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
             "writethumbnail": True,
             "quiet": True,
@@ -224,6 +230,9 @@ def handle_chosen_inline(chosen):
                 {"key": "EmbedThumbnail"}
             ]
         }
+        if os.path.exists(COOKIE_PATH):
+            ydl_opts["cookiefile"] = COOKIE_PATH
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(track_url, download=True)
             filename = ydl.prepare_filename(info)
@@ -394,6 +403,9 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
 
     try:
         ydl_opts = {"extract_flat": True, "quiet": True}
+        if os.path.exists(COOKIE_PATH):
+            ydl_opts["cookiefile"] = COOKIE_PATH
+
         search_query = f"ytsearch20:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(search_query, download=False)
@@ -496,7 +508,6 @@ def handle_download_callback(call):
     try:
         ydl_opts = {
             "format": "bestaudio/best",
-            "cookiefile": "cookies.txt",
             "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
             "writethumbnail": True,
             "quiet": True,
@@ -508,6 +519,9 @@ def handle_download_callback(call):
                 {"key": "EmbedThumbnail"}
             ]
         }
+        if os.path.exists(COOKIE_PATH):
+            ydl_opts["cookiefile"] = COOKIE_PATH
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(track_url, download=True)
             filename = ydl.prepare_filename(info)
@@ -550,5 +564,11 @@ def handle_download_callback(call):
         if thumbnail_filename and os.path.exists(thumbnail_filename):
             try: os.remove(thumbnail_filename)
             except: pass
+
+# Удаляем зависший вебхук и запускаем поллинг без ошибки 409
+try:
+    bot.remove_webhook()
+except Exception:
+    pass
 
 bot.infinity_polling()
