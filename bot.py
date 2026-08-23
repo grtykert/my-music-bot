@@ -204,6 +204,7 @@ def handle_chosen_inline(chosen):
             "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
+                {"key": "FFmpegThumbnailsConvertor", "format": "jpg"}, # ДОБАВЛЕНА КОНВЕРТАЦИЯ В JPG
                 {"key": "EmbedThumbnail"}
             ]
         }
@@ -488,6 +489,7 @@ def handle_download_callback(call):
             "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
+                {"key": "FFmpegThumbnailsConvertor", "format": "jpg"}, # ДОБАВЛЕНА КОНВЕРТАЦИЯ В JPG
                 {"key": "EmbedThumbnail"}
             ]
         }
@@ -527,10 +529,6 @@ def handle_download_callback(call):
         if audio_filename and os.path.exists(audio_filename):
             try: os.remove(audio_filename)
             except: pass
-        if thumbnail_filename and os.path.exists(thumbnail_filename):
-            try: os.remove(thumbnail_filename)
-            except: pass
-
-bot.infinity_polling()
+        if thumbnail_f
     
             
