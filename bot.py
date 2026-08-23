@@ -14,6 +14,10 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(('0.0.0.0', port), DummyHandler).serve_forever()
@@ -208,7 +212,7 @@ def handle_chosen_inline(chosen):
     try:
         ydl_opts = {
             "format": "bestaudio/best",
-            "cookiefile": "cookies.txt",  # <--- Добавлено
+            "cookiefile": "cookies.txt",
             "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
             "writethumbnail": True,
             "quiet": True,
@@ -492,7 +496,7 @@ def handle_download_callback(call):
     try:
         ydl_opts = {
             "format": "bestaudio/best",
-            "cookiefile": "cookies.txt",  # <--- Добавлено
+            "cookiefile": "cookies.txt",
             "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
             "writethumbnail": True,
             "quiet": True,
@@ -548,7 +552,3 @@ def handle_download_callback(call):
             except: pass
 
 bot.infinity_polling()
-        
-
-    
-            
