@@ -145,7 +145,7 @@ def inline_query(query):
     
     try:
         ydl_opts = {"extract_flat": True, "quiet": True}
-        search_query = f"scsearch10:{search_text}"
+        search_query = f"ytsearch10:{search_text}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(search_query, download=False)
             tracks = result.get("entries", [])
@@ -389,7 +389,7 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
 
     try:
         ydl_opts = {"extract_flat": True, "quiet": True}
-        search_query = f"scsearch20:{query}"
+        search_query = f"ytsearch20:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(search_query, download=False)
             all_tracks = result.get("entries", [])
@@ -533,7 +533,10 @@ def handle_download_callback(call):
         save_all_data()
     except Exception as e:
         print(f"Ошибка скачивания: {e}")
-        bot.edit_message_text("❌ Не удалось скачать трек.", chat_id, msg.message_id)
+        try:
+            bot.edit_message_text("❌ Не удалось скачать трек.", chat_id, msg.message_id)
+        except:
+            pass
     finally:
         if audio_filename and os.path.exists(audio_filename):
             try: os.remove(audio_filename)
