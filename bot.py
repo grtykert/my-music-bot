@@ -530,7 +530,7 @@ def handle_download_callback(call):
 
         bot.delete_message(chat_id, msg.message_id)
         stats_data["total_downloads"] += 1
-                save_all_data()
+        save_all_data()
     except Exception as e:
         print(f"Ошибка скачивания: {e}")
         bot.edit_message_text("❌ Не удалось скачать трек.", chat_id, msg.message_id)
