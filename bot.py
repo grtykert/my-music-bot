@@ -208,6 +208,7 @@ def handle_chosen_inline(chosen):
     try:
         ydl_opts = {
             "format": "bestaudio/best",
+            "cookiefile": "cookies.txt",  # <--- Добавлено
             "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
             "writethumbnail": True,
             "quiet": True,
@@ -491,6 +492,7 @@ def handle_download_callback(call):
     try:
         ydl_opts = {
             "format": "bestaudio/best",
+            "cookiefile": "cookies.txt",  # <--- Добавлено
             "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
             "writethumbnail": True,
             "quiet": True,
@@ -546,7 +548,6 @@ def handle_download_callback(call):
             except: pass
 
 bot.infinity_polling()
-
         
 
     
