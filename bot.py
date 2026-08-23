@@ -152,7 +152,11 @@ def inline_query(query):
         return
     
     try:
-        ydl_opts = {"extract_flat": True, "quiet": True}
+        ydl_opts = {
+            "extract_flat": True, 
+            "quiet": True,
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}}
+        }
         if os.path.exists(COOKIE_PATH):
             ydl_opts["cookiefile"] = COOKIE_PATH
 
@@ -223,6 +227,7 @@ def handle_chosen_inline(chosen):
             "writethumbnail": True,
             "quiet": True,
             "socket_timeout": 15,
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
             "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
@@ -402,7 +407,11 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
         msg = message
 
     try:
-        ydl_opts = {"extract_flat": True, "quiet": True}
+        ydl_opts = {
+            "extract_flat": True, 
+            "quiet": True,
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}}
+        }
         if os.path.exists(COOKIE_PATH):
             ydl_opts["cookiefile"] = COOKIE_PATH
 
@@ -512,6 +521,7 @@ def handle_download_callback(call):
             "writethumbnail": True,
             "quiet": True,
             "socket_timeout": 15,
+            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
             "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
@@ -548,7 +558,7 @@ def handle_download_callback(call):
             
             audio_cache[track_url] = sent_msg.audio.file_id
 
-        bot.delete_message(chat_id, msg.message_id)
+        bot.delete_message(chat_id, msg.message.id)
         stats_data["total_downloads"] += 1
         save_all_data()
     except Exception as e:
