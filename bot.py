@@ -529,6 +529,11 @@ def handle_download_callback(call):
         if audio_filename and os.path.exists(audio_filename):
             try: os.remove(audio_filename)
             except: pass
-        if thumbnail_f
+                if thumbnail_filename and os.path.exists(thumbnail_filename):
+            try: os.remove(thumbnail_filename)
+            except: pass
+
+bot.infinity_polling()
+
     
             
