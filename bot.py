@@ -14,10 +14,6 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
     HTTPServer(('0.0.0.0', port), DummyHandler).serve_forever()
@@ -34,10 +30,6 @@ tracks_cache = {}
 inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
-
-# Определяем точный путь к файлу cookies.txt рядом со скриптом
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-COOKIE_PATH = os.path.join(BASE_DIR, "cookies.txt")
 
 # Переменные хранения данных (теперь список для контроля порядка)
 active_users = []
@@ -152,15 +144,8 @@ def inline_query(query):
         return
     
     try:
-        ydl_opts = {
-            "extract_flat": True, 
-            "quiet": True,
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}}
-        }
-        if os.path.exists(COOKIE_PATH):
-            ydl_opts["cookiefile"] = COOKIE_PATH
-
-        search_query = f"ytsearch10:{search_text}"
+        ydl_opts = {"extract_flat": True, "quiet": True}
+        search_query = f"scsearch10:{search_text}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(search_query, download=False)
             tracks = result.get("entries", [])
@@ -227,7 +212,6 @@ def handle_chosen_inline(chosen):
             "writethumbnail": True,
             "quiet": True,
             "socket_timeout": 15,
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
             "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
@@ -235,9 +219,6 @@ def handle_chosen_inline(chosen):
                 {"key": "EmbedThumbnail"}
             ]
         }
-        if os.path.exists(COOKIE_PATH):
-            ydl_opts["cookiefile"] = COOKIE_PATH
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(track_url, download=True)
             filename = ydl.prepare_filename(info)
@@ -407,15 +388,8 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
         msg = message
 
     try:
-        ydl_opts = {
-            "extract_flat": True, 
-            "quiet": True,
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}}
-        }
-        if os.path.exists(COOKIE_PATH):
-            ydl_opts["cookiefile"] = COOKIE_PATH
-
-        search_query = f"ytsearch20:{query}"
+        ydl_opts = {"extract_flat": True, "quiet": True}
+        search_query = f"scsearch20:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(search_query, download=False)
             all_tracks = result.get("entries", [])
@@ -521,7 +495,6 @@ def handle_download_callback(call):
             "writethumbnail": True,
             "quiet": True,
             "socket_timeout": 15,
-            "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
             "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
             "postprocessors": [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
@@ -529,9 +502,6 @@ def handle_download_callback(call):
                 {"key": "EmbedThumbnail"}
             ]
         }
-        if os.path.exists(COOKIE_PATH):
-            ydl_opts["cookiefile"] = COOKIE_PATH
-
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(track_url, download=True)
             filename = ydl.prepare_filename(info)
@@ -558,15 +528,12 @@ def handle_download_callback(call):
             
             audio_cache[track_url] = sent_msg.audio.file_id
 
-        bot.delete_message(chat_id, msg.message.id)
+        bot.delete_message(chat_id, msg.message_id)
         stats_data["total_downloads"] += 1
         save_all_data()
     except Exception as e:
         print(f"Ошибка скачивания: {e}")
-        try:
-            bot.edit_message_text("❌ Не удалось скачать трек.", chat_id, msg.message_id)
-        except:
-            pass
+        bot.edit_message_text("❌ Не удалось скачать трек.", chat_id, msg.message_id)
     finally:
         if audio_filename and os.path.exists(audio_filename):
             try: os.remove(audio_filename)
@@ -574,11 +541,5 @@ def handle_download_callback(call):
         if thumbnail_filename and os.path.exists(thumbnail_filename):
             try: os.remove(thumbnail_filename)
             except: pass
-
-# Удаляем зависший вебхук и запускаем поллинг без ошибки 409
-try:
-    bot.remove_webhook()
-except Exception:
-    pass
 
 bot.infinity_polling()
