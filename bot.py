@@ -521,7 +521,6 @@ def handle_back_to_search(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def handle_download_callback(call):
     chat_id = call.message.chat.id
-    message_id = call.message.message_id
     register_user(chat_id)
     
     index = int(call.data.replace("dl_", ""))
@@ -538,13 +537,11 @@ def handle_download_callback(call):
     
     bot.answer_callback_query(call.id, f"📥 Загружаю: {title[:30]}...")
     
-    # Превращаем сообщение со списком в статус загрузки
-    bot.edit_message_text(
-        text=f"⏳ **Скачиваю трек:**\n🎵 {title}\n🧑‍🎤 {uploader}\n\n*Подожди пару секунд...*",
-        chat_id=chat_id,
-        message_id=message_id,
-        parse_mode="Markdown",
-        reply_markup=None
+    # Отправляем отдельное сообщение со статусом загрузки
+    status_msg = bot.send_message(
+        chat_id, 
+        f"⏳ **Скачиваю трек:**\n🎵 {title}\n🧑‍🎤 {uploader}\n\n*Подожди пару секунд...*",
+        parse_mode="Markdown"
     )
     
     try:
@@ -553,14 +550,13 @@ def handle_download_callback(call):
             file_id = audio_cache[track_url]
             bot.send_audio(chat_id, file_id, title=title, performer=uploader)
             
-            # Обновляем сообщение на статус плеера
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
             
             bot.edit_message_text(
-                text=f"▶️ **Сейчас играет:**\n🎵 {title}\n🧑‍🎤 {uploader}",
+                text=f"▶️ **Плеер:**\n🎵 {title}\n🧑‍🎤 {uploader}",
                 chat_id=chat_id,
-                message_id=message_id,
+                message_id=status_msg.message_id,
                 parse_mode="Markdown",
                 reply_markup=markup
             )
@@ -609,14 +605,14 @@ def handle_download_callback(call):
             
             audio_cache[track_url] = sent_msg.audio.file_id
 
-        # Меняем меню на аккуратную панель плеера в том же сообщении
+        # Превращаем сообщение со статусом в аккуратный плеер с кнопкой возврата
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
         
         bot.edit_message_text(
             text=f"▶️ **Трек успешно отправлен!**\n🎵 {title}\n🧑‍🎤 {uploader}",
             chat_id=chat_id,
-            message_id=message_id,
+            message_id=status_msg.message_id,
             parse_mode="Markdown",
             reply_markup=markup
         )
@@ -629,7 +625,7 @@ def handle_download_callback(call):
         bot.edit_message_text(
             text="❌ Не удалось скачать трек. Попробуй выбрать другой.",
             chat_id=chat_id,
-            message_id=message_id
+            message_id=status_msg.message_id
         )
     finally:
         if 'audio_filename' in locals() and audio_filename and os.path.exists(audio_filename):
