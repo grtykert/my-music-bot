@@ -363,7 +363,6 @@ def handle_group_music(message):
     original_queries[chat_id] = query
     search_music_by_query(message, query=query, page=1, is_new=True)
 
-# ---> НОВЫЙ БЛОК ДЛЯ ПОИСКА ПО АВТОРУ <---
 @bot.message_handler(commands=['author', 'artist', 'a'])
 def handle_author_music(message):
     chat_id = message.chat.id
@@ -376,12 +375,8 @@ def handle_author_music(message):
         
     author_name = args[1]
     original_queries[chat_id] = author_name
-    
-    # Передаем имя автора в твою готовую функцию поиска
     search_music_by_query(message, query=author_name, page=1, is_new=True)
-# ---> КОНЕЦ НОВОГО БЛОКА <---
 
-# ---> НОВЫЙ БЛОК: РЕКОМЕНДАЦИИ И ПОИСК ПО ЖАНРАМ <---
 @bot.message_handler(commands=['discover', 'genres', 'd'])
 def handle_discover(message):
     chat_id = message.chat.id
@@ -420,7 +415,6 @@ def handle_genre_selection(call):
     
     bot.answer_callback_query(call.id, "🔍 Ищу подборку...")
     search_music_by_query(call.message, query=genre_query, page=1, is_new=True)
-# ---> КОНЕЦ БЛОКА ЖАНРОВ <---
 
 @bot.message_handler(func=lambda message: message.chat.type == 'private' and not message.text.startswith('/'))
 def text_handler(message):
@@ -518,10 +512,18 @@ def handle_navigation(call):
         query = "_".join(data[1:])
         search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False)
 
+@bot.callback_query_handler(func=lambda call: call.data == "back_to_search")
+def handle_back_to_search(call):
+    chat_id = call.message.chat.id
+    query = original_queries.get(chat_id, "музыка")
+    search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False)
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def handle_download_callback(call):
     chat_id = call.message.chat.id
+    message_id = call.message.message_id
     register_user(chat_id)
+    
     index = int(call.data.replace("dl_", ""))
     user_tracks = tracks_cache.get(chat_id, [])
     
@@ -534,22 +536,38 @@ def handle_download_callback(call):
     title = track.get('title', 'Трек')
     uploader = track.get('uploader', 'Музыка')
     
-    bot.answer_callback_query(call.id, f"📥 Скачиваю: {title[:30]}...")
-    msg = bot.send_message(chat_id, f"⏳ Загружаю трек: {title[:40]}...")
+    bot.answer_callback_query(call.id, f"📥 Загружаю: {title[:30]}...")
     
-    if track_url in audio_cache and audio_cache[track_url].startswith("http") == False:
-        try:
-            bot.send_audio(chat_id, audio_cache[track_url], title=title, performer=uploader)
-            bot.delete_message(chat_id, msg.message_id)
+    # Превращаем сообщение со списком в статус загрузки
+    bot.edit_message_text(
+        text=f"⏳ **Скачиваю трек:**\n🎵 {title}\n🧑‍🎤 {uploader}\n\n*Подожди пару секунд...*",
+        chat_id=chat_id,
+        message_id=message_id,
+        parse_mode="Markdown",
+        reply_markup=None
+    )
+    
+    try:
+        # Проверка кэша аудиофайла
+        if track_url in audio_cache and audio_cache[track_url].startswith("http") == False:
+            file_id = audio_cache[track_url]
+            bot.send_audio(chat_id, file_id, title=title, performer=uploader)
+            
+            # Обновляем сообщение на статус плеера
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
+            
+            bot.edit_message_text(
+                text=f"▶️ **Сейчас играет:**\n🎵 {title}\n🧑‍🎤 {uploader}",
+                chat_id=chat_id,
+                message_id=message_id,
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
             stats_data["total_downloads"] += 1
             save_all_data()
             return
-        except Exception as e:
-            print(f"Ошибка отправки из кэша: {e}")
 
-    audio_filename = None
-    thumbnail_filename = None
-    try:
         ydl_opts = {
             "format": "bestaudio/best",
             "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
@@ -563,12 +581,14 @@ def handle_download_callback(call):
                 {"key": "EmbedThumbnail"}
             ]
         }
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(track_url, download=True)
             filename = ydl.prepare_filename(info)
             audio_filename = os.path.splitext(filename)[0] + ".mp3"
             
             base_name = os.path.splitext(filename)[0]
+            thumbnail_filename = None
             for ext in ['.jpg', '.jpeg', '.png', '.webp']:
                 if os.path.exists(base_name + ext):
                     thumbnail_filename = base_name + ext
@@ -589,17 +609,33 @@ def handle_download_callback(call):
             
             audio_cache[track_url] = sent_msg.audio.file_id
 
-        bot.delete_message(chat_id, msg.message_id)
+        # Меняем меню на аккуратную панель плеера в том же сообщении
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
+        
+        bot.edit_message_text(
+            text=f"▶️ **Трек успешно отправлен!**\n🎵 {title}\n🧑‍🎤 {uploader}",
+            chat_id=chat_id,
+            message_id=message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        
         stats_data["total_downloads"] += 1
         save_all_data()
+        
     except Exception as e:
         print(f"Ошибка скачивания: {e}")
-        bot.edit_message_text("❌ Не удалось скачать трек.", chat_id, msg.message_id)
+        bot.edit_message_text(
+            text="❌ Не удалось скачать трек. Попробуй выбрать другой.",
+            chat_id=chat_id,
+            message_id=message_id
+        )
     finally:
-        if audio_filename and os.path.exists(audio_filename):
+        if 'audio_filename' in locals() and audio_filename and os.path.exists(audio_filename):
             try: os.remove(audio_filename)
             except: pass
-        if thumbnail_filename and os.path.exists(thumbnail_filename):
+        if 'thumbnail_filename' in locals() and thumbnail_filename and os.path.exists(thumbnail_filename):
             try: os.remove(thumbnail_filename)
             except: pass
 
