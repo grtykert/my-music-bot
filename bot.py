@@ -108,6 +108,7 @@ def send_welcome(message):
     bot.reply_to(
         message, 
         "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n"
+        "🧭 Рекомендации по жанрам: /discover\n"
         "🔎 Можешь искать музыку прямо в любых чатах просто написав:`/m название`\n"
         "💬 Наш канал: https://t.me/teruteg\n\n"
         "💰 Поддержать разработчика: /donate\n"
@@ -379,6 +380,47 @@ def handle_author_music(message):
     # Передаем имя автора в твою готовую функцию поиска
     search_music_by_query(message, query=author_name, page=1, is_new=True)
 # ---> КОНЕЦ НОВОГО БЛОКА <---
+
+# ---> НОВЫЙ БЛОК: РЕКОМЕНДАЦИИ И ПОИСК ПО ЖАНРАМ <---
+@bot.message_handler(commands=['discover', 'genres', 'd'])
+def handle_discover(message):
+    chat_id = message.chat.id
+    register_user(chat_id)
+    
+    text = (
+        "🧭 **Не знаешь, что послушать? Выбирай направление:**\n\n"
+        "• **Поп:** Мелодичные песни с простым ритмом и запоминающимся припевом.\n\n"
+        "• **Рок:** Энергичный стиль с преобладанием электрогитар, включающий баллады и тяжелые направления.\n\n"
+        "• **Хип-хоп и рэп:** Ритмичный речитатив под электронный или живой бит.\n\n"
+        "• **Джаз и блюз:** Импровизационные композиции с глубоким эмоциональным подтекстом.\n\n"
+        "• **Phonk / Фонк:** Агрессивный бас, качающий ритм и драйвовая атмосфера.\n\n"
+        "• **TikTok Hits:** Самые популярные треки, ремиксы и тренды из коротких видео.\n\n"
+        "👇 *Нажми на кнопку ниже, и я подберу отличную музыку!*"
+    )
+    
+    markup = InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        InlineKeyboardButton(text="🕺 Поп", callback_data="genre_Pop hits"),
+        InlineKeyboardButton(text="🎸 Рок", callback_data="genre_Rock hits"),
+        InlineKeyboardButton(text="🎤 Хип-хоп", callback_data="genre_Rap Hip-Hop"),
+        InlineKeyboardButton(text="🎷 Джаз", callback_data="genre_Jazz"),
+        InlineKeyboardButton(text="🏎 Phonk", callback_data="genre_Phonk"),
+        InlineKeyboardButton(text="📱 TikTok Hits", callback_data="genre_TikTok viral music")
+    )
+    
+    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("genre_"))
+def handle_genre_selection(call):
+    chat_id = call.message.chat.id
+    register_user(chat_id)
+    
+    genre_query = call.data.replace("genre_", "")
+    original_queries[chat_id] = genre_query
+    
+    bot.answer_callback_query(call.id, "🔍 Ищу подборку...")
+    search_music_by_query(call.message, query=genre_query, page=1, is_new=True)
+# ---> КОНЕЦ БЛОКА ЖАНРОВ <---
 
 @bot.message_handler(func=lambda message: message.chat.type == 'private' and not message.text.startswith('/'))
 def text_handler(message):
