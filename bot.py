@@ -7,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import json
 import imageio_ffmpeg
+import random
 
 # --- ВЕБ-СЕРВЕР (Для Render) ---
 class DummyHandler(BaseHTTPRequestHandler):
@@ -361,7 +362,7 @@ def handle_group_music(message):
         
     query = args[1]
     original_queries[chat_id] = query
-    search_music_by_query(message, query=query, page=1, is_new=True)
+    search_music_by_query(message, query=query, page=1, is_new=True, is_random=False)
 
 @bot.message_handler(commands=['author', 'artist', 'a'])
 def handle_author_music(message):
@@ -375,7 +376,7 @@ def handle_author_music(message):
         
     author_name = args[1]
     original_queries[chat_id] = author_name
-    search_music_by_query(message, query=author_name, page=1, is_new=True)
+    search_music_by_query(message, query=author_name, page=1, is_new=True, is_random=False)
 
 @bot.message_handler(commands=['discover', 'genres', 'd'])
 def handle_discover(message):
@@ -410,11 +411,16 @@ def handle_genre_selection(call):
     chat_id = call.message.chat.id
     register_user(chat_id)
     
-    genre_query = call.data.replace("genre_", "")
+    genre_base = call.data.replace("genre_", "")
+    
+    # Добавляем случайное слово, чтобы алгоритм SoundCloud выдавал разные треки
+    additions = ["", "mix", "2024", "playlist", "hits", "top", "remix"]
+    genre_query = f"{genre_base} {random.choice(additions)}".strip()
+    
     original_queries[chat_id] = genre_query
     
-    bot.answer_callback_query(call.id, "🔍 Ищу подборку...")
-    search_music_by_query(call.message, query=genre_query, page=1, is_new=True)
+    bot.answer_callback_query(call.id, "🎲 Собираю случайные треки...")
+    search_music_by_query(call.message, query=genre_query, page=1, is_new=True, is_filter=False, is_random=True)
 
 @bot.message_handler(func=lambda message: message.chat.type == 'private' and not message.text.startswith('/'))
 def text_handler(message):
@@ -432,9 +438,9 @@ def text_handler(message):
         return
 
     original_queries[chat_id] = message.text
-    search_music_by_query(message, query=message.text, page=1, is_new=True)
+    search_music_by_query(message, query=message.text, page=1, is_new=True, is_random=False)
 
-def search_music_by_query(message, query, page=1, is_new=False, is_filter=False):
+def search_music_by_query(message, query, page=1, is_new=False, is_filter=False, is_random=False):
     chat_id = message.chat.id
     
     if is_new:
@@ -444,13 +450,26 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
 
     try:
         ydl_opts = {"extract_flat": True, "quiet": True}
-        search_query = f"scsearch20:{query}"
+        
+        # Если рандом, ищем сразу 40 треков для выборки, иначе стандартно 20
+        limit = 40 if is_random else 20
+        search_query = f"scsearch{limit}:{query}"
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(search_query, download=False)
             all_tracks = result.get("entries", [])
             
-        start = (page - 1) * 10
-        tracks = all_tracks[start:start + 10]
+        if is_random:
+            # Выбираем 10 случайных треков из найденных 40
+            if len(all_tracks) >= 10:
+                tracks = random.sample(all_tracks, 10)
+            else:
+                tracks = all_tracks.copy()
+                random.shuffle(tracks)
+        else:
+            # Обычная строгая нумерация страниц
+            start = (page - 1) * 10
+            tracks = all_tracks[start:start + 10]
             
         if not tracks:
             if is_new:
@@ -467,9 +486,13 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
             markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"dl_{i}"))
         
         nav_buttons = []
-        if page > 1:
-            nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}_{query}"))
-        nav_buttons.append(InlineKeyboardButton(text="🔄 Ещё", callback_data=f"page_{page+1}_{query}"))
+        if is_random:
+            # В случайном режиме кнопка "Назад" не нужна, делаем только "🎲 Ещё случайных"
+            nav_buttons.append(InlineKeyboardButton(text="🎲 Ещё случайных", callback_data=f"randpage_{page+1}_{query}"))
+        else:
+            if page > 1:
+                nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}_{query}"))
+            nav_buttons.append(InlineKeyboardButton(text="🔄 Ещё", callback_data=f"page_{page+1}_{query}"))
         
         markup.row(*nav_buttons)
         
@@ -482,7 +505,8 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
                 InlineKeyboardButton(text="🐢 Slowed", callback_data=f"filter_{orig_q}_slowed")
             )
 
-        text_content = f"🎧 Страница {page}. Запрос: {query}"
+        prefix = "🎲 Случайная подборка." if is_random else f"🎧 Страница {page}."
+        text_content = f"{prefix} Запрос: {query}"
         bot.edit_message_text(text_content, chat_id, msg.message_id, reply_markup=markup)
             
     except Exception as e:
@@ -492,7 +516,7 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False)
         except:
             pass
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "filter_", "back_")))
+@bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "randpage_", "filter_", "back_")))
 def handle_navigation(call):
     data = call.data.split("_")
     
@@ -500,23 +524,29 @@ def handle_navigation(call):
         page = int(data[1])
         query = "_".join(data[2:])
         is_filt = "speedup" in query or "slowed" in query
-        search_music_by_query(call.message, query=query, page=page, is_new=False, is_filter=is_filt)
+        search_music_by_query(call.message, query=query, page=page, is_new=False, is_filter=is_filt, is_random=False)
+        
+    elif data[0] == "randpage":
+        page = int(data[1])
+        query = "_".join(data[2:])
+        # Запускаем поиск со случайной генерацией новой пачки
+        search_music_by_query(call.message, query=query, page=page, is_new=False, is_filter=False, is_random=True)
         
     elif data[0] == "filter":
         filter_type = data[-1]
         query = "_".join(data[1:-1])
         new_query = f"{query} {filter_type}"
-        search_music_by_query(call.message, query=new_query, page=1, is_new=False, is_filter=True)
+        search_music_by_query(call.message, query=new_query, page=1, is_new=False, is_filter=True, is_random=False)
         
     elif data[0] == "back":
         query = "_".join(data[1:])
-        search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False)
+        search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False, is_random=False)
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_search")
 def handle_back_to_search(call):
     chat_id = call.message.chat.id
     query = original_queries.get(chat_id, "музыка")
-    search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False)
+    search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False, is_random=False)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def handle_download_callback(call):
