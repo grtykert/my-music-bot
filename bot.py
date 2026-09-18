@@ -413,11 +413,11 @@ def handle_genre_selection(call):
     
     genre_base = call.data.replace("genre_", "")
     
-    # Добавляем случайное слово, чтобы алгоритм SoundCloud выдавал разные треки
-    additions = ["", "mix", "2024", "playlist", "hits", "top", "remix"]
-    genre_query = f"{genre_base} {random.choice(additions)}".strip()
+    # Расширенная выборка модификаторов для обеспечения уникальности каждого поиска
+    modifiers = ["mix", "2024", "2025", "2026", "playlist", "hits", "top", "remix", "vibes", "chill", "night", "club", "party", "bass", "popular", "edit"]
+    genre_query = f"{genre_base} {random.choice(modifiers)} {random.choice(modifiers)}".strip()
     
-    original_queries[chat_id] = genre_query
+    original_queries[chat_id] = genre_base
     
     bot.answer_callback_query(call.id, "🎲 Собираю случайные треки...")
     search_music_by_query(call.message, query=genre_query, page=1, is_new=True, is_filter=False, is_random=True)
@@ -451,8 +451,8 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
     try:
         ydl_opts = {"extract_flat": True, "quiet": True}
         
-        # Если рандом, ищем сразу 40 треков для выборки, иначе стандартно 20
-        limit = 40 if is_random else 20
+        # Если рандом, берем увеличенную выборку (50) для максимального разброса
+        limit = 50 if is_random else 20
         search_query = f"scsearch{limit}:{query}"
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -460,14 +460,14 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
             all_tracks = result.get("entries", [])
             
         if is_random:
-            # Выбираем 10 случайных треков из найденных 40
+            # Выбираем 10 случайных треков из найденных
             if len(all_tracks) >= 10:
                 tracks = random.sample(all_tracks, 10)
             else:
                 tracks = all_tracks.copy()
                 random.shuffle(tracks)
         else:
-            # Обычная строгая нумерация страниц
+            # Обычная нумерация страниц
             start = (page - 1) * 10
             tracks = all_tracks[start:start + 10]
             
@@ -487,8 +487,9 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
         
         nav_buttons = []
         if is_random:
-            # В случайном режиме кнопка "Назад" не нужна, делаем только "🎲 Ещё случайных"
-            nav_buttons.append(InlineKeyboardButton(text="🎲 Ещё случайных", callback_data=f"randpage_{page+1}_{query}"))
+            # Передаем оригинальный жанр в каллбэк
+            base_q = original_queries.get(chat_id, query)
+            nav_buttons.append(InlineKeyboardButton(text="🎲 Ещё случайных", callback_data=f"randpage_{page+1}_{base_q}"))
         else:
             if page > 1:
                 nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}_{query}"))
@@ -528,9 +529,13 @@ def handle_navigation(call):
         
     elif data[0] == "randpage":
         page = int(data[1])
-        query = "_".join(data[2:])
-        # Запускаем поиск со случайной генерацией новой пачки
-        search_music_by_query(call.message, query=query, page=page, is_new=False, is_filter=False, is_random=True)
+        base_query = "_".join(data[2:])
+        
+        # Перегенерируем новые ключевые слова, чтобы выдача постоянно обновлялась
+        modifiers = ["mix", "2024", "2025", "2026", "playlist", "hits", "top", "remix", "vibes", "chill", "night", "club", "party", "bass", "popular", "edit"]
+        new_rand_query = f"{base_query} {random.choice(modifiers)} {random.choice(modifiers)}".strip()
+        
+        search_music_by_query(call.message, query=new_rand_query, page=page, is_new=False, is_filter=False, is_random=True)
         
     elif data[0] == "filter":
         filter_type = data[-1]
