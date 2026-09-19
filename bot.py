@@ -670,4 +670,11 @@ def handle_download_callback(call):
             try: os.remove(thumbnail_filename)
             except: pass
 
+# === УДАЛЕНИЕ ВЕБХУКА ПЕРЕД ЗАПУСКОМ ПОЛЛИНГА ===
+try:
+    bot.remove_webhook()
+    print("✅ Вебхук очищен.")
+except Exception as e:
+    print(f"⚠️ Ошибка удаления вебхука: {e}")
+
 bot.infinity_polling()
