@@ -32,7 +32,7 @@ inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
 
-# Переменные хранения данных (теперь список для контроля порядка)
+# Переменные хранения данных
 active_users = []
 stats_data = {"total_downloads": 0}
 audio_cache = {}
@@ -51,7 +51,6 @@ def restore_all_data():
             stats_data = data.get("stats", {"total_downloads": 0})
             audio_cache = data.get("cache", {})
             
-            # Гарантируем, что ты всегда первый в списке при загрузке бэкапа
             if ADMIN_ID in active_users:
                 active_users.remove(ADMIN_ID)
             active_users.insert(0, ADMIN_ID)
@@ -59,13 +58,11 @@ def restore_all_data():
             print("✅ Все данные успешно восстановлены из закрепа!")
     except Exception as e:
         print(f"⚠️ Ошибка или отсутствие закрепа при автовосстановлении: {e}")
-        # Если бэкапа нет, сразу добавляем тебя
         if ADMIN_ID not in active_users:
             active_users.insert(0, ADMIN_ID)
 
 def save_all_data():
     try:
-        # Перед сохранением убеждаемся, что ты на 1-м месте
         if ADMIN_ID in active_users:
             active_users.remove(ADMIN_ID)
         active_users.insert(0, ADMIN_ID)
@@ -145,126 +142,133 @@ def inline_query(query):
     search_text = query.query.strip()
     if not search_text:
         return
-    
-    try:
-        ydl_opts = {"extract_flat": True, "quiet": True}
-        search_query = f"scsearch10:{search_text}"
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            result = ydl.extract_info(search_query, download=False)
-            tracks = result.get("entries", [])
-        
-        results = []
-        inline_tracks_cache[query.from_user.id] = tracks
-        
-        for i, track in enumerate(tracks):
-            title = track.get("title", "Без названия")
-            uploader = track.get("uploader", "Неизвестен")
+
+    def worker():
+        try:
+            ydl_opts = {"extract_flat": True, "quiet": True}
+            search_query = f"scsearch10:{search_text}"
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                result = ydl.extract_info(search_query, download=False)
+                tracks = result.get("entries", [])
             
-            results.append(
-                telebot.types.InlineQueryResultArticle(
-                    id=str(i),
-                    title=title[:50],
-                    description=f"Автор: {uploader} | Нажми для отправки в чат",
-                    input_message_content=telebot.types.InputTextMessageContent(
-                        message_text=f"⏳ Загружаю трек: {title[:40]}..."
+            results = []
+            inline_tracks_cache[query.from_user.id] = tracks
+            
+            for i, track in enumerate(tracks):
+                title = track.get("title", "Без названия")
+                uploader = track.get("uploader", "Неизвестен")
+                
+                results.append(
+                    telebot.types.InlineQueryResultArticle(
+                        id=str(i),
+                        title=title[:50],
+                        description=f"Автор: {uploader} | Нажми для отправки в чат",
+                        input_message_content=telebot.types.InputTextMessageContent(
+                            message_text=f"⏳ Загружаю трек: {title[:40]}..."
+                        )
                     )
                 )
-            )
-        bot.answer_inline_query(query.id, results, cache_time=1)
-    except Exception as e:
-        print(f"Ошибка инлайн-поиска: {e}")
+            bot.answer_inline_query(query.id, results, cache_time=1)
+        except Exception as e:
+            print(f"Ошибка инлайн-поиска: {e}")
+
+    threading.Thread(target=worker, daemon=True).start()
 
 @bot.chosen_inline_handler(func=lambda chosen: True)
 def handle_chosen_inline(chosen):
     user_id = chosen.from_user.id
     register_user(user_id)
-    result_id = int(chosen.result_id)
-    user_tracks = inline_tracks_cache.get(user_id, [])
-    
-    if result_id >= len(user_tracks):
-        return
+
+    def worker():
+        result_id = int(chosen.result_id)
+        user_tracks = inline_tracks_cache.get(user_id, [])
         
-    track = user_tracks[result_id]
-    track_url = track['url']
-    title = track.get('title', 'Трек')
-    uploader = track.get('uploader', 'Музыка')
-    inline_msg_id = chosen.inline_message_id
-    
-    if track_url in audio_cache and audio_cache[track_url].startswith("http") == False:
+        if result_id >= len(user_tracks):
+            return
+            
+        track = user_tracks[result_id]
+        track_url = track['url']
+        title = track.get('title', 'Трек')
+        uploader = track.get('uploader', 'Музыка')
+        inline_msg_id = chosen.inline_message_id
+        
+        if track_url in audio_cache and audio_cache[track_url].startswith("http") == False:
+            try:
+                bot.edit_message_media(
+                    media=InputMediaAudio(
+                        media=audio_cache[track_url],
+                        title=title,
+                        performer=uploader
+                    ),
+                    inline_message_id=inline_msg_id
+                )
+                stats_data["total_downloads"] += 1
+                save_all_data()
+                return
+            except Exception as e:
+                print(f"Ошибка отправки из кэша (инлайн): {e}")
+
+        audio_filename = None
+        thumbnail_filename = None
         try:
-            bot.edit_message_media(
-                media=InputMediaAudio(
-                    media=audio_cache[track_url],
-                    title=title,
-                    performer=uploader
-                ),
-                inline_message_id=inline_msg_id
-            )
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
+                "writethumbnail": True,
+                "quiet": True,
+                "socket_timeout": 15,
+                "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
+                "postprocessors": [
+                    {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
+                    {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
+                    {"key": "EmbedThumbnail"}
+                ]
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(track_url, download=True)
+                filename = ydl.prepare_filename(info)
+                audio_filename = os.path.splitext(filename)[0] + ".mp3"
+                
+                base_name = os.path.splitext(filename)[0]
+                for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                    if os.path.exists(base_name + ext):
+                        thumbnail_filename = base_name + ext
+                        break
+
+            with open(audio_filename, "rb") as audio:
+                thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
+                
+                sent_media = bot.edit_message_media(
+                    media=InputMediaAudio(
+                        media=audio,
+                        title=info.get('title', title),
+                        performer=info.get('uploader', uploader)
+                    ),
+                    inline_message_id=inline_msg_id
+                )
+                if thumb_file:
+                    thumb_file.close()
+
             stats_data["total_downloads"] += 1
             save_all_data()
-            return
         except Exception as e:
-            print(f"Ошибка отправки из кэша (инлайн): {e}")
+            print(f"Ошибка скачивания (инлайн): {e}")
+            try:
+                bot.edit_message_text(
+                    text="❌ Не удалось скачать выбранный трек.",
+                    inline_message_id=inline_msg_id
+                )
+            except:
+                pass
+        finally:
+            if audio_filename and os.path.exists(audio_filename):
+                try: os.remove(audio_filename)
+                except: pass
+            if thumbnail_filename and os.path.exists(thumbnail_filename):
+                try: os.remove(thumbnail_filename)
+                except: pass
 
-    audio_filename = None
-    thumbnail_filename = None
-    try:
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
-            "writethumbnail": True,
-            "quiet": True,
-            "socket_timeout": 15,
-            "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
-            "postprocessors": [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
-                {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
-                {"key": "EmbedThumbnail"}
-            ]
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(track_url, download=True)
-            filename = ydl.prepare_filename(info)
-            audio_filename = os.path.splitext(filename)[0] + ".mp3"
-            
-            base_name = os.path.splitext(filename)[0]
-            for ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                if os.path.exists(base_name + ext):
-                    thumbnail_filename = base_name + ext
-                    break
-
-        with open(audio_filename, "rb") as audio:
-            thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
-            
-            sent_media = bot.edit_message_media(
-                media=InputMediaAudio(
-                    media=audio,
-                    title=info.get('title', title),
-                    performer=info.get('uploader', uploader)
-                ),
-                inline_message_id=inline_msg_id
-            )
-            if thumb_file:
-                thumb_file.close()
-
-        stats_data["total_downloads"] += 1
-        save_all_data()
-    except Exception as e:
-        print(f"Ошибка скачивания (инлайн): {e}")
-        try:
-            bot.edit_message_text(
-                text="❌ Не удалось скачать выбранный трек.",
-                inline_message_id=inline_msg_id
-            )
-        except:
-            pass
-    finally:
-        if audio_filename and os.path.exists(audio_filename):
-            try: os.remove(audio_filename)
-            except: pass
-        if thumbnail_filename and os.path.exists(thumbnail_filename):
-            try: os.remove(thumbnail_filename)
-            except: pass
+    threading.Thread(target=worker, daemon=True).start()
 
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
@@ -413,7 +417,6 @@ def handle_genre_selection(call):
     
     genre_base = call.data.replace("genre_", "")
     
-    # Расширенная выборка модификаторов для обеспечения уникальности каждого поиска
     modifiers = ["mix", "2024", "2025", "2026", "playlist", "hits", "top", "remix", "vibes", "chill", "night", "club", "party", "bass", "popular", "edit"]
     genre_query = f"{genre_base} {random.choice(modifiers)} {random.choice(modifiers)}".strip()
     
@@ -448,74 +451,72 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
     else:
         msg = message
 
-    try:
-        ydl_opts = {"extract_flat": True, "quiet": True}
-        
-        # Если рандом, берем увеличенную выборку (50) для максимального разброса
-        limit = 50 if is_random else 20
-        search_query = f"scsearch{limit}:{query}"
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            result = ydl.extract_info(search_query, download=False)
-            all_tracks = result.get("entries", [])
-            
-        if is_random:
-            # Выбираем 10 случайных треков из найденных
-            if len(all_tracks) >= 10:
-                tracks = random.sample(all_tracks, 10)
-            else:
-                tracks = all_tracks.copy()
-                random.shuffle(tracks)
-        else:
-            # Обычная нумерация страниц
-            start = (page - 1) * 10
-            tracks = all_tracks[start:start + 10]
-            
-        if not tracks:
-            if is_new:
-                bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id)
-            else:
-                bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id, reply_markup=None)
-            return
-            
-        tracks_cache[chat_id] = tracks
-        markup = InlineKeyboardMarkup(row_width=1)
-        
-        for i, track in enumerate(tracks):
-            title = track.get("title", "Без названия")[:35]
-            markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"dl_{i}"))
-        
-        nav_buttons = []
-        if is_random:
-            # Передаем оригинальный жанр в каллбэк
-            base_q = original_queries.get(chat_id, query)
-            nav_buttons.append(InlineKeyboardButton(text="🎲 Ещё случайных", callback_data=f"randpage_{page+1}_{base_q}"))
-        else:
-            if page > 1:
-                nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}_{query}"))
-            nav_buttons.append(InlineKeyboardButton(text="🔄 Ещё", callback_data=f"page_{page+1}_{query}"))
-        
-        markup.row(*nav_buttons)
-        
-        orig_q = original_queries.get(chat_id, query)
-        if is_filter:
-            markup.row(InlineKeyboardButton(text="🔙 Назад к обычному", callback_data=f"back_{orig_q}"))
-        else:
-            markup.row(
-                InlineKeyboardButton(text="⚡ Speed Up", callback_data=f"filter_{orig_q}_speedup"),
-                InlineKeyboardButton(text="🐢 Slowed", callback_data=f"filter_{orig_q}_slowed")
-            )
-
-        prefix = "🎲 Случайная подборка." if is_random else f"🎧 Страница {page}."
-        text_content = f"{prefix} Запрос: {query}"
-        bot.edit_message_text(text_content, chat_id, msg.message_id, reply_markup=markup)
-            
-    except Exception as e:
-        print(f"Ошибка поиска: {e}")
+    def worker():
         try:
-            bot.edit_message_text("❌ Ошибка поиска.", chat_id, msg.message_id)
-        except:
-            pass
+            ydl_opts = {"extract_flat": True, "quiet": True}
+            limit = 50 if is_random else 20
+            search_query = f"scsearch{limit}:{query}"
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                result = ydl.extract_info(search_query, download=False)
+                all_tracks = result.get("entries", [])
+                
+            if is_random:
+                if len(all_tracks) >= 10:
+                    tracks = random.sample(all_tracks, 10)
+                else:
+                    tracks = all_tracks.copy()
+                    random.shuffle(tracks)
+            else:
+                start = (page - 1) * 10
+                tracks = all_tracks[start:start + 10]
+                
+            if not tracks:
+                if is_new:
+                    bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id)
+                else:
+                    bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id, reply_markup=None)
+                return
+                
+            tracks_cache[chat_id] = tracks
+            markup = InlineKeyboardMarkup(row_width=1)
+            
+            for i, track in enumerate(tracks):
+                title = track.get("title", "Без названия")[:35]
+                markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"dl_{i}"))
+            
+            nav_buttons = []
+            if is_random:
+                base_q = original_queries.get(chat_id, query)
+                nav_buttons.append(InlineKeyboardButton(text="🎲 Ещё случайных", callback_data=f"randpage_{page+1}_{base_q}"))
+            else:
+                if page > 1:
+                    nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}_{query}"))
+                nav_buttons.append(InlineKeyboardButton(text="🔄 Ещё", callback_data=f"page_{page+1}_{query}"))
+            
+            markup.row(*nav_buttons)
+            
+            orig_q = original_queries.get(chat_id, query)
+            if is_filter:
+                markup.row(InlineKeyboardButton(text="🔙 Назад к обычному", callback_data=f"back_{orig_q}"))
+            else:
+                markup.row(
+                    InlineKeyboardButton(text="⚡ Speed Up", callback_data=f"filter_{orig_q}_speedup"),
+                    InlineKeyboardButton(text="🐢 Slowed", callback_data=f"filter_{orig_q}_slowed")
+                )
+
+            prefix = "🎲 Случайная подборка." if is_random else f"🎧 Страница {page}."
+            text_content = f"{prefix} Запрос: {query}"
+            bot.edit_message_text(text_content, chat_id, msg.message_id, reply_markup=markup)
+                
+        except Exception as e:
+            print(f"Ошибка поиска: {e}")
+            try:
+                bot.edit_message_text("❌ Ошибка поиска.", chat_id, msg.message_id)
+            except:
+                pass
+
+    threading.Thread(target=worker, daemon=True).start()
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "randpage_", "filter_", "back_")))
 def handle_navigation(call):
@@ -530,11 +531,8 @@ def handle_navigation(call):
     elif data[0] == "randpage":
         page = int(data[1])
         base_query = "_".join(data[2:])
-        
-        # Перегенерируем новые ключевые слова, чтобы выдача постоянно обновлялась
         modifiers = ["mix", "2024", "2025", "2026", "playlist", "hits", "top", "remix", "vibes", "chill", "night", "club", "party", "bass", "popular", "edit"]
         new_rand_query = f"{base_query} {random.choice(modifiers)} {random.choice(modifiers)}".strip()
-        
         search_music_by_query(call.message, query=new_rand_query, page=page, is_new=False, is_filter=False, is_random=True)
         
     elif data[0] == "filter":
@@ -572,103 +570,104 @@ def handle_download_callback(call):
     
     bot.answer_callback_query(call.id, f"📥 Загружаю: {title[:30]}...")
     
-    # Отправляем отдельное сообщение со статусом загрузки
     status_msg = bot.send_message(
         chat_id, 
         f"⏳ **Скачиваю трек:**\n🎵 {title}\n🧑‍🎤 {uploader}\n\n*Подожди пару секунд...*",
         parse_mode="Markdown"
     )
-    
-    try:
-        # Проверка кэша аудиофайла
-        if track_url in audio_cache and audio_cache[track_url].startswith("http") == False:
-            file_id = audio_cache[track_url]
-            bot.send_audio(chat_id, file_id, title=title, performer=uploader)
+
+    def worker():
+        try:
+            # Проверка кэша аудиофайла
+            if track_url in audio_cache and audio_cache[track_url].startswith("http") == False:
+                file_id = audio_cache[track_url]
+                bot.send_audio(chat_id, file_id, title=title, performer=uploader)
+                
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
+                
+                bot.edit_message_text(
+                    text=f"▶️ **Плеер:**\n🎵 {title}\n🧑‍🎤 {uploader}",
+                    chat_id=chat_id,
+                    message_id=status_msg.message_id,
+                    parse_mode="Markdown",
+                    reply_markup=markup
+                )
+                stats_data["total_downloads"] += 1
+                save_all_data()
+                return
+
+            ydl_opts = {
+                "format": "bestaudio/best",
+                "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
+                "writethumbnail": True,
+                "quiet": True,
+                "socket_timeout": 15,
+                "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
+                "postprocessors": [
+                    {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
+                    {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
+                    {"key": "EmbedThumbnail"}
+                ]
+            }
             
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(track_url, download=True)
+                filename = ydl.prepare_filename(info)
+                audio_filename = os.path.splitext(filename)[0] + ".mp3"
+                
+                base_name = os.path.splitext(filename)[0]
+                thumbnail_filename = None
+                for ext in ['.jpg', '.jpeg', '.png', '.webp']:
+                    if os.path.exists(base_name + ext):
+                        thumbnail_filename = base_name + ext
+                        break
+
+            with open(audio_filename, "rb") as audio:
+                thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
+                
+                sent_msg = bot.send_audio(
+                    chat_id, 
+                    audio, 
+                    title=info.get('title', title), 
+                    performer=info.get('uploader', uploader),
+                    thumbnail=thumb_file
+                )
+                if thumb_file:
+                    thumb_file.close()
+                
+                audio_cache[track_url] = sent_msg.audio.file_id
+
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
             
             bot.edit_message_text(
-                text=f"▶️ **Плеер:**\n🎵 {title}\n🧑‍🎤 {uploader}",
+                text=f"▶️ **Трек успешно отправлен!**\n🎵 {title}\n🧑‍🎤 {uploader}",
                 chat_id=chat_id,
                 message_id=status_msg.message_id,
                 parse_mode="Markdown",
                 reply_markup=markup
             )
+            
             stats_data["total_downloads"] += 1
             save_all_data()
-            return
-
-        ydl_opts = {
-            "format": "bestaudio/best",
-            "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
-            "writethumbnail": True,
-            "quiet": True,
-            "socket_timeout": 15,
-            "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
-            "postprocessors": [
-                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
-                {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
-                {"key": "EmbedThumbnail"}
-            ]
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(track_url, download=True)
-            filename = ydl.prepare_filename(info)
-            audio_filename = os.path.splitext(filename)[0] + ".mp3"
             
-            base_name = os.path.splitext(filename)[0]
-            thumbnail_filename = None
-            for ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                if os.path.exists(base_name + ext):
-                    thumbnail_filename = base_name + ext
-                    break
-
-        with open(audio_filename, "rb") as audio:
-            thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
-            
-            sent_msg = bot.send_audio(
-                chat_id, 
-                audio, 
-                title=info.get('title', title), 
-                performer=info.get('uploader', uploader),
-                thumbnail=thumb_file
+        except Exception as e:
+            print(f"Ошибка скачивания: {e}")
+            bot.edit_message_text(
+                text="❌ Не удалось скачать трек. Попробуй выбрать другой.",
+                chat_id=chat_id,
+                message_id=status_msg.message_id
             )
-            if thumb_file:
-                thumb_file.close()
-            
-            audio_cache[track_url] = sent_msg.audio.file_id
+        finally:
+            if 'audio_filename' in locals() and audio_filename and os.path.exists(audio_filename):
+                try: os.remove(audio_filename)
+                except: pass
+            if 'thumbnail_filename' in locals() and thumbnail_filename and os.path.exists(thumbnail_filename):
+                try: os.remove(thumbnail_filename)
+                except: pass
 
-        # Превращаем сообщение со статусом в аккуратный плеер с кнопкой возврата
-        markup = InlineKeyboardMarkup()
-        markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
-        
-        bot.edit_message_text(
-            text=f"▶️ **Трек успешно отправлен!**\n🎵 {title}\n🧑‍🎤 {uploader}",
-            chat_id=chat_id,
-            message_id=status_msg.message_id,
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
-        
-        stats_data["total_downloads"] += 1
-        save_all_data()
-        
-    except Exception as e:
-        print(f"Ошибка скачивания: {e}")
-        bot.edit_message_text(
-            text="❌ Не удалось скачать трек. Попробуй выбрать другой.",
-            chat_id=chat_id,
-            message_id=status_msg.message_id
-        )
-    finally:
-        if 'audio_filename' in locals() and audio_filename and os.path.exists(audio_filename):
-            try: os.remove(audio_filename)
-            except: pass
-        if 'thumbnail_filename' in locals() and thumbnail_filename and os.path.exists(thumbnail_filename):
-            try: os.remove(thumbnail_filename)
-            except: pass
+    threading.Thread(target=worker, daemon=True).start()
 
 # === УДАЛЕНИЕ ВЕБХУКА ПЕРЕД ЗАПУСКОМ ПОЛЛИНГА ===
 try:
