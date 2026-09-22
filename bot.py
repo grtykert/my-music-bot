@@ -22,7 +22,7 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- БОТ И БЭКАП ГРУППА ---
-API_TOKEN = "8957555829:AAG6hOKd1aDDv5mHF_2gOtxmup6voikxsyk"
+API_TOKEN = "8957555829:AAEev4slGFc88tl0vw2b303ZH8_9oh791To"
 BACKUP_CHANNEL_ID = -1004445455425
 ADMIN_ID = 5378591975  # Твой ID всегда на 1-м месте
 
