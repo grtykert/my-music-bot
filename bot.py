@@ -36,13 +36,15 @@ waiting_for_custom_stars = set()
 active_users = []
 stats_data = {"total_downloads": 0}
 audio_cache = {}
+backup_msg_id = None  # Переменная для ID закрепа
 
 # --- СИСТЕМА ЕДИНОГО БЭКАПА ЧЕРЕЗ ЗАКРЕП ---
 def restore_all_data():
-    global active_users, stats_data, audio_cache
+    global active_users, stats_data, audio_cache, backup_msg_id
     try:
         chat = bot.get_chat(BACKUP_CHANNEL_ID)
         if chat.pinned_message and chat.pinned_message.document:
+            backup_msg_id = chat.pinned_message.message_id
             file_info = bot.get_file(chat.pinned_message.document.file_id)
             downloaded_file = bot.download_file(file_info.file_path)
             data = json.loads(downloaded_file.decode('utf-8'))
@@ -62,6 +64,7 @@ def restore_all_data():
             active_users.insert(0, ADMIN_ID)
 
 def save_all_data():
+    global backup_msg_id
     try:
         if ADMIN_ID in active_users:
             active_users.remove(ADMIN_ID)
@@ -76,9 +79,25 @@ def save_all_data():
             json.dump(data, f, ensure_ascii=False)
             
         with open("data.json", "rb") as f:
+            # Обновление файла в одном закрепе
+            if backup_msg_id:
+                try:
+                    bot.edit_message_media(
+                        chat_id=BACKUP_CHANNEL_ID,
+                        message_id=backup_msg_id,
+                        media=telebot.types.InputMediaDocument(f, caption="💾 Бэкап базы данных")
+                    )
+                    return
+                except Exception as e:
+                    print(f"Не удалось обновить бэкап, создаем новый: {e}")
+                    f.seek(0)
+            
+            # Если закрепа еще нет, отправляем и закрепляем
             msg = bot.send_document(BACKUP_CHANNEL_ID, f, caption="💾 Бэкап базы данных")
+            backup_msg_id = msg.message_id
             try:
-                bot.pin_chat_message(BACKUP_CHANNEL_ID, msg.message_id, disable_notification=True)
+                bot.unpin_all_chat_messages(BACKUP_CHANNEL_ID)
+                bot.pin_chat_message(BACKUP_CHANNEL_ID, backup_msg_id, disable_notification=True)
             except Exception as pe:
                 print(f"Ошибка закрепления: {pe}")
     except Exception as e:
@@ -90,13 +109,12 @@ restore_all_data()
 bot_start_time = time.time()
 
 def register_user(chat_id):
-    if chat_id == ADMIN_ID:
-        if chat_id in active_users:
-            active_users.remove(chat_id)
-        active_users.insert(0, chat_id)
-        save_all_data()
-    elif chat_id not in active_users:
-        active_users.append(chat_id)
+    # Сохраняем ТОЛЬКО при добавлении НОВОГО пользователя
+    if chat_id not in active_users:
+        if chat_id == ADMIN_ID:
+            active_users.insert(0, chat_id)
+        else:
+            active_users.append(chat_id)
         save_all_data()
 
 @bot.message_handler(commands=['start'])
@@ -238,7 +256,7 @@ def handle_chosen_inline(chosen):
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
                 
-                sent_media = bot.edit_message_media(
+                bot.edit_message_media(
                     media=InputMediaAudio(
                         media=audio,
                         title=info.get('title', title),
@@ -518,8 +536,10 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
 
     threading.Thread(target=worker, daemon=True).start()
 
+# --- СБРОС АНИМАЦИИ ЗАГРУЗКИ КНОПОК НАВИГАЦИИ ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "randpage_", "filter_", "back_")))
 def handle_navigation(call):
+    bot.answer_callback_query(call.id)  # Сбрасывает бесконечные часики на кнопках
     data = call.data.split("_")
     
     if data[0] == "page":
@@ -547,6 +567,7 @@ def handle_navigation(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_search")
 def handle_back_to_search(call):
+    bot.answer_callback_query(call.id)  # Сбрасывает часики
     chat_id = call.message.chat.id
     query = original_queries.get(chat_id, "музыка")
     search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False, is_random=False)
