@@ -9,8 +9,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import json
 import random
+import subprocess
 
-# --- ПОДКЛЮЧЕНИЕ FFMPEG / FFPROBE ДЛЯ ОБЛОЖЕК ---
+# --- ПОДКЛЮЧЕНИЕ FFMPEG / FFPROBE ДЛЯ ОБЛОЖЕК И СЖАТИЯ ---
 import static_ffmpeg
 static_ffmpeg.add_paths()
 
@@ -42,6 +43,35 @@ active_users = []
 stats_data = {"total_downloads": 0}
 audio_cache = {}
 backup_msg_id = None  # Переменная для ID закрепа
+
+# --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО СЖАТИЯ ---
+def compress_audio_if_needed(input_filename, max_size_mb=48):
+    """Сжимает аудио через ffmpeg, если оно весит больше max_size_mb (лимит Telegram = 50 МБ)"""
+    if not input_filename or not os.path.exists(input_filename):
+        return input_filename
+        
+    file_size_mb = os.path.getsize(input_filename) / (1024 * 1024)
+    if file_size_mb <= max_size_mb:
+        return input_filename  # Возвращаем оригинал, если размер в норме
+        
+    print(f"⚠️ Файл весит {file_size_mb:.1f} МБ (больше лимита). Сжимаем до 128k...")
+    output_filename = os.path.splitext(input_filename)[0] + "_compressed.mp3"
+    
+    # Команда ffmpeg для сжатия в 128 kbps (сильно уменьшает размер, сохраняя приемлемое качество)
+    cmd = [
+        "ffmpeg", "-y", "-i", input_filename, 
+        "-b:a", "128k", "-vn", output_filename
+    ]
+    
+    try:
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        if os.path.exists(output_filename):
+            os.remove(input_filename) # Удаляем тяжелый оригинал
+            return output_filename
+    except Exception as e:
+        print(f"Ошибка сжатия через ffmpeg: {e}")
+        
+    return input_filename
 
 # --- СИСТЕМА ЕДИНОГО БЭКАПА ЧЕРЕЗ ЗАКРЕП ---
 def restore_all_data():
@@ -230,7 +260,6 @@ def handle_chosen_inline(chosen):
         audio_filename = None
         thumbnail_filename = None
         try:
-            # БЫСТРАЯ ЗАГРУЗКА .M4A БЕЗ ТЯЖЁЛОЙ КОНВЕРТАЦИИ В MP3
             ydl_opts = {
                 "format": "ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
@@ -251,6 +280,9 @@ def handle_chosen_inline(chosen):
                     if os.path.exists(base_name + ext):
                         thumbnail_filename = base_name + ext
                         break
+
+            # ПРОВЕРКА И СЖАТИЕ, ЕСЛИ БОЛЬШЕ 50 МБ
+            audio_filename = compress_audio_if_needed(audio_filename)
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
@@ -615,7 +647,6 @@ def handle_download_callback(call):
                 save_all_data()
                 return
 
-            # БЫСТРАЯ ЗАГРУЗКА .M4A БЕЗ ТЯЖЁЛОЙ КОНВЕРТАЦИИ В MP3
             ydl_opts = {
                 "format": "ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
@@ -638,6 +669,9 @@ def handle_download_callback(call):
                     if os.path.exists(base_name + ext):
                         thumbnail_filename = base_name + ext
                         break
+
+            # ПРОВЕРКА И СЖАТИЕ, ЕСЛИ БОЛЬШЕ 50 МБ
+            audio_filename = compress_audio_if_needed(audio_filename)
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
