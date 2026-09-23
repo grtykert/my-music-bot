@@ -4,4 +4,4 @@ yt-dlp
 urllib3
 certifi
 static-ffmpeg
-from PIL import Image
+Pillow==10.3.0
