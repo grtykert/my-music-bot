@@ -269,12 +269,11 @@ def handle_chosen_inline(chosen):
 
         try:
             ydl_opts = {
-                # ИЗМЕНЕНО: Оптимизация размера и скорости для инлайн-режима
                 "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
                 "writethumbnail": True,
                 "quiet": True,
-                "noprogress": True,  # ОТКЛЮЧАЕТ СПАМ И УСКОРЯЕТ
+                "noprogress": True,
                 "socket_timeout": 15,
                 "postprocessors": [
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
@@ -287,7 +286,6 @@ def handle_chosen_inline(chosen):
                 
                 base_name = os.path.splitext(audio_filename)[0]
                 
-                # Ищем скачанную обложку и меняем её размер
                 for ext in ['.jpg', '.jpeg', '.png', '.webp']:
                     if os.path.exists(base_name + ext):
                         original_thumb = base_name + ext
@@ -673,12 +671,11 @@ def handle_download_callback(call):
                 return
 
             ydl_opts = {
-                # ИЗМЕНЕНО: Оптимизация размера и скорости для основного режима
                 "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
                 "writethumbnail": True,
                 "quiet": True,
-                "noprogress": True,  # ОТКЛЮЧАЕТ СПАМ И УСКОРЯЕТ
+                "noprogress": True,
                 "socket_timeout": 15,
                 "postprocessors": [
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
@@ -692,7 +689,6 @@ def handle_download_callback(call):
                 
                 base_name = os.path.splitext(audio_filename)[0]
                 
-                # Ищем скачанную обложку и меняем её размер
                 for ext in ['.jpg', '.jpeg', '.png', '.webp']:
                     if os.path.exists(base_name + ext):
                         original_thumb = base_name + ext
