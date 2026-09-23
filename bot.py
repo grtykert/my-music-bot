@@ -10,6 +10,7 @@ import time
 import json
 import random
 import subprocess
+from PIL import Image  # Добавлено для работы с обложками
 
 # --- ПОДКЛЮЧЕНИЕ FFMPEG / FFPROBE ДЛЯ ОБЛОЖЕК И СЖАТИЯ ---
 import static_ffmpeg
@@ -264,12 +265,15 @@ def handle_chosen_inline(chosen):
 
         audio_filename = None
         thumbnail_filename = None
+        original_thumb = None
+
         try:
             ydl_opts = {
                 "format": "ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
                 "writethumbnail": True,
                 "quiet": True,
+                "noprogress": True,  # ОТКЛЮЧАЕТ СПАМ И УСКОРЯЕТ
                 "socket_timeout": 15,
                 "postprocessors": [
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
@@ -281,9 +285,19 @@ def handle_chosen_inline(chosen):
                 audio_filename = ydl.prepare_filename(info)
                 
                 base_name = os.path.splitext(audio_filename)[0]
+                
+                # Ищем скачанную обложку и меняем её размер
                 for ext in ['.jpg', '.jpeg', '.png', '.webp']:
                     if os.path.exists(base_name + ext):
-                        thumbnail_filename = base_name + ext
+                        original_thumb = base_name + ext
+                        try:
+                            img = Image.open(original_thumb)
+                            img.thumbnail((320, 320)) 
+                            thumbnail_filename = base_name + "_telegram.jpg"
+                            img.convert("RGB").save(thumbnail_filename, "JPEG")
+                        except Exception as e:
+                            print(f"Ошибка изменения размера обложки: {e}")
+                            thumbnail_filename = original_thumb
                         break
 
             audio_filename = compress_audio_if_needed(audio_filename)
@@ -320,6 +334,9 @@ def handle_chosen_inline(chosen):
                 except: pass
             if thumbnail_filename and os.path.exists(thumbnail_filename):
                 try: os.remove(thumbnail_filename)
+                except: pass
+            if original_thumb and os.path.exists(original_thumb) and original_thumb != thumbnail_filename:
+                try: os.remove(original_thumb)
                 except: pass
 
     threading.Thread(target=worker, daemon=True).start()
@@ -633,6 +650,8 @@ def handle_download_callback(call):
     def worker():
         audio_filename = None
         thumbnail_filename = None
+        original_thumb = None
+
         try:
             if track_url in audio_cache and not audio_cache[track_url].startswith("http"):
                 file_id = audio_cache[track_url]
@@ -657,6 +676,7 @@ def handle_download_callback(call):
                 "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
                 "writethumbnail": True,
                 "quiet": True,
+                "noprogress": True,  # ОТКЛЮЧАЕТ СПАМ И УСКОРЯЕТ
                 "socket_timeout": 15,
                 "postprocessors": [
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
@@ -669,9 +689,19 @@ def handle_download_callback(call):
                 audio_filename = ydl.prepare_filename(info)
                 
                 base_name = os.path.splitext(audio_filename)[0]
+                
+                # Ищем скачанную обложку и меняем её размер
                 for ext in ['.jpg', '.jpeg', '.png', '.webp']:
                     if os.path.exists(base_name + ext):
-                        thumbnail_filename = base_name + ext
+                        original_thumb = base_name + ext
+                        try:
+                            img = Image.open(original_thumb)
+                            img.thumbnail((320, 320)) 
+                            thumbnail_filename = base_name + "_telegram.jpg"
+                            img.convert("RGB").save(thumbnail_filename, "JPEG")
+                        except Exception as e:
+                            print(f"Ошибка изменения размера обложки: {e}")
+                            thumbnail_filename = original_thumb
                         break
 
             audio_filename = compress_audio_if_needed(audio_filename)
@@ -718,6 +748,9 @@ def handle_download_callback(call):
                 except: pass
             if thumbnail_filename and os.path.exists(thumbnail_filename):
                 try: os.remove(thumbnail_filename)
+                except: pass
+            if original_thumb and os.path.exists(original_thumb) and original_thumb != thumbnail_filename:
+                try: os.remove(original_thumb)
                 except: pass
 
     threading.Thread(target=worker, daemon=True).start()
