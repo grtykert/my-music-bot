@@ -1,13 +1,18 @@
 import os
+import sys
 import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, InputMediaAudio
+from telebot.apihelper import ApiTelegramException
 import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import json
-import imageio_ffmpeg
 import random
+
+# --- ПОДКЛЮЧЕНИЕ FFMPEG / FFPROBE ДЛЯ ОБЛОЖЕК ---
+import static_ffmpeg
+static_ffmpeg.add_paths()
 
 # --- ВЕБ-СЕРВЕР (Для Render) ---
 class DummyHandler(BaseHTTPRequestHandler):
@@ -22,7 +27,7 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- БОТ И БЭКАП ГРУППА ---
-API_TOKEN = "8957555829:AAH3akqTVIvsbuqxe0bUImP1Xz51Y5s9bzM"
+API_TOKEN = os.environ.get("BOT_TOKEN", "8957555829:AAH3akqTVIvsbuqxe0bUImP1Xz51Y5s9bzM")
 BACKUP_CHANNEL_ID = -1004445455425
 ADMIN_ID = 5378591975  # Твой ID всегда на 1-м месте
 
@@ -79,7 +84,6 @@ def save_all_data():
             json.dump(data, f, ensure_ascii=False)
             
         with open("data.json", "rb") as f:
-            # Обновление файла в одном закрепе
             if backup_msg_id:
                 try:
                     bot.edit_message_media(
@@ -92,7 +96,6 @@ def save_all_data():
                     print(f"Не удалось обновить бэкап, создаем новый: {e}")
                     f.seek(0)
             
-            # Если закрепа еще нет, отправляем и закрепляем
             msg = bot.send_document(BACKUP_CHANNEL_ID, f, caption="💾 Бэкап базы данных")
             backup_msg_id = msg.message_id
             try:
@@ -109,7 +112,6 @@ restore_all_data()
 bot_start_time = time.time()
 
 def register_user(chat_id):
-    # Сохраняем ТОЛЬКО при добавлении НОВОГО пользователя
     if chat_id not in active_users:
         if chat_id == ADMIN_ID:
             active_users.insert(0, chat_id)
@@ -132,14 +134,13 @@ def send_welcome(message):
         "🧑‍🎤 Поиск по автору: /author Имя"
     )
 
-# --- АДМИНСКАЯ КОМАНДА ДЛЯ ОЧИСТКИ КЭША ТРЕКОВ ---
 @bot.message_handler(commands=['clearcache'])
 def clear_bot_cache(message):
     if message.chat.id == ADMIN_ID:
         global audio_cache
         audio_cache.clear()
         save_all_data()
-        bot.reply_to(message, "✅ Кэш треков успешно очищен! Статистика и пользователи сохранены. Теперь старые треки скачаются заново с нормальными обложками.")
+        bot.reply_to(message, "✅ Кэш треков успешно очищен! Статистика и пользователи сохранены.")
     else:
         bot.reply_to(message, "❌ У вас нет прав для этой команды.")
 
@@ -210,7 +211,7 @@ def handle_chosen_inline(chosen):
         uploader = track.get('uploader', 'Музыка')
         inline_msg_id = chosen.inline_message_id
         
-        if track_url in audio_cache and audio_cache[track_url].startswith("http") == False:
+        if track_url in audio_cache and not audio_cache[track_url].startswith("http"):
             try:
                 bot.edit_message_media(
                     media=InputMediaAudio(
@@ -229,25 +230,23 @@ def handle_chosen_inline(chosen):
         audio_filename = None
         thumbnail_filename = None
         try:
+            # БЫСТРАЯ ЗАГРУЗКА .M4A БЕЗ ТЯЖЁЛОЙ КОНВЕРТАЦИИ В MP3
             ydl_opts = {
-                "format": "bestaudio/best",
+                "format": "ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
                 "writethumbnail": True,
                 "quiet": True,
                 "socket_timeout": 15,
-                "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
                 "postprocessors": [
-                    {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
                     {"key": "EmbedThumbnail"}
                 ]
             }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(track_url, download=True)
-                filename = ydl.prepare_filename(info)
-                audio_filename = os.path.splitext(filename)[0] + ".mp3"
+                audio_filename = ydl.prepare_filename(info)
                 
-                base_name = os.path.splitext(filename)[0]
+                base_name = os.path.splitext(audio_filename)[0]
                 for ext in ['.jpg', '.jpeg', '.png', '.webp']:
                     if os.path.exists(base_name + ext):
                         thumbnail_filename = base_name + ext
@@ -260,7 +259,8 @@ def handle_chosen_inline(chosen):
                     media=InputMediaAudio(
                         media=audio,
                         title=info.get('title', title),
-                        performer=info.get('uploader', uploader)
+                        performer=info.get('uploader', uploader),
+                        thumbnail=thumb_file
                     ),
                     inline_message_id=inline_msg_id
                 )
@@ -434,12 +434,10 @@ def handle_genre_selection(call):
     register_user(chat_id)
     
     genre_base = call.data.replace("genre_", "")
-    
     modifiers = ["mix", "2024", "2025", "2026", "playlist", "hits", "top", "remix", "vibes", "chill", "night", "club", "party", "bass", "popular", "edit"]
     genre_query = f"{genre_base} {random.choice(modifiers)} {random.choice(modifiers)}".strip()
     
     original_queries[chat_id] = genre_base
-    
     bot.answer_callback_query(call.id, "🎲 Собираю случайные треки...")
     search_music_by_query(call.message, query=genre_query, page=1, is_new=True, is_filter=False, is_random=True)
 
@@ -536,10 +534,9 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
 
     threading.Thread(target=worker, daemon=True).start()
 
-# --- СБРОС АНИМАЦИИ ЗАГРУЗКИ КНОПОК НАВИГАЦИИ ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "randpage_", "filter_", "back_")))
 def handle_navigation(call):
-    bot.answer_callback_query(call.id)  # Сбрасывает бесконечные часики на кнопках
+    bot.answer_callback_query(call.id)
     data = call.data.split("_")
     
     if data[0] == "page":
@@ -567,7 +564,7 @@ def handle_navigation(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_search")
 def handle_back_to_search(call):
-    bot.answer_callback_query(call.id)  # Сбрасывает часики
+    bot.answer_callback_query(call.id)
     chat_id = call.message.chat.id
     query = original_queries.get(chat_id, "музыка")
     search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False, is_random=False)
@@ -599,8 +596,8 @@ def handle_download_callback(call):
 
     def worker():
         try:
-            # Проверка кэша аудиофайла
-            if track_url in audio_cache and audio_cache[track_url].startswith("http") == False:
+            # Проверка кэша file_id
+            if track_url in audio_cache and not audio_cache[track_url].startswith("http"):
                 file_id = audio_cache[track_url]
                 bot.send_audio(chat_id, file_id, title=title, performer=uploader)
                 
@@ -618,15 +615,14 @@ def handle_download_callback(call):
                 save_all_data()
                 return
 
+            # БЫСТРАЯ ЗАГРУЗКА .M4A БЕЗ ТЯЖЁЛОЙ КОНВЕРТАЦИИ В MP3
             ydl_opts = {
-                "format": "bestaudio/best",
+                "format": "ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
                 "writethumbnail": True,
                 "quiet": True,
                 "socket_timeout": 15,
-                "ffmpeg_location": imageio_ffmpeg.get_ffmpeg_exe(),
                 "postprocessors": [
-                    {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"},
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
                     {"key": "EmbedThumbnail"}
                 ]
@@ -634,10 +630,9 @@ def handle_download_callback(call):
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(track_url, download=True)
-                filename = ydl.prepare_filename(info)
-                audio_filename = os.path.splitext(filename)[0] + ".mp3"
+                audio_filename = ydl.prepare_filename(info)
                 
-                base_name = os.path.splitext(filename)[0]
+                base_name = os.path.splitext(audio_filename)[0]
                 thumbnail_filename = None
                 for ext in ['.jpg', '.jpeg', '.png', '.webp']:
                     if os.path.exists(base_name + ext):
@@ -690,11 +685,24 @@ def handle_download_callback(call):
 
     threading.Thread(target=worker, daemon=True).start()
 
-# === УДАЛЕНИЕ ВЕБХУКА ПЕРЕД ЗАПУСКОМ ПОЛЛИНГА ===
+# === ПРАВИЛЬНЫЙ ЗАПУСК С АВТО-ОТКЛЮЧЕНИЕМ ПРИ КОНФЛИКТЕ (409) ===
 try:
     bot.remove_webhook()
     print("✅ Вебхук очищен.")
 except Exception as e:
     print(f"⚠️ Ошибка удаления вебхука: {e}")
 
-bot.infinity_polling()
+print("🚀 Бот запущен...")
+
+while True:
+    try:
+        bot.polling(non_stop=True, skip_pending=True)
+    except ApiTelegramException as e:
+        if e.error_code == 409:
+            print("❌ Ошибка 409: Бот запущен на другом устройстве! Этот процесс завершает работу.")
+            sys.exit(0)
+        print(f"⚠️ Ошибка Telegram API: {e}")
+        time.sleep(3)
+    except Exception as e:
+        print(f"⚠️ Ошибка: {e}")
+        time.sleep(3)
