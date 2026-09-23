@@ -28,7 +28,11 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- БОТ И БЭКАП ГРУППА ---
-API_TOKEN = os.environ.get("BOT_TOKEN", "8957555829:AAH3akqTVIvsbuqxe0bUImP1Xz51Y5s9bzM")
+API_TOKEN = os.environ.get("BOT_TOKEN")
+if not API_TOKEN:
+    print("❌ Ошибка: Не задана переменная окружения BOT_TOKEN!")
+    sys.exit(1)
+
 BACKUP_CHANNEL_ID = -1004445455425
 ADMIN_ID = 5378591975  # Твой ID всегда на 1-м месте
 
@@ -38,11 +42,12 @@ inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
 
-# Переменные хранения данных
+# Переменные хранения данных и мьютекс для потокобезопасности
 active_users = []
 stats_data = {"total_downloads": 0}
 audio_cache = {}
 backup_msg_id = None  # Переменная для ID закрепа
+data_lock = threading.Lock()
 
 # --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО СЖАТИЯ ---
 def compress_audio_if_needed(input_filename, max_size_mb=48):
@@ -57,7 +62,6 @@ def compress_audio_if_needed(input_filename, max_size_mb=48):
     print(f"⚠️ Файл весит {file_size_mb:.1f} МБ (больше лимита). Сжимаем до 128k...")
     output_filename = os.path.splitext(input_filename)[0] + "_compressed.mp3"
     
-    # Команда ffmpeg для сжатия в 128 kbps (сильно уменьшает размер, сохраняя приемлемое качество)
     cmd = [
         "ffmpeg", "-y", "-i", input_filename, 
         "-b:a", "128k", "-vn", output_filename
@@ -100,41 +104,42 @@ def restore_all_data():
 
 def save_all_data():
     global backup_msg_id
-    try:
-        if ADMIN_ID in active_users:
-            active_users.remove(ADMIN_ID)
-        active_users.insert(0, ADMIN_ID)
+    with data_lock:
+        try:
+            if ADMIN_ID in active_users:
+                active_users.remove(ADMIN_ID)
+            active_users.insert(0, ADMIN_ID)
 
-        data = {
-            "users": active_users,
-            "stats": stats_data,
-            "cache": audio_cache
-        }
-        with open("data.json", "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
-            
-        with open("data.json", "rb") as f:
-            if backup_msg_id:
+            data = {
+                "users": active_users,
+                "stats": stats_data,
+                "cache": audio_cache
+            }
+            with open("data.json", "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+                
+            with open("data.json", "rb") as f:
+                if backup_msg_id:
+                    try:
+                        bot.edit_message_media(
+                            chat_id=BACKUP_CHANNEL_ID,
+                            message_id=backup_msg_id,
+                            media=telebot.types.InputMediaDocument(f, caption="💾 Бэкап базы данных")
+                        )
+                        return
+                    except Exception as e:
+                        print(f"Не удалось обновить бэкап (возможно, сообщение старше 48ч), создаем новое: {e}")
+                        f.seek(0)
+                
+                msg = bot.send_document(BACKUP_CHANNEL_ID, f, caption="💾 Бэкап базы данных")
+                backup_msg_id = msg.message_id
                 try:
-                    bot.edit_message_media(
-                        chat_id=BACKUP_CHANNEL_ID,
-                        message_id=backup_msg_id,
-                        media=telebot.types.InputMediaDocument(f, caption="💾 Бэкап базы данных")
-                    )
-                    return
-                except Exception as e:
-                    print(f"Не удалось обновить бэкап, создаем новый: {e}")
-                    f.seek(0)
-            
-            msg = bot.send_document(BACKUP_CHANNEL_ID, f, caption="💾 Бэкап базы данных")
-            backup_msg_id = msg.message_id
-            try:
-                bot.unpin_all_chat_messages(BACKUP_CHANNEL_ID)
-                bot.pin_chat_message(BACKUP_CHANNEL_ID, backup_msg_id, disable_notification=True)
-            except Exception as pe:
-                print(f"Ошибка закрепления: {pe}")
-    except Exception as e:
-        print(f"Ошибка сохранения бэкапа: {e}")
+                    bot.unpin_all_chat_messages(BACKUP_CHANNEL_ID)
+                    bot.pin_chat_message(BACKUP_CHANNEL_ID, backup_msg_id, disable_notification=True)
+                except Exception as pe:
+                    print(f"Ошибка закрепления: {pe}")
+        except Exception as e:
+            print(f"Ошибка сохранения бэкапа: {e}")
 
 # Восстанавливаем данные перед стартом бота
 restore_all_data()
@@ -281,7 +286,6 @@ def handle_chosen_inline(chosen):
                         thumbnail_filename = base_name + ext
                         break
 
-            # ПРОВЕРКА И СЖАТИЕ, ЕСЛИ БОЛЬШЕ 50 МБ
             audio_filename = compress_audio_if_needed(audio_filename)
 
             with open(audio_filename, "rb") as audio:
@@ -372,7 +376,7 @@ def handle_donate_callback(call):
     if action == "custom":
         waiting_for_custom_stars.add(chat_id)
         bot.answer_callback_query(call.id)
-        bot.send_message(chat_id, "✍️ Напиши в чат число — сколько звёзд ты хочешь отправить (например: `50`):")
+        bot.send_message(chat_id, "✍️ Напиши в чат число — сколько звёзд ты хочешь отправить (например: `50`):", parse_mode="Markdown")
         return
 
     try:
@@ -627,8 +631,9 @@ def handle_download_callback(call):
     )
 
     def worker():
+        audio_filename = None
+        thumbnail_filename = None
         try:
-            # Проверка кэша file_id
             if track_url in audio_cache and not audio_cache[track_url].startswith("http"):
                 file_id = audio_cache[track_url]
                 bot.send_audio(chat_id, file_id, title=title, performer=uploader)
@@ -664,13 +669,11 @@ def handle_download_callback(call):
                 audio_filename = ydl.prepare_filename(info)
                 
                 base_name = os.path.splitext(audio_filename)[0]
-                thumbnail_filename = None
                 for ext in ['.jpg', '.jpeg', '.png', '.webp']:
                     if os.path.exists(base_name + ext):
                         thumbnail_filename = base_name + ext
                         break
 
-            # ПРОВЕРКА И СЖАТИЕ, ЕСЛИ БОЛЬШЕ 50 МБ
             audio_filename = compress_audio_if_needed(audio_filename)
 
             with open(audio_filename, "rb") as audio:
@@ -710,10 +713,10 @@ def handle_download_callback(call):
                 message_id=status_msg.message_id
             )
         finally:
-            if 'audio_filename' in locals() and audio_filename and os.path.exists(audio_filename):
+            if audio_filename and os.path.exists(audio_filename):
                 try: os.remove(audio_filename)
                 except: pass
-            if 'thumbnail_filename' in locals() and thumbnail_filename and os.path.exists(thumbnail_filename):
+            if thumbnail_filename and os.path.exists(thumbnail_filename):
                 try: os.remove(thumbnail_filename)
                 except: pass
 
