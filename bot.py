@@ -269,7 +269,8 @@ def handle_chosen_inline(chosen):
 
         try:
             ydl_opts = {
-                "format": "ba[ext=m4a]/ba/best",
+                # ИЗМЕНЕНО: Оптимизация размера и скорости для инлайн-режима
+                "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
                 "writethumbnail": True,
                 "quiet": True,
@@ -672,7 +673,8 @@ def handle_download_callback(call):
                 return
 
             ydl_opts = {
-                "format": "ba[ext=m4a]/ba/best",
+                # ИЗМЕНЕНО: Оптимизация размера и скорости для основного режима
+                "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
                 "writethumbnail": True,
                 "quiet": True,
