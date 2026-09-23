@@ -4,3 +4,4 @@ yt-dlp
 urllib3
 certifi
 static-ffmpeg
+from PIL import Image
