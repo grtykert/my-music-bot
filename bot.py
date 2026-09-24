@@ -163,7 +163,7 @@ def send_welcome(message):
         message, 
         "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n"
         "🧭 Рекомендации по жанрам: /discover\n"
-        "🔎 Можешь искать музыку прямо в любых чатах просто написав:`/m название`\n"
+        "🔎 Можешь искать музыку прямо в любых чатах просто написав:`@bot_username название`\n"
         "💬 Наш канал: https://t.me/teruteg\n\n"
         "💰 Поддержать разработчика: /donate\n"
         "📊 Статистика бота: /stats\n"
@@ -301,8 +301,6 @@ def handle_chosen_inline(chosen):
 
             audio_filename = compress_audio_if_needed(audio_filename)
 
-            # Telegram API запрещает загружать бинарные файлы напрямую через inline_message_id.
-            # Загружаем аудио в бэкап-канал для получения file_id:
             file_id = None
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
@@ -786,4 +784,3 @@ while True:
     except Exception as e:
         print(f"⚠️ Ошибка: {e}")
         time.sleep(3)
-
