@@ -10,7 +10,7 @@ import time
 import json
 import random
 import subprocess
-from PIL import Image  # Добавлено для работы с обложками
+from PIL import Image
 
 # --- ПОДКЛЮЧЕНИЕ FFMPEG / FFPROBE ДЛЯ ОБЛОЖЕК И СЖАТИЯ ---
 import static_ffmpeg
@@ -34,8 +34,8 @@ if not API_TOKEN:
     print("❌ Ошибка: Не задана переменная окружения BOT_TOKEN!")
     sys.exit(1)
 
-BACKUP_CHANNEL_ID = -1004445455425
-ADMIN_ID = 5378591975  # Твой ID всегда на 1-м месте
+BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", -1004445455425))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 5378591975))
 
 bot = telebot.TeleBot(API_TOKEN)
 tracks_cache = {}
@@ -47,7 +47,7 @@ waiting_for_custom_stars = set()
 active_users = []
 stats_data = {"total_downloads": 0}
 audio_cache = {}
-backup_msg_id = None  # Переменная для ID закрепа
+backup_msg_id = None
 data_lock = threading.Lock()
 
 # --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО СЖАТИЯ ---
@@ -58,7 +58,7 @@ def compress_audio_if_needed(input_filename, max_size_mb=48):
         
     file_size_mb = os.path.getsize(input_filename) / (1024 * 1024)
     if file_size_mb <= max_size_mb:
-        return input_filename  # Возвращаем оригинал, если размер в норме
+        return input_filename
         
     print(f"⚠️ Файл весит {file_size_mb:.1f} МБ (больше лимита). Сжимаем до 128k...")
     output_filename = os.path.splitext(input_filename)[0] + "_compressed.mp3"
@@ -71,7 +71,7 @@ def compress_audio_if_needed(input_filename, max_size_mb=48):
     try:
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
         if os.path.exists(output_filename):
-            os.remove(input_filename) # Удаляем тяжелый оригинал
+            os.remove(input_filename)
             return output_filename
     except Exception as e:
         print(f"Ошибка сжатия через ffmpeg: {e}")
@@ -301,20 +301,32 @@ def handle_chosen_inline(chosen):
 
             audio_filename = compress_audio_if_needed(audio_filename)
 
+            # Telegram API запрещает загружать бинарные файлы напрямую через inline_message_id.
+            # Загружаем аудио в бэкап-канал для получения file_id:
+            file_id = None
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
                 
-                bot.edit_message_media(
-                    media=InputMediaAudio(
-                        media=audio,
-                        title=info.get('title', title),
-                        performer=info.get('uploader', uploader),
-                        thumbnail=thumb_file
-                    ),
-                    inline_message_id=inline_msg_id
+                backup_msg = bot.send_audio(
+                    chat_id=BACKUP_CHANNEL_ID,
+                    audio=audio,
+                    title=info.get('title', title),
+                    performer=info.get('uploader', uploader),
+                    thumbnail=thumb_file
                 )
                 if thumb_file:
                     thumb_file.close()
+                file_id = backup_msg.audio.file_id
+                audio_cache[track_url] = file_id
+
+            bot.edit_message_media(
+                media=InputMediaAudio(
+                    media=file_id,
+                    title=info.get('title', title),
+                    performer=info.get('uploader', uploader)
+                ),
+                inline_message_id=inline_msg_id
+            )
 
             stats_data["total_downloads"] += 1
             save_all_data()
@@ -774,3 +786,4 @@ while True:
     except Exception as e:
         print(f"⚠️ Ошибка: {e}")
         time.sleep(3)
+
