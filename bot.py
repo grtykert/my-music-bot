@@ -47,6 +47,7 @@ waiting_for_custom_stars = set()
 active_users = []
 stats_data = {"total_downloads": 0}
 audio_cache = {}
+user_settings = {} # <-- ДОБАВЛЕНО: Хранение настроек пользователей
 backup_msg_id = None
 data_lock = threading.Lock()
 
@@ -80,7 +81,7 @@ def compress_audio_if_needed(input_filename, max_size_mb=48):
 
 # --- СИСТЕМА ЕДИНОГО БЭКАПА ЧЕРЕЗ ЗАКРЕП ---
 def restore_all_data():
-    global active_users, stats_data, audio_cache, backup_msg_id
+    global active_users, stats_data, audio_cache, user_settings, backup_msg_id
     try:
         chat = bot.get_chat(BACKUP_CHANNEL_ID)
         if chat.pinned_message and chat.pinned_message.document:
@@ -92,6 +93,7 @@ def restore_all_data():
             active_users = data.get("users", [])
             stats_data = data.get("stats", {"total_downloads": 0})
             audio_cache = data.get("cache", {})
+            user_settings = data.get("settings", {}) # <-- Восстанавливаем настройки
             
             if ADMIN_ID in active_users:
                 active_users.remove(ADMIN_ID)
@@ -114,7 +116,8 @@ def save_all_data():
             data = {
                 "users": active_users,
                 "stats": stats_data,
-                "cache": audio_cache
+                "cache": audio_cache,
+                "settings": user_settings # <-- Сохраняем настройки
             }
             with open("data.json", "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -163,12 +166,72 @@ def send_welcome(message):
         message, 
         "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n"
         "🧭 Рекомендации по жанрам: /discover\n"
+        "⚙️ Настройки бота: /settings\n"
         "🔎 Можешь искать музыку прямо в любых чатах просто написав:`@bot_username название`\n"
         "💬 Наш канал: https://t.me/teruteg\n\n"
         "💰 Поддержать разработчика: /donate\n"
         "📊 Статистика бота: /stats\n"
         "🧑‍🎤 Поиск по автору: /author Имя"
     )
+
+# === ДОБАВЛЕНА КОМАНДА /settings И ПОЛЗУНОК ===
+def get_settings_keyboard(chat_id):
+    chat_id_str = str(chat_id)
+    if chat_id_str not in user_settings:
+        user_settings[chat_id_str] = {"search_limit": 10}
+        
+    limit = user_settings[chat_id_str]["search_limit"]
+    
+    markup = InlineKeyboardMarkup()
+    
+    # Визуальный ползунок (от 5 до 25 с шагом 5)
+    filled_blocks = limit // 5
+    slider_text = "🟦" * filled_blocks + "⬜️" * (5 - filled_blocks)
+    
+    markup.row(
+        InlineKeyboardButton("➖", callback_data="setslider_minus"),
+        InlineKeyboardButton(f"{limit} треков", callback_data="ignore"),
+        InlineKeyboardButton("➕", callback_data="setslider_plus")
+    )
+    markup.row(InlineKeyboardButton(f"Шкала: {slider_text}", callback_data="ignore"))
+    
+    return markup
+
+@bot.message_handler(commands=['settings'])
+def settings_command(message):
+    chat_id = message.chat.id
+    register_user(chat_id)
+    bot.reply_to(
+        message, 
+        "⚙️ **Настройки поиска**\n\nС помощью ползунка ниже выбери количество треков, которое будет выводиться на одной странице:",
+        parse_mode="Markdown",
+        reply_markup=get_settings_keyboard(chat_id)
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("setslider_"))
+def handle_slider_callback(call):
+    chat_id_str = str(call.message.chat.id)
+    if chat_id_str not in user_settings:
+        user_settings[chat_id_str] = {"search_limit": 10}
+        
+    current_limit = user_settings[chat_id_str]["search_limit"]
+    action = call.data.split("_")[1]
+    
+    if action == "minus":
+        current_limit = max(5, current_limit - 5)  # Минимум 5 треков
+    elif action == "plus":
+        current_limit = min(25, current_limit + 5) # Максимум 25 треков
+        
+    if current_limit != user_settings[chat_id_str]["search_limit"]:
+        user_settings[chat_id_str]["search_limit"] = current_limit
+        save_all_data() # Сохраняем изменение в бэкап
+        bot.edit_message_reply_markup(
+            chat_id=call.message.chat.id, 
+            message_id=call.message.message_id, 
+            reply_markup=get_settings_keyboard(call.message.chat.id)
+        )
+    bot.answer_callback_query(call.id)
+# ===============================================
 
 @bot.message_handler(commands=['clearcache'])
 def clear_bot_cache(message):
@@ -531,23 +594,26 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
 
     def worker():
         try:
+            # Получаем настройку количества треков пользователя (по умолчанию 10)
+            user_limit = user_settings.get(str(chat_id), {}).get("search_limit", 10)
+            
             ydl_opts = {"extract_flat": True, "quiet": True}
-            limit = 50 if is_random else 20
-            search_query = f"scsearch{limit}:{query}"
+            limit_ydl = 50 if is_random else max(20, user_limit * page)
+            search_query = f"scsearch{limit_ydl}:{query}"
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 result = ydl.extract_info(search_query, download=False)
                 all_tracks = result.get("entries", [])
                 
             if is_random:
-                if len(all_tracks) >= 10:
-                    tracks = random.sample(all_tracks, 10)
+                if len(all_tracks) >= user_limit:
+                    tracks = random.sample(all_tracks, user_limit)
                 else:
                     tracks = all_tracks.copy()
                     random.shuffle(tracks)
             else:
-                start = (page - 1) * 10
-                tracks = all_tracks[start:start + 10]
+                start = (page - 1) * user_limit
+                tracks = all_tracks[start:start + user_limit]
                 
             if not tracks:
                 if is_new:
