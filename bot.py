@@ -16,11 +16,19 @@ from PIL import Image
 import static_ffmpeg
 static_ffmpeg.add_paths()
 
-# --- ВЕБ-СЕРВЕР (Для Render) ---
+# --- ВЕБ-СЕРВЕР (Для Render с поддержкой HEAD) ---
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        # Отключаем спам запросами в логах
+        return
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
@@ -523,7 +531,7 @@ def handle_discover(message):
     text = (
         "🧭 **Не знаешь, что послушать? Выбирай направление:**\n\n"
         "• **Поп:** Мелодичные песни с простым ритмом.\n"
-        "• **Ро克:** Энергичный стиль с электрогитарами.\n"
+        "• **Рок:** Энергичный стиль с электрогитарами.\n"
         "• **Хип-хоп:** Ритмичный речитатив под бит.\n"
         "• **Джаз:** Импровизационные композиции.\n"
         "• **Phonk:** Агрессивный бас и качающий ритм.\n"
@@ -584,7 +592,6 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
 
     def worker():
         try:
-            # Чтение настройки с приведением ключа к str
             user_limit = user_settings.get(str(chat_id), {}).get("search_limit", 10)
             
             ydl_opts = {"extract_flat": True, "quiet": True}
@@ -778,7 +785,6 @@ def handle_download_callback(call):
                 if thumb_file:
                     thumb_file.close()
 
-                # Сохраняем в кэш Telegram file_id
                 audio_cache[track_url] = sent_msg.audio.file_id
 
             markup = InlineKeyboardMarkup()
