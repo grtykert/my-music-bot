@@ -47,7 +47,7 @@ waiting_for_custom_stars = set()
 active_users = []
 stats_data = {"total_downloads": 0}
 audio_cache = {}
-user_settings = {} # <-- ДОБАВЛЕНО: Хранение настроек пользователей
+user_settings = {}  # Хранение настроек пользователей
 backup_msg_id = None
 data_lock = threading.Lock()
 
@@ -93,7 +93,7 @@ def restore_all_data():
             active_users = data.get("users", [])
             stats_data = data.get("stats", {"total_downloads": 0})
             audio_cache = data.get("cache", {})
-            user_settings = data.get("settings", {}) # <-- Восстанавливаем настройки
+            user_settings = data.get("settings", {})
             
             if ADMIN_ID in active_users:
                 active_users.remove(ADMIN_ID)
@@ -117,7 +117,7 @@ def save_all_data():
                 "users": active_users,
                 "stats": stats_data,
                 "cache": audio_cache,
-                "settings": user_settings # <-- Сохраняем настройки
+                "settings": user_settings
             }
             with open("data.json", "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -132,7 +132,7 @@ def save_all_data():
                         )
                         return
                     except Exception as e:
-                        print(f"Не удалось обновить бэкап (возможно, сообщение старше 48ч), создаем новое: {e}")
+                        print(f"Не удалось обновить бэкап: {e}")
                         f.seek(0)
                 
                 msg = bot.send_document(BACKUP_CHANNEL_ID, f, caption="💾 Бэкап базы данных")
@@ -145,7 +145,7 @@ def save_all_data():
         except Exception as e:
             print(f"Ошибка сохранения бэкапа: {e}")
 
-# Восстанавливаем данные перед стартом бота
+# Восстанавливаем данные перед стартом
 restore_all_data()
 
 bot_start_time = time.time()
@@ -167,24 +167,23 @@ def send_welcome(message):
         "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n"
         "🧭 Рекомендации по жанрам: /discover\n"
         "⚙️ Настройки бота: /settings\n"
-        "🔎 Можешь искать музыку прямо в любых чатах просто написав:`@bot_username название`\n"
+        "🔎 Поиск прямо в чатах: `@bot_username название`\n"
         "💬 Наш канал: https://t.me/teruteg\n\n"
         "💰 Поддержать разработчика: /donate\n"
         "📊 Статистика бота: /stats\n"
         "🧑‍🎤 Поиск по автору: /author Имя"
     )
 
-# === ДОБАВЛЕНА КОМАНДА /settings И ПОЛЗУНОК ===
+# --- НАСТРОЙКИ И ПОЛЗУНОК ---
 def get_settings_keyboard(chat_id):
     chat_id_str = str(chat_id)
     if chat_id_str not in user_settings:
         user_settings[chat_id_str] = {"search_limit": 10}
         
-    limit = user_settings[chat_id_str]["search_limit"]
+    limit = user_settings[chat_id_str].get("search_limit", 10)
     
     markup = InlineKeyboardMarkup()
     
-    # Визуальный ползунок (от 5 до 25 с шагом 5)
     filled_blocks = limit // 5
     slider_text = "🟦" * filled_blocks + "⬜️" * (5 - filled_blocks)
     
@@ -203,7 +202,7 @@ def settings_command(message):
     register_user(chat_id)
     bot.reply_to(
         message, 
-        "⚙️ **Настройки поиска**\n\nС помощью ползунка ниже выбери количество треков, которое будет выводиться на одной странице:",
+        "⚙️ **Настройки поиска**\n\nС помощью ползунка ниже выбери количество треков, выводимых на одной странице:",
         parse_mode="Markdown",
         reply_markup=get_settings_keyboard(chat_id)
     )
@@ -214,24 +213,27 @@ def handle_slider_callback(call):
     if chat_id_str not in user_settings:
         user_settings[chat_id_str] = {"search_limit": 10}
         
-    current_limit = user_settings[chat_id_str]["search_limit"]
+    current_limit = user_settings[chat_id_str].get("search_limit", 10)
     action = call.data.split("_")[1]
     
     if action == "minus":
-        current_limit = max(5, current_limit - 5)  # Минимум 5 треков
+        current_limit = max(5, current_limit - 5)
     elif action == "plus":
-        current_limit = min(25, current_limit + 5) # Максимум 25 треков
+        current_limit = min(25, current_limit + 5)
         
     if current_limit != user_settings[chat_id_str]["search_limit"]:
         user_settings[chat_id_str]["search_limit"] = current_limit
-        save_all_data() # Сохраняем изменение в бэкап
+        save_all_data()
         bot.edit_message_reply_markup(
             chat_id=call.message.chat.id, 
             message_id=call.message.message_id, 
             reply_markup=get_settings_keyboard(call.message.chat.id)
         )
     bot.answer_callback_query(call.id)
-# ===============================================
+
+@bot.callback_query_handler(func=lambda call: call.data == "ignore")
+def handle_ignore(call):
+    bot.answer_callback_query(call.id)
 
 @bot.message_handler(commands=['clearcache'])
 def clear_bot_cache(message):
@@ -239,7 +241,7 @@ def clear_bot_cache(message):
         global audio_cache
         audio_cache.clear()
         save_all_data()
-        bot.reply_to(message, "✅ Кэш треков успешно очищен! Статистика и пользователи сохранены.")
+        bot.reply_to(message, "✅ Кэш треков успешно очищен!")
     else:
         bot.reply_to(message, "❌ У вас нет прав для этой команды.")
 
@@ -254,7 +256,7 @@ def handle_chat_member(message):
     elif new_status == 'member':
         register_user(chat_id)
 
-# --- ИНЛАЙН-РЕЖИМ ПОИСКА ВО ВСЕХ ЧАТАХ ---
+# --- ИНЛАЙН-РЕЖИМ ---
 @bot.inline_handler(func=lambda query: True)
 def inline_query(query):
     search_text = query.query.strip()
@@ -280,7 +282,7 @@ def inline_query(query):
                     telebot.types.InlineQueryResultArticle(
                         id=str(i),
                         title=title[:50],
-                        description=f"Автор: {uploader} | Нажми для отправки в чат",
+                        description=f"Автор: {uploader} | Нажми для отправки",
                         input_message_content=telebot.types.InputTextMessageContent(
                             message_text=f"⏳ Загружаю трек: {title[:40]}..."
                         )
@@ -346,7 +348,6 @@ def handle_chosen_inline(chosen):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(track_url, download=True)
                 audio_filename = ydl.prepare_filename(info)
-                
                 base_name = os.path.splitext(audio_filename)[0]
                 
                 for ext in ['.jpg', '.jpeg', '.png', '.webp']:
@@ -358,13 +359,11 @@ def handle_chosen_inline(chosen):
                             thumbnail_filename = base_name + "_telegram.jpg"
                             img.convert("RGB").save(thumbnail_filename, "JPEG")
                         except Exception as e:
-                            print(f"Ошибка изменения размера обложки: {e}")
                             thumbnail_filename = original_thumb
                         break
 
             audio_filename = compress_audio_if_needed(audio_filename)
 
-            file_id = None
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
                 
@@ -394,22 +393,14 @@ def handle_chosen_inline(chosen):
         except Exception as e:
             print(f"Ошибка скачивания (инлайн): {e}")
             try:
-                bot.edit_message_text(
-                    text="❌ Не удалось скачать выбранный трек.",
-                    inline_message_id=inline_msg_id
-                )
+                bot.edit_message_text("❌ Не удалось скачать трек.", inline_message_id=inline_msg_id)
             except:
                 pass
         finally:
-            if audio_filename and os.path.exists(audio_filename):
-                try: os.remove(audio_filename)
-                except: pass
-            if thumbnail_filename and os.path.exists(thumbnail_filename):
-                try: os.remove(thumbnail_filename)
-                except: pass
-            if original_thumb and os.path.exists(original_thumb) and original_thumb != thumbnail_filename:
-                try: os.remove(original_thumb)
-                except: pass
+            for file_p in [audio_filename, thumbnail_filename, original_thumb]:
+                if file_p and os.path.exists(file_p):
+                    try: os.remove(file_p)
+                    except: pass
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -423,7 +414,6 @@ def stats_command(message):
     ping_ms = int((time.time() - start_ping) * 1000)
     
     user_number = active_users.index(chat_id) + 1 if chat_id in active_users else len(active_users) + 1
-    
     uptime_seconds = int(time.time() - bot_start_time)
     hours = uptime_seconds // 3600
     minutes = (uptime_seconds % 3600) // 60
@@ -465,7 +455,7 @@ def handle_donate_callback(call):
     if action == "custom":
         waiting_for_custom_stars.add(chat_id)
         bot.answer_callback_query(call.id)
-        bot.send_message(chat_id, "✍️ Напиши в чат число — сколько звёзд ты хочешь отправить (например: `50`):", parse_mode="Markdown")
+        bot.send_message(chat_id, "✍️ Напиши число — сколько звёзд отправить (например: `50`):", parse_mode="Markdown")
         return
 
     try:
@@ -481,7 +471,7 @@ def send_invoice_stars(chat_id, amount):
     bot.send_invoice(
         chat_id=chat_id,
         title='Поддержка проекта',
-        description=f'Спасибо за донат в размере {amount} ⭐! Эти средства пойдут на развитие бота.',
+        description=f'Спасибо за донат в {amount} ⭐!',
         invoice_payload=f'donate_{amount}',
         provider_token='',
         currency='XTR',
@@ -532,13 +522,13 @@ def handle_discover(message):
     
     text = (
         "🧭 **Не знаешь, что послушать? Выбирай направление:**\n\n"
-        "• **Поп:** Мелодичные песни с простым ритмом и запоминающимся припевом.\n\n"
-        "• **Рок:** Энергичный стиль с преобладанием электрогитар, включающий баллады и тяжелые направления.\n\n"
-        "• **Хип-хоп и рэп:** Ритмичный речитатив под электронный или живой бит.\n\n"
-        "• **Джаз и блюз:** Импровизационные композиции с глубоким эмоциональным подтекстом.\n\n"
-        "• **Phonk / Фонк:** Агрессивный бас, качающий ритм и драйвовая атмосфера.\n\n"
-        "• **TikTok Hits:** Самые популярные треки, ремиксы и тренды из коротких видео.\n\n"
-        "👇 *Нажми на кнопку ниже, и я подберу отличную музыку!*"
+        "• **Поп:** Мелодичные песни с простым ритмом.\n"
+        "• **Ро克:** Энергичный стиль с электрогитарами.\n"
+        "• **Хип-хоп:** Ритмичный речитатив под бит.\n"
+        "• **Джаз:** Импровизационные композиции.\n"
+        "• **Phonk:** Агрессивный бас и качающий ритм.\n"
+        "• **TikTok Hits:** Треки из коротких видео.\n\n"
+        "👇 *Нажми на кнопку ниже, и я подберу музыку!*"
     )
     
     markup = InlineKeyboardMarkup(row_width=2)
@@ -578,7 +568,7 @@ def text_handler(message):
             stars_count = int(text)
             send_invoice_stars(chat_id, stars_count)
         else:
-            bot.reply_to(message, "❌ Пожалуйста, введи корректное число (например, 30). Попробуй снова через /donate")
+            bot.reply_to(message, "❌ Пожалуйста, введи корректное число. Попробуй снова через /donate")
         return
 
     original_queries[chat_id] = message.text
@@ -594,7 +584,7 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
 
     def worker():
         try:
-            # Получаем настройку количества треков пользователя (по умолчанию 10)
+            # Чтение настройки с приведением ключа к str
             user_limit = user_settings.get(str(chat_id), {}).get("search_limit", 10)
             
             ydl_opts = {"extract_flat": True, "quiet": True}
@@ -616,10 +606,7 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
                 tracks = all_tracks[start:start + user_limit]
                 
             if not tracks:
-                if is_new:
-                    bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id)
-                else:
-                    bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id, reply_markup=None)
+                bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id, reply_markup=None)
                 return
                 
             tracks_cache[chat_id] = tracks
@@ -762,7 +749,6 @@ def handle_download_callback(call):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(track_url, download=True)
                 audio_filename = ydl.prepare_filename(info)
-                
                 base_name = os.path.splitext(audio_filename)[0]
                 
                 for ext in ['.jpg', '.jpeg', '.png', '.webp']:
@@ -774,7 +760,6 @@ def handle_download_callback(call):
                             thumbnail_filename = base_name + "_telegram.jpg"
                             img.convert("RGB").save(thumbnail_filename, "JPEG")
                         except Exception as e:
-                            print(f"Ошибка изменения размера обложки: {e}")
                             thumbnail_filename = original_thumb
                         break
 
@@ -792,61 +777,39 @@ def handle_download_callback(call):
                 )
                 if thumb_file:
                     thumb_file.close()
-                
+
+                # Сохраняем в кэш Telegram file_id
                 audio_cache[track_url] = sent_msg.audio.file_id
 
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
-            
+
             bot.edit_message_text(
-                text=f"▶️ **Трек успешно отправлен!**\n🎵 {title}\n🧑‍🎤 {uploader}",
+                text=f"▶️ **Плеер:**\n🎵 {info.get('title', title)}\n🧑‍🎤 {info.get('uploader', uploader)}",
                 chat_id=chat_id,
                 message_id=status_msg.message_id,
                 parse_mode="Markdown",
                 reply_markup=markup
             )
-            
+
             stats_data["total_downloads"] += 1
             save_all_data()
-            
+
         except Exception as e:
-            print(f"Ошибка скачивания: {e}")
-            bot.edit_message_text(
-                text="❌ Не удалось скачать трек. Попробуй выбрать другой.",
-                chat_id=chat_id,
-                message_id=status_msg.message_id
-            )
+            print(f"Ошибка при скачивании трека: {e}")
+            try:
+                bot.edit_message_text("❌ Не удалось скачать выбранный трек.", chat_id, status_msg.message_id)
+            except:
+                pass
         finally:
-            if audio_filename and os.path.exists(audio_filename):
-                try: os.remove(audio_filename)
-                except: pass
-            if thumbnail_filename and os.path.exists(thumbnail_filename):
-                try: os.remove(thumbnail_filename)
-                except: pass
-            if original_thumb and os.path.exists(original_thumb) and original_thumb != thumbnail_filename:
-                try: os.remove(original_thumb)
-                except: pass
+            for file_p in [audio_filename, thumbnail_filename, original_thumb]:
+                if file_p and os.path.exists(file_p):
+                    try: os.remove(file_p)
+                    except: pass
 
     threading.Thread(target=worker, daemon=True).start()
 
-# === ПРАВИЛЬНЫЙ ЗАПУСК С АВТО-ОТКЛЮЧЕНИЕМ ПРИ КОНФЛИКТЕ (409) ===
-try:
-    bot.remove_webhook()
-    print("✅ Вебхук очищен.")
-except Exception as e:
-    print(f"⚠️ Ошибка удаления вебхука: {e}")
-
-print("🚀 Бот запущен...")
-
-while True:
-    try:
-        bot.polling(non_stop=True, skip_pending=True)
-    except ApiTelegramException as e:
-        if e.error_code == 409:
-            print("❌ Ошибка 409: Бот запущен на другом устройстве! Этот процесс завершает работу.")
-            sys.exit(0)
-        print(f"⚠️ Ошибка Telegram API: {e}")
-        time.sleep(3)
-    except Exception as e:
-        print(f"⚠️ Ошибка: {e}")
-        time.sleep(3)
+# --- ЗАПУСК БОТА ---
+if __name__ == "__main__":
+    print("🤖 Бот успешно запущен!")
+    bot.infinity_polling(skip_pending=True)
