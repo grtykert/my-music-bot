@@ -1,1 +1,239 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Настройки поиска</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        :root {
+            --bg-color: var(--tg-theme-bg-color, #17212b);
+            --text-color: var(--tg-theme-text-color, #ffffff);
+            --hint-color: var(--tg-theme-hint-color, #708499);
+            --sec-bg: var(--tg-theme-secondary-bg-color, #232e3c);
+            --btn-color: var(--tg-theme-button-color, #5288c1);
+            --btn-text: var(--tg-theme-button-text-color, #ffffff);
+        }
 
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        .header {
+            text-align: center;
+            margin-top: 10px;
+            margin-bottom: 24px;
+        }
+
+        .header-icon {
+            font-size: 48px;
+            margin-bottom: 10px;
+        }
+
+        .header h1 {
+            font-size: 22px;
+            font-weight: 700;
+        }
+
+        .header p {
+            font-size: 14px;
+            color: var(--hint-color);
+            margin-top: 6px;
+            line-height: 1.4;
+        }
+
+        .card {
+            background-color: var(--sec-bg);
+            border-radius: 16px;
+            padding: 20px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        }
+
+        .card-title {
+            font-size: 13px;
+            color: var(--hint-color);
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-bottom: 16px;
+            font-weight: 600;
+        }
+
+        .slider-val-display {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 16px;
+            font-weight: 500;
+            margin-bottom: 16px;
+        }
+
+        .value-badge {
+            background: var(--btn-color);
+            color: var(--btn-text);
+            padding: 4px 14px;
+            border-radius: 20px;
+            font-weight: 700;
+            font-size: 16px;
+        }
+
+        input[type=range] {
+            -webkit-appearance: none;
+            width: 100%;
+            background: transparent;
+        }
+
+        input[type=range]:focus {
+            outline: none;
+        }
+
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 8px;
+            cursor: pointer;
+            background: rgba(255, 255, 255, 0.12);
+            border-radius: 4px;
+        }
+
+        input[type=range]::-webkit-slider-thumb {
+            height: 26px;
+            width: 26px;
+            border-radius: 50%;
+            background: var(--btn-color);
+            cursor: pointer;
+            -webkit-appearance: none;
+            margin-top: -9px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+        }
+
+        .scale-bar {
+            display: flex;
+            gap: 6px;
+            margin-top: 14px;
+        }
+
+        .scale-segment {
+            flex: 1;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.1);
+            transition: background 0.2s ease;
+        }
+
+        .scale-segment.active {
+            background: var(--btn-color);
+        }
+
+        .save-btn {
+            margin-top: auto;
+            width: 100%;
+            padding: 16px;
+            background-color: var(--btn-color);
+            color: var(--btn-text);
+            border: none;
+            border-radius: 14px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: opacity 0.15s ease, transform 0.1s ease;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+        }
+
+        .save-btn:active {
+            opacity: 0.85;
+            transform: scale(0.98);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="header-icon">⚙️</div>
+        <h1>Настройки поиска</h1>
+        <p>Выберите количество треков, выводимых на одной странице результатов</p>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Выдача результатов</div>
+        <div class="slider-val-display">
+            <span>Количество треков:</span>
+            <span class="value-badge" id="trackCount">10 треков</span>
+        </div>
+
+        <input type="range" id="tracksRange" min="1" max="10" value="10" step="1">
+
+        <div class="scale-bar" id="scaleBar"></div>
+    </div>
+
+    <button class="save-btn" onclick="saveSettings()">Сохранить настройки</button>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        tg.ready();
+        tg.expand();
+
+        const rangeInput = document.getElementById('tracksRange');
+        const countDisplay = document.getElementById('trackCount');
+        const scaleBar = document.getElementById('scaleBar');
+        const maxVal = 10;
+
+        function renderScale(val) {
+            scaleBar.innerHTML = '';
+            for (let i = 1; i <= maxVal; i++) {
+                const seg = document.createElement('div');
+                seg.className = 'scale-segment' + (i <= val ? ' active' : '');
+                scaleBar.appendChild(seg);
+            }
+        }
+
+        function updateUI(val) {
+            countDisplay.textContent = val + ' ' + getTrackWord(val);
+            renderScale(val);
+        }
+
+        function getTrackWord(n) {
+            if (n === 1) return 'трек';
+            if (n >= 2 && n <= 4) return 'трека';
+            return 'треков';
+        }
+
+        rangeInput.addEventListener('input', (e) => {
+            const val = parseInt(e.target.value);
+            updateUI(val);
+            if (tg.HapticFeedback) {
+                tg.HapticFeedback.selectionChanged();
+            }
+        });
+
+        updateUI(rangeInput.value);
+
+        function saveSettings() {
+            const val = parseInt(rangeInput.value);
+            if (tg.HapticFeedback) {
+                tg.HapticFeedback.notificationOccurred('success');
+            }
+            
+            tg.sendData(JSON.stringify({
+                action: 'set_tracks_per_page',
+                count: val
+            }));
+
+            tg.close();
+        }
+    </script>
+</body>
+      </html>
+  
