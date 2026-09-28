@@ -821,16 +821,44 @@ def handle_web_app_data(message):
     try:
         data = json.loads(message.web_app_data.data)
         if data.get("action") == "set_tracks_per_page":
-            count = data.get("count")
-            user_id = message.from_user.id
+            count = int(data.get("count", 10))
+            user_id_str = str(message.from_user.id)
+
+            if user_id_str not in user_settings:
+                user_settings[user_id_str] = {}
             
-            # Сохрани значение count (например, в БД или словарь с настройками пользователя)
-            # user_settings[user_id] = count
-            
+            user_settings[user_id_str]["search_limit"] = count
+            save_all_data()
+
             bot.send_message(message.chat.id, f"✅ Настройки успешно сохранены!\nВыдача: {count} треков на страницу.")
     except Exception as e:
         print(f"Ошибка при получении данных из Web App: {e}")
-# --- ЗАПУСК БОТА ---
-if __name__ == "__main__":
-    print("🤖 Бот успешно запущен!")
-    bot.infinity_polling(skip_pending=True)
+
+# --- ОСНОВНОЙ БЛОК ЗАПУСКА И ПЕРЕХВАТ 409 ОШИБКИ ---
+if __name__ == '__main__':
+    print("🚀 Запуск бота...")
+    
+    is_running = False
+
+    while True:
+        try:
+            bot.remove_webhook(drop_pending_updates=True)
+            
+            is_running = True
+            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
+
+        except ApiTelegramException as e:
+            if e.error_code == 409:
+                if is_running:
+                    print("⚡ Запущен новый экземпляр бота! Завершаю работу этой (старой) копии...")
+                    sys.exit(0)
+                else:
+                    print("⏳ Замена старого сеанса... Повтор через 3 секунды")
+                    time.sleep(3)
+            else:
+                print(f"Ошибка Telegram API: {e}")
+                time.sleep(5)
+                
+        except Exception as e:
+            print(f"Ошибка: {e}")
+            time.sleep(5)
