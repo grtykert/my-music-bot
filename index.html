@@ -205,11 +205,11 @@
         const rangeInput = document.getElementById('tracksRange');
         const countDisplay = document.getElementById('trackCount');
         const scaleBar = document.getElementById('scaleBar');
-        const maxVal = 25;
+        const maxVal = 10;
 
         function renderScale(val) {
             scaleBar.innerHTML = '';
-            for (let i = 5; i <= maxVal; i+=5) {
+            for (let i = 1; i <= maxVal; i++) {
                 const seg = document.createElement('div');
                 seg.className = 'scale-segment' + (i <= val ? ' active' : '');
                 scaleBar.appendChild(seg);
@@ -254,5 +254,3 @@
 </body>
 </html>
 
-
-            
