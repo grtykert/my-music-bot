@@ -815,6 +815,21 @@ def handle_download_callback(call):
 
     threading.Thread(target=worker, daemon=True).start()
 
+# --- ОБРАБОТКА ДАННЫХ ИЗ WEB APP ---
+@bot.message_handler(content_types=['web_app_data'])
+def handle_web_app_data(message):
+    try:
+        data = json.loads(message.web_app_data.data)
+        if data.get("action") == "set_tracks_per_page":
+            count = data.get("count")
+            user_id = message.from_user.id
+            
+            # Сохрани значение count (например, в БД или словарь с настройками пользователя)
+            # user_settings[user_id] = count
+            
+            bot.send_message(message.chat.id, f"✅ Настройки успешно сохранены!\nВыдача: {count} треков на страницу.")
+    except Exception as e:
+        print(f"Ошибка при получении данных из Web App: {e}")
 # --- ЗАПУСК БОТА ---
 if __name__ == "__main__":
     print("🤖 Бот успешно запущен!")
