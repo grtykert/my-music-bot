@@ -842,7 +842,7 @@ if __name__ == '__main__':
 
     while True:
         try:
-            bot.remove_webhook(drop_pending_updates=True)
+            bot.remove_webhook
             
             is_running = True
             bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
