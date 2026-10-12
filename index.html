@@ -188,7 +188,7 @@
             </div>
 
             <div class="slider-wrapper">
-                <input type="range" id="tracksRange" min="5" max=25" value="10" step="5">
+                <input type="range" id="tracksRange" min="5" max="25" value="10" step="5">
             </div>
 
             <div class="scale-bar" id="scaleBar"></div>
@@ -205,13 +205,18 @@
         const rangeInput = document.getElementById('tracksRange');
         const countDisplay = document.getElementById('trackCount');
         const scaleBar = document.getElementById('scaleBar');
+        
+        const minVal = parseInt(rangeInput.min);
         const maxVal = parseInt(rangeInput.max);
+        const stepVal = parseInt(rangeInput.step);
+        const totalSegments = (maxVal - minVal) / stepVal + 1;
 
         function renderScale(val) {
             scaleBar.innerHTML = '';
-            for (let i = 1; i <= maxVal; i++) {
+            for (let i = 0; i < totalSegments; i++) {
+                const currentStepValue = minVal + (i * stepVal);
                 const seg = document.createElement('div');
-                seg.className = 'scale-segment' + (i <= val ? ' active' : '');
+                seg.className = 'scale-segment' + (currentStepValue <= val ? ' active' : '');
                 scaleBar.appendChild(seg);
             }
         }
@@ -235,7 +240,7 @@
             }
         });
 
-        updateUI(rangeInput.value);
+        updateUI(parseInt(rangeInput.value));
 
         function saveSettings() {
             const val = parseInt(rangeInput.value);
