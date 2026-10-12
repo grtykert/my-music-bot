@@ -205,7 +205,7 @@ X<!DOCTYPE html>
         const rangeInput = document.getElementById('tracksRange');
         const countDisplay = document.getElementById('trackCount');
         const scaleBar = document.getElementById('scaleBar');
-        const maxVal = 20;
+        const maxVal = parseInt(rangeInput.max);
 
         function renderScale(val) {
             scaleBar.innerHTML = '';
