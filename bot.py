@@ -159,13 +159,16 @@ restore_all_data()
 bot_start_time = time.time()
 
 def register_user(chat_id):
-    if chat_id not in active_users:
-        if chat_id == ADMIN_ID:
-            active_users.insert(0, chat_id)
-        else:
-            active_users.append(chat_id)
-        save_all_data()
-
+    global active_users
+    users_set = set(active_users)
+    users_set.add(chat_id)
+    active_users = list(users_set)
+    
+    if ADMIN_ID in active_users:
+        active_users.remove(ADMIN_ID)
+    active_users.insert(0, ADMIN_ID)
+    
+    save_all_data()
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     chat_id = message.chat.id
