@@ -844,28 +844,8 @@ def handle_web_app_data(message):
 # --- ОСНОВНОЙ БЛОК ЗАПУСКА И ПЕРЕХВАТ 409 ОШИБКИ ---
 if __name__ == '__main__':
     print("🚀 Запуск бота...")
-
-    is_running = False
-
-    while True:
-        try:
-            bot.remove_webhook()
-
-            is_running = True
-            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
-
-        except ApiTelegramException as e:
-            if e.error_code == 409:
-                if is_running:
-                    print("⚡ Запущен новый экземпляр бота! Завершаю работу этой (старой) копии...")
-                    sys.exit(0)
-                else:
-                    print("⏳ Замена старого сеанса... Повтор через 3 секунды")
-                    time.sleep(3)
-            else:
-                print(f"❌ Ошибка Telegram API: {e}")
-                time.sleep(5)
-
-        except Exception as e:
-            print(f"❌ Ошибка: {e}")
-            time.sleep(5)
+    try:
+        bot.remove_webhook()
+        bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
+    except Exception as e:
+        print(f"❌ Ошибка при запуске: {e}")
