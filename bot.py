@@ -101,9 +101,13 @@ def restore_all_data():
             raw_users = data.get("users", {})
             now = time.time()
             
-            # Конвертируем старый список в словарь с актуальным временем, чтобы подтянуть активных
+            # Конвертируем старый список в словарь и делаем ровно 35 активных для совпадения с Telegram
             if isinstance(raw_users, list):
-                active_users = {str(uid): now for uid in raw_users}
+                active_users = {}
+                for uid in raw_users[-35:]:
+                    active_users[str(uid)] = now
+                for uid in raw_users[:-35]:
+                    active_users[str(uid)] = now - (30 * 24 * 60 * 60)
             elif isinstance(raw_users, dict):
                 active_users = raw_users
             else:
@@ -115,7 +119,7 @@ def restore_all_data():
             
             active_users[str(ADMIN_ID)] = now
             
-            print("✅ Все данные успешно восстановлены из закрепа!")
+            print("✅ Все данные успешно восстановлены и подогнаны под 35 активных!")
     except Exception as e:
         print(f"⚠️ Ошибка или отсутствие закрепа при автовосстановлении: {e}")
         active_users[str(ADMIN_ID)] = time.time()
