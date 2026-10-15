@@ -58,6 +58,7 @@ audio_cache = {}
 user_settings = {}  # Хранение настроек пользователей
 backup_msg_id = None
 data_lock = threading.Lock()
+users_offset = 0  # Поправка для ручной корректировки цифры в статистике
 
 # --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО СЖАТИЯ ---
 def compress_audio_if_needed(input_filename, max_size_mb=48):
@@ -89,7 +90,7 @@ def compress_audio_if_needed(input_filename, max_size_mb=48):
 
 # --- СИСТЕМА ЕДИНОГО БЭКАПА ЧЕРЕЗ ЗАКРЕП ---
 def restore_all_data():
-    global active_users, stats_data, audio_cache, user_settings, backup_msg_id
+    global active_users, stats_data, audio_cache, user_settings, backup_msg_id, users_offset
     try:
         chat = bot.get_chat(BACKUP_CHANNEL_ID)
         if chat.pinned_message and chat.pinned_message.document:
@@ -100,26 +101,25 @@ def restore_all_data():
             
             raw_users = data.get("users", {})
             now = time.time()
+            month_ago = now - (28 * 24 * 60 * 60)
             
-            # Конвертируем старый список в словарь и делаем ровно 35 активных для совпадения с Telegram
             if isinstance(raw_users, list):
                 active_users = {}
-                for uid in raw_users[-35:]:
+                for uid in raw_users:
                     active_users[str(uid)] = now
-                for uid in raw_users[:-35]:
-                    active_users[str(uid)] = now - (30 * 24 * 60 * 60)
             elif isinstance(raw_users, dict):
-                active_users = raw_users
+                active_users = {str(uid): t for uid, t in raw_users.items() if t >= month_ago}
             else:
                 active_users = {}
                 
             stats_data = data.get("stats", {"total_downloads": 0})
             audio_cache = data.get("cache", {})
             user_settings = data.get("settings", {})
+            users_offset = data.get("users_offset", 0)
             
             active_users[str(ADMIN_ID)] = now
             
-            print("✅ Все данные успешно восстановлены и подогнаны под 35 активных!")
+            print("✅ Все данные успешно восстановлены!")
     except Exception as e:
         print(f"⚠️ Ошибка или отсутствие закрепа при автовосстановлении: {e}")
         active_users[str(ADMIN_ID)] = time.time()
@@ -134,7 +134,8 @@ def save_all_data():
                 "users": active_users,
                 "stats": stats_data,
                 "cache": audio_cache,
-                "settings": user_settings
+                "settings": user_settings,
+                "users_offset": users_offset
             }
             with open("data.json", "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -187,6 +188,27 @@ def send_welcome(message):
         "📊 Статистика бота: /stats\n"
         "🧑‍🎤 Поиск по автору: /author Имя"
     )
+
+# --- АДМИНСКАЯ КОМАНДА ДЛЯ РУЧНОЙ ПОПРАВКИ СТАТИСТИКИ ---
+@bot.message_handler(commands=['setusers'])
+def set_users_command(message):
+    global users_offset
+    if message.chat.id == ADMIN_ID:
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2 or not args[1].isdigit():
+            bot.reply_to(message, "❗️ Укажи число. Пример: `/setusers 35`", parse_mode="Markdown")
+            return
+        
+        target_count = int(args[1])
+        now = time.time()
+        month_ago = now - (28 * 24 * 60 * 60)
+        current_real_count = sum(1 for uid, last_seen in active_users.items() if last_seen >= month_ago)
+        
+        users_offset = target_count - current_real_count
+        save_all_data()
+        bot.reply_to(message, f"✅ Готово! Установлена поправка: `{users_offset}`. Теперь в статистике отображается нужное число.", parse_mode="Markdown")
+    else:
+        bot.reply_to(message, "❌ У вас нет прав для этой команды.")
 
 # --- НАСТРОЙКИ И ПОЛЗУНОК ---
 def get_settings_keyboard(chat_id):
@@ -425,10 +447,11 @@ def stats_command(message):
     bot.get_me()
     ping_ms = int((time.time() - start_ping) * 1000)
     
-    # Считаем только пользователей за последние 28 дней
+    # Автоматический подсчет + ручной оффсет
     now = time.time()
     month_ago = now - (28 * 24 * 60 * 60)
-    recent_users_count = sum(1 for uid, last_seen in active_users.items() if last_seen >= month_ago)
+    real_users_count = sum(1 for uid, last_seen in active_users.items() if last_seen >= month_ago)
+    recent_users_count = max(0, real_users_count + users_offset)
     
     uptime_seconds = int(time.time() - bot_start_time)
     hours = uptime_seconds // 3600
@@ -841,11 +864,20 @@ def handle_web_app_data(message):
     except Exception as e:
         print(f"Ошибка при получении данных из Web App: {e}")
 
-# --- ОСНОВНОЙ БЛОК ЗАПУСКА И ПЕРЕХВАТ 409 ОШИБКИ ---
+# --- ОСНОВНОЙ БЛОК ЗАПУСКА С ЗАЩИТОЙ ОТ 409 ОШИБКИ ---
 if __name__ == '__main__':
     print("🚀 Запуск бота...")
-    try:
-        bot.remove_webhook()
-        bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
-    except Exception as e:
-        print(f"❌ Ошибка при запуске: {e}")
+    while True:
+        try:
+            bot.remove_webhook()
+            bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
+        except ApiTelegramException as e:
+            if e.error_code == 409:
+                print("⚠️ Конфликт сессий (409), повтор через 5 секунд...")
+                time.sleep(5)
+            else:
+                print(f"❌ Ошибка Telegram API: {e}")
+                time.sleep(5)
+        except Exception as e:
+            print(f"❌ Ошибка: {e}")
+            time.sleep(5)
