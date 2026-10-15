@@ -51,7 +51,7 @@ inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
 
-# Переменные хранения данных (active_users теперь словарь для отслеживания времени)
+# Переменные хранения данных и мьютекс для потокобезопасности
 active_users = {}
 stats_data = {"total_downloads": 0}
 audio_cache = {}
@@ -99,17 +99,21 @@ def restore_all_data():
             data = json.loads(downloaded_file.decode('utf-8'))
             
             raw_users = data.get("users", {})
-            # Если в старом бэкапе был список, конвертируем в словарь с текущим временем
+            now = time.time()
+            
+            # Конвертируем старый список в словарь с актуальным временем, чтобы подтянуть активных
             if isinstance(raw_users, list):
-                active_users = {str(uid): time.time() for uid in raw_users}
-            else:
+                active_users = {str(uid): now for uid in raw_users}
+            elif isinstance(raw_users, dict):
                 active_users = raw_users
+            else:
+                active_users = {}
                 
             stats_data = data.get("stats", {"total_downloads": 0})
             audio_cache = data.get("cache", {})
             user_settings = data.get("settings", {})
             
-            active_users[str(ADMIN_ID)] = time.time()
+            active_users[str(ADMIN_ID)] = now
             
             print("✅ Все данные успешно восстановлены из закрепа!")
     except Exception as e:
