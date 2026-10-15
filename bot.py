@@ -51,8 +51,8 @@ inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
 
-# Переменные хранения данных и мьютекс для потокобезопасности
-active_users = []
+# Переменные хранения данных (active_users теперь словарь для отслеживания времени)
+active_users = {}
 stats_data = {"total_downloads": 0}
 audio_cache = {}
 user_settings = {}  # Хранение настроек пользователей
@@ -98,28 +98,29 @@ def restore_all_data():
             downloaded_file = bot.download_file(file_info.file_path)
             data = json.loads(downloaded_file.decode('utf-8'))
             
-            active_users = data.get("users", [])
+            raw_users = data.get("users", {})
+            # Если в старом бэкапе был список, конвертируем в словарь с текущим временем
+            if isinstance(raw_users, list):
+                active_users = {str(uid): time.time() for uid in raw_users}
+            else:
+                active_users = raw_users
+                
             stats_data = data.get("stats", {"total_downloads": 0})
             audio_cache = data.get("cache", {})
             user_settings = data.get("settings", {})
             
-            if ADMIN_ID in active_users:
-                active_users.remove(ADMIN_ID)
-            active_users.insert(0, ADMIN_ID)
+            active_users[str(ADMIN_ID)] = time.time()
             
             print("✅ Все данные успешно восстановлены из закрепа!")
     except Exception as e:
         print(f"⚠️ Ошибка или отсутствие закрепа при автовосстановлении: {e}")
-        if ADMIN_ID not in active_users:
-            active_users.insert(0, ADMIN_ID)
+        active_users[str(ADMIN_ID)] = time.time()
 
 def save_all_data():
     global backup_msg_id
     with data_lock:
         try:
-            if ADMIN_ID in active_users:
-                active_users.remove(ADMIN_ID)
-            active_users.insert(0, ADMIN_ID)
+            active_users[str(ADMIN_ID)] = time.time()
 
             data = {
                 "users": active_users,
@@ -160,15 +161,9 @@ bot_start_time = time.time()
 
 def register_user(chat_id):
     global active_users
-    users_set = set(active_users)
-    users_set.add(chat_id)
-    active_users = list(users_set)
-    
-    if ADMIN_ID in active_users:
-        active_users.remove(ADMIN_ID)
-    active_users.insert(0, ADMIN_ID)
-    
+    active_users[str(chat_id)] = time.time()
     save_all_data()
+
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     chat_id = message.chat.id
@@ -261,9 +256,7 @@ def handle_chat_member(message):
     chat_id = message.chat.id
     new_status = message.new_chat_member.status
     if new_status in ['kicked', 'left']:
-        if chat_id in active_users and chat_id != ADMIN_ID:
-            active_users.remove(chat_id)
-            save_all_data()
+        pass
     elif new_status == 'member':
         register_user(chat_id)
 
@@ -424,18 +417,21 @@ def stats_command(message):
     bot.get_me()
     ping_ms = int((time.time() - start_ping) * 1000)
     
-    user_number = active_users.index(chat_id) + 1 if chat_id in active_users else len(active_users) + 1
+    # Считаем только пользователей за последние 28 дней
+    now = time.time()
+    month_ago = now - (28 * 24 * 60 * 60)
+    recent_users_count = sum(1 for uid, last_seen in active_users.items() if last_seen >= month_ago)
+    
     uptime_seconds = int(time.time() - bot_start_time)
     hours = uptime_seconds // 3600
     minutes = (uptime_seconds % 3600) // 60
     
     stats_text = (
         f"📊 **Статистика бота:**\n\n"
-        f"👥 Активных пользователей: `{len(active_users)}`\n"
+        f"👥 Активных пользователей: `{recent_users_count}`\n"
         f"⏱ Время работы: `{hours}ч {minutes}м`\n"
         f"📥 Скачано треков: `{stats_data['total_downloads']}`\n"
-        f"⚡️ Пинг сервера: `{ping_ms} мс`\n"
-        f"👤 Твой номер в системе: `#{user_number}`\n\n"
+        f"⚡️ Пинг сервера: `{ping_ms} мс`\n\n"
         f"🟢 Статус: `Онлайн (Render)`"
     )
     bot.reply_to(message, stats_text, parse_mode="Markdown")
@@ -829,7 +825,7 @@ def handle_web_app_data(message):
 
             if user_id_str not in user_settings:
                 user_settings[user_id_str] = {}
-            
+
             user_settings[user_id_str]["search_limit"] = count
             save_all_data()
 
@@ -840,13 +836,13 @@ def handle_web_app_data(message):
 # --- ОСНОВНОЙ БЛОК ЗАПУСКА И ПЕРЕХВАТ 409 ОШИБКИ ---
 if __name__ == '__main__':
     print("🚀 Запуск бота...")
-    
+
     is_running = False
 
     while True:
         try:
-            bot.remove_webhook
-            
+            bot.remove_webhook()
+
             is_running = True
             bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=10)
 
@@ -859,9 +855,9 @@ if __name__ == '__main__':
                     print("⏳ Замена старого сеанса... Повтор через 3 секунды")
                     time.sleep(3)
             else:
-                print(f"Ошибка Telegram API: {e}")
+                print(f"❌ Ошибка Telegram API: {e}")
                 time.sleep(5)
-                
+
         except Exception as e:
-            print(f"Ошибка: {e}")
+            print(f"❌ Ошибка: {e}")
             time.sleep(5)
