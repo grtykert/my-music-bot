@@ -64,11 +64,12 @@ users_offset = 0  # Поправка для ручной корректиров�
 
 # --- ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ---
 def check_user_subscription(user_id):
-    # ВРЕМЕННЫЙ ТЕСТОВЫЙ РЕЖИМ:
-    # Всегда считаем пользователя неподписанным, даже если он владелец группы.
-    # После теста верни обычную проверку подписки.
-    print(f"ТЕСТОВЫЙ РЕЖИМ: показываем запрос подписки user_id={user_id}")
-    return False
+    try:
+        member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        return member.status in ['creator', 'administrator', 'member']
+    except Exception as e:
+        print(f"Ошибка проверки подписки: {e}")
+        return False
 
 def send_subscription_prompt(chat_id):
     markup = InlineKeyboardMarkup()
@@ -656,11 +657,6 @@ def handle_genre_selection(call):
 def text_handler(message):
     chat_id = message.chat.id
     
-    # 🛑 ПРОВЕРКА ПОДПИСКИ ПРИ ПОИСКЕ МУЗЫКИ
-    if not check_user_subscription(chat_id):
-        send_subscription_prompt(chat_id)
-        return
-
     register_user(chat_id)
     
     if chat_id in waiting_for_custom_stars:
@@ -959,4 +955,5 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ Ошибка: {e}")
             time.sleep(5)
+
 
