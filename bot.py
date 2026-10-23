@@ -65,8 +65,6 @@ users_offset = 0  # Поправка для ручной корректиров�
 # --- ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ---
 def check_user_subscription(user_id):
     try:
-        if user_id == ADMIN_ID:
-            return True
         member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         if member.status in ['creator', 'administrator', 'member']:
             return True
@@ -215,7 +213,8 @@ def send_welcome(message):
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
 def callback_check_sub(call):
     chat_id = call.message.chat.id
-    if check_user_subscription(chat_id):
+    user_id = call.from_user.id
+    if check_user_subscription(user_id):
         bot.answer_callback_query(call.id, "✅ Спасибо за подписку!", show_alert=True)
         try:
             bot.delete_message(chat_id, call.message.message_id)
@@ -674,6 +673,10 @@ def text_handler(message):
 
 def search_music_by_query(message, query, page=1, is_new=False, is_filter=False, is_random=False):
     chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not check_user_subscription(user_id):
+        send_subscription_prompt(chat_id)
+        return
     
     if is_new:
         msg = bot.reply_to(message, "🔍 Ищу варианты...")
@@ -784,6 +787,11 @@ def handle_back_to_search(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def handle_download_callback(call):
     chat_id = call.message.chat.id
+    user_id = call.from_user.id
+    if not check_user_subscription(user_id):
+        bot.answer_callback_query(call.id, "❌ Сначала подпишись на группу", show_alert=True)
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     
     index = int(call.data.replace("dl_", ""))
@@ -940,3 +948,4 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ Ошибка: {e}")
             time.sleep(5)
+
