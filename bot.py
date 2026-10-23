@@ -27,7 +27,6 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        # Отключаем спам запросами в логах
         return
 
 def run_dummy_server():
@@ -45,24 +44,50 @@ if not API_TOKEN:
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", -1004445455425))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 5378591975))
 
+# ОБЯЗАТЕЛЬНЫЙ КАНАЛ/ГРУППА ДЛЯ ПОДПИСКИ
+REQUIRED_CHANNEL = "@teruteg"
+
 bot = telebot.TeleBot(API_TOKEN)
 tracks_cache = {}
 inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
 
-# Переменные хранения данных и мьютекс для потокобезопасности
 active_users = {}
 stats_data = {"total_downloads": 0}
 audio_cache = {}
-user_settings = {}  # Хранение настроек пользователей
+user_settings = {}
 backup_msg_id = None
 data_lock = threading.Lock()
-users_offset = 0  # Поправка для ручной корректировки цифры в статистике
+users_offset = 0
+
+# --- ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ---
+def check_user_subscription(user_id):
+    try:
+        # Админ всегда имеет доступ без подписки
+        if user_id == ADMIN_ID:
+            return True
+        member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        if member.status in ['left', 'kicked']:
+            return False
+        return True
+    except Exception as e:
+        print(f"Ошибка проверки подписки: {e}")
+        return True  # В случае сбоя API Telegram пропускаем, чтобы не блокировать бота насмерть
+
+def send_subscription_prompt(chat_id):
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("📢 Подписаться на группу", url="https://t.me/teruteg"))
+    markup.row(InlineKeyboardButton("🔄 Я подписался", callback_data="check_sub"))
+    bot.send_message(
+        chat_id,
+        "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: https://t.me/teruteg\n\nПосле подписки нажмите кнопку ниже:",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
 
 # --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО СЖАТИЯ ---
 def compress_audio_if_needed(input_filename, max_size_mb=48):
-    """Сжимает аудио через ffmpeg, если оно весит больше max_size_mb (лимит Telegram = 50 МБ)"""
     if not input_filename or not os.path.exists(input_filename):
         return input_filename
         
@@ -70,7 +95,7 @@ def compress_audio_if_needed(input_filename, max_size_mb=48):
     if file_size_mb <= max_size_mb:
         return input_filename
         
-    print(f"⚠️ Файл весит {file_size_mb:.1f} МБ (больше лимита). Сжимаем до 128k...")
+    print(f"⚠️ Файл весит {file_size_mb:.1f} МБ. Сжимаем до 128k...")
     output_filename = os.path.splitext(input_filename)[0] + "_compressed.mp3"
     
     cmd = [
@@ -118,7 +143,6 @@ def restore_all_data():
             users_offset = data.get("users_offset", 0)
             
             active_users[str(ADMIN_ID)] = now
-            
             print("✅ Все данные успешно восстановлены!")
     except Exception as e:
         print(f"⚠️ Ошибка или отсутствие закрепа при автовосстановлении: {e}")
@@ -129,7 +153,6 @@ def save_all_data():
     with data_lock:
         try:
             active_users[str(ADMIN_ID)] = time.time()
-
             data = {
                 "users": active_users,
                 "stats": stats_data,
@@ -163,9 +186,7 @@ def save_all_data():
         except Exception as e:
             print(f"Ошибка сохранения бэкапа: {e}")
 
-# Восстанавливаем данные перед стартом
 restore_all_data()
-
 bot_start_time = time.time()
 
 def register_user(chat_id):
@@ -176,6 +197,12 @@ def register_user(chat_id):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     chat_id = message.chat.id
+    
+    # ПРОВЕРКА ПОДПИСКИ
+    if not check_user_subscription(chat_id):
+        send_subscription_prompt(chat_id)
+        return
+
     register_user(chat_id)
     bot.reply_to(
         message, 
@@ -188,6 +215,25 @@ def send_welcome(message):
         "📊 Статистика бота: /stats\n"
         "🧑‍🎤 Поиск по автору: /author Имя"
     )
+
+# ОБРАБОТЧИК КНОПКИ ПРОВЕРКИ ПОДПИСКИ
+@bot.callback_query_handler(func=lambda call: call.data == "check_sub")
+def callback_check_sub(call):
+    chat_id = call.message.chat.id
+    if check_user_subscription(chat_id):
+        bot.answer_callback_query(call.id, "✅ Спасибо за подписку!", show_alert=True)
+        try:
+            bot.delete_message(chat_id, call.message.message_id)
+        except:
+            pass
+        # Вызываем приветствие после успешной проверки
+        register_user(chat_id)
+        bot.send_message(
+            chat_id,
+            "🎉 Подписка подтверждена! Теперь вы можете пользоваться ботом. Просто напишите название трека 🎵"
+        )
+    else:
+        bot.answer_callback_query(call.id, "❌ Вы еще не подписались на группу!", show_alert=True)
 
 # --- АДМИНСКАЯ КОМАНДА ДЛЯ РУЧНОЙ ПОПРАВКИ СТАТИСТИКИ ---
 @bot.message_handler(commands=['setusers'])
@@ -217,7 +263,6 @@ def get_settings_keyboard(chat_id):
         user_settings[chat_id_str] = {"search_limit": 10}
         
     limit = user_settings[chat_id_str].get("search_limit", 10)
-    
     markup = InlineKeyboardMarkup()
     
     filled_blocks = limit // 5
@@ -235,6 +280,10 @@ def get_settings_keyboard(chat_id):
 @bot.message_handler(commands=['settings'])
 def settings_command(message):
     chat_id = message.chat.id
+    if not check_user_subscription(chat_id):
+        send_subscription_prompt(chat_id)
+        return
+
     register_user(chat_id)
     bot.reply_to(
         message, 
@@ -245,7 +294,12 @@ def settings_command(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("setslider_"))
 def handle_slider_callback(call):
-    chat_id_str = str(call.message.chat.id)
+    chat_id = call.message.chat.id
+    if not check_user_subscription(chat_id):
+        bot.answer_callback_query(call.id, "❌ Сначала подпишитесь на группу!", show_alert=True)
+        return
+
+    chat_id_str = str(chat_id)
     if chat_id_str not in user_settings:
         user_settings[chat_id_str] = {"search_limit": 10}
         
@@ -261,9 +315,9 @@ def handle_slider_callback(call):
         user_settings[chat_id_str]["search_limit"] = current_limit
         save_all_data()
         bot.edit_message_reply_markup(
-            chat_id=call.message.chat.id, 
+            chat_id=chat_id, 
             message_id=call.message.message_id, 
-            reply_markup=get_settings_keyboard(call.message.chat.id)
+            reply_markup=get_settings_keyboard(chat_id)
         )
     bot.answer_callback_query(call.id)
 
@@ -293,6 +347,22 @@ def handle_chat_member(message):
 # --- ИНЛАЙН-РЕЖИМ ---
 @bot.inline_handler(func=lambda query: True)
 def inline_query(query):
+    user_id = query.from_user.id
+    if not check_user_subscription(user_id):
+        # В инлайн режиме отправляем подсказку-результат со ссылкой
+        results = [
+            telebot.types.InlineQueryResultArticle(
+                id="sub_required",
+                title="❌ Требуется подписка на группу!",
+                description="Нажмите сюда, чтобы подписаться и разблокировать бота",
+                input_message_content=telebot.types.InputTextMessageContent(
+                    message_text="❌ Для использования бота необходимо подписаться на группу: https://t.me/teruteg"
+                )
+            )
+        ]
+        bot.answer_inline_query(query.id, results, cache_time=1)
+        return
+
     search_text = query.query.strip()
     if not search_text:
         return
@@ -306,7 +376,7 @@ def inline_query(query):
                 tracks = result.get("entries", [])
             
             results = []
-            inline_tracks_cache[query.from_user.id] = tracks
+            inline_tracks_cache[user_id] = tracks
             
             for i, track in enumerate(tracks):
                 title = track.get("title", "Без названия")
@@ -331,6 +401,9 @@ def inline_query(query):
 @bot.chosen_inline_handler(func=lambda chosen: True)
 def handle_chosen_inline(chosen):
     user_id = chosen.from_user.id
+    if not check_user_subscription(user_id):
+        return
+
     register_user(user_id)
 
     def worker():
@@ -397,7 +470,6 @@ def handle_chosen_inline(chosen):
                         break
 
             audio_filename = compress_audio_if_needed(audio_filename)
-
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
                 
