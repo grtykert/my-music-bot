@@ -64,14 +64,11 @@ users_offset = 0  # Поправка для ручной корректиров�
 
 # --- ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ---
 def check_user_subscription(user_id):
-    try:
-        member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
-        status = getattr(member, "status", "left")
-        print(f"Проверка подписки: user_id={user_id}, group={REQUIRED_CHANNEL}, status={status}")
-        return status in ("creator", "administrator", "member")
-    except Exception as e:
-        print(f"Ошибка проверки подписки для user_id={user_id} в {REQUIRED_CHANNEL}: {e}")
-        return False
+    # ВРЕМЕННЫЙ ТЕСТОВЫЙ РЕЖИМ:
+    # Всегда считаем пользователя неподписанным, даже если он владелец группы.
+    # После теста верни обычную проверку подписки.
+    print(f"ТЕСТОВЫЙ РЕЖИМ: показываем запрос подписки user_id={user_id}")
+    return False
 
 def send_subscription_prompt(chat_id):
     markup = InlineKeyboardMarkup()
