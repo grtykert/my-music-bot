@@ -49,6 +49,9 @@ REQUIRED_CHANNEL = "@teruteg"
 
 bot = telebot.TeleBot(API_TOKEN)
 tracks_cache = {}
+search_results_cache = {}
+search_cache_lock = threading.Lock()
+SEARCH_CACHE_TTL = 180
 inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
@@ -66,9 +69,11 @@ users_offset = 0  # Поправка для ручной корректиров�
 def check_user_subscription(user_id):
     try:
         member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
-        return member.status in ['creator', 'administrator', 'member']
+        status = getattr(member, "status", "left")
+        print(f"Проверка подписки: user_id={user_id}, group={REQUIRED_CHANNEL}, status={status}")
+        return status in ("creator", "administrator", "member")
     except Exception as e:
-        print(f"Ошибка проверки подписки: {e}")
+        print(f"Ошибка проверки подписки для user_id={user_id} в {REQUIRED_CHANNEL}: {e}")
         return False
 
 def send_subscription_prompt(chat_id):
@@ -192,11 +197,20 @@ def register_user(chat_id):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     chat_id = message.chat.id
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     bot.reply_to(
         message, 
         "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n"
-        "💰 Поддержать разработчика: /donate"
+        "🧭 Рекомендации по жанрам: /discover\n"
+        "⚙️ Настройки бота: /settings\n"
+        "🔎 Поиск прямо в чатах: `@bot_username название`\n"
+        "💬 Наш канал: https://t.me/teruteg\n\n"
+        "💰 Поддержать разработчика: /donate\n"
+        "📊 Статистика бота: /stats\n"
+        "🧑‍🎤 Поиск по автору: /author Имя"
     )
 
 # ОБРАБОТЧИК КНОПКИ ПРОВЕРКИ ПОДПИСКИ
@@ -263,6 +277,9 @@ def get_settings_keyboard(chat_id):
 @bot.message_handler(commands=['settings'])
 def settings_command(message):
     chat_id = message.chat.id
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     bot.reply_to(
         message, 
@@ -487,6 +504,9 @@ def handle_chosen_inline(chosen):
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
     chat_id = message.chat.id
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     
     start_ping = time.time()
@@ -515,6 +535,9 @@ def stats_command(message):
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
     chat_id = message.chat.id
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -657,6 +680,11 @@ def handle_genre_selection(call):
 def text_handler(message):
     chat_id = message.chat.id
     
+    # 🛑 ПРОВЕРКА ПОДПИСКИ ПРИ ПОИСКЕ МУЗЫКИ
+    if not check_user_subscription(chat_id):
+        send_subscription_prompt(chat_id)
+        return
+
     register_user(chat_id)
     
     if chat_id in waiting_for_custom_stars:
@@ -688,13 +716,39 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
         try:
             user_limit = user_settings.get(str(chat_id), {}).get("search_limit", 10)
             
-            ydl_opts = {"extract_flat": True, "quiet": True}
             limit_ydl = 50 if is_random else max(20, user_limit * page)
-            search_query = f"scsearch{limit_ydl}:{query}"
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                result = ydl.extract_info(search_query, download=False)
-                all_tracks = result.get("entries", [])
+            normalized_query = " ".join(query.casefold().split())
+            cache_key = (normalized_query, limit_ydl)
+            now = time.time()
+
+            with search_cache_lock:
+                cached = search_results_cache.get(cache_key)
+                if cached and now - cached[0] < SEARCH_CACHE_TTL:
+                    all_tracks = cached[1]
+                else:
+                    if cached:
+                        search_results_cache.pop(cache_key, None)
+                    all_tracks = None
+
+            if all_tracks is None:
+                ydl_opts = {
+                    "extract_flat": True,
+                    "quiet": True,
+                    "no_warnings": True,
+                    "socket_timeout": 10,
+                    "retries": 1,
+                    "extractor_retries": 1,
+                    "ignoreerrors": True,
+                }
+                search_query = f"scsearch{limit_ydl}:{query}"
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    result = ydl.extract_info(search_query, download=False)
+                    all_tracks = result.get("entries", []) or []
+                with search_cache_lock:
+                    search_results_cache[cache_key] = (time.time(), all_tracks)
+                    if len(search_results_cache) > 100:
+                        oldest_key = min(search_results_cache, key=lambda key: search_results_cache[key][0])
+                        search_results_cache.pop(oldest_key, None)
                 
             if is_random:
                 if len(all_tracks) >= user_limit:
@@ -780,16 +834,10 @@ def handle_navigation(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_search")
 def handle_back_to_search(call):
-    chat_id = call.message.chat.id
-    user_id = call.from_user.id
-
-    if not check_user_subscription(user_id):
-        bot.answer_callback_query(call.id, "❌ Сначала подпишись на группу", show_alert=True)
-        send_subscription_prompt(chat_id)
-        return
-
     bot.answer_callback_query(call.id)
-    bot.send_message(chat_id, "🔍 Напиши название другой песни:")
+    chat_id = call.message.chat.id
+    query = original_queries.get(chat_id, "музыка")
+    search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False, is_random=False)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def handle_download_callback(call):
@@ -955,5 +1003,3 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ Ошибка: {e}")
             time.sleep(5)
-
-
