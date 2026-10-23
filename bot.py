@@ -191,9 +191,6 @@ def register_user(chat_id):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     chat_id = message.chat.id
-    if not check_user_subscription(message.from_user.id):
-        send_subscription_prompt(chat_id)
-        return
     register_user(chat_id)
     bot.reply_to(
         message, 
@@ -271,9 +268,6 @@ def get_settings_keyboard(chat_id):
 @bot.message_handler(commands=['settings'])
 def settings_command(message):
     chat_id = message.chat.id
-    if not check_user_subscription(message.from_user.id):
-        send_subscription_prompt(chat_id)
-        return
     register_user(chat_id)
     bot.reply_to(
         message, 
@@ -498,9 +492,6 @@ def handle_chosen_inline(chosen):
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
     chat_id = message.chat.id
-    if not check_user_subscription(message.from_user.id):
-        send_subscription_prompt(chat_id)
-        return
     register_user(chat_id)
     
     start_ping = time.time()
@@ -529,9 +520,6 @@ def stats_command(message):
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
     chat_id = message.chat.id
-    if not check_user_subscription(message.from_user.id):
-        send_subscription_prompt(chat_id)
-        return
     register_user(chat_id)
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -977,4 +965,3 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ Ошибка: {e}")
             time.sleep(5)
-
