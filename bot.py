@@ -27,7 +27,6 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def log_message(self, format, *args):
-        # Отключаем спам запросами в логах
         return
 
 def run_dummy_server():
@@ -45,6 +44,9 @@ if not API_TOKEN:
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", -1004445455425))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 5378591975))
 
+# ОБЯЗАТЕЛЬНЫЙ КАНАЛ/ГРУППА ДЛЯ ПОДПИСКИ
+REQUIRED_CHANNEL = "@teruteg"
+
 bot = telebot.TeleBot(API_TOKEN)
 tracks_cache = {}
 inline_tracks_cache = {}
@@ -60,9 +62,33 @@ backup_msg_id = None
 data_lock = threading.Lock()
 users_offset = 0  # Поправка для ручной корректировки цифры в статистике
 
+# --- ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ---
+def check_user_subscription(user_id):
+    try:
+        # Админ всегда имеет доступ без подписки
+        if user_id == ADMIN_ID:
+            return True
+        member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        if member.status in ['left', 'kicked']:
+            return False
+        return True
+    except Exception as e:
+        print(f"Ошибка проверки подписки: {e}")
+        return True  # В случае сбоя API Telegram пропускаем, чтобы не блокировать бота насмерть
+
+def send_subscription_prompt(chat_id):
+    markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("📢 Подписаться на группу", url="https://t.me/teruteg"))
+    markup.row(InlineKeyboardButton("🔄 Я подписался", callback_data="check_sub"))
+    bot.send_message(
+        chat_id,
+        "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: https://t.me/teruteg\n\nПосле подписки нажмите кнопку ниже:",
+        reply_markup=markup,
+        parse_mode="Markdown"
+    )
+
 # --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО СЖАТИЯ ---
 def compress_audio_if_needed(input_filename, max_size_mb=48):
-    """Сжимает аудио через ffmpeg, если оно весит больше max_size_mb (лимит Telegram = 50 МБ)"""
     if not input_filename or not os.path.exists(input_filename):
         return input_filename
         
@@ -70,7 +96,7 @@ def compress_audio_if_needed(input_filename, max_size_mb=48):
     if file_size_mb <= max_size_mb:
         return input_filename
         
-    print(f"⚠️ Файл весит {file_size_mb:.1f} МБ (больше лимита). Сжимаем до 128k...")
+    print(f"⚠️ Файл весит {file_size_mb:.1f} МБ. Сжимаем до 128k...")
     output_filename = os.path.splitext(input_filename)[0] + "_compressed.mp3"
     
     cmd = [
@@ -118,7 +144,6 @@ def restore_all_data():
             users_offset = data.get("users_offset", 0)
             
             active_users[str(ADMIN_ID)] = now
-            
             print("✅ Все данные успешно восстановлены!")
     except Exception as e:
         print(f"⚠️ Ошибка или отсутствие закрепа при автовосстановлении: {e}")
@@ -129,7 +154,6 @@ def save_all_data():
     with data_lock:
         try:
             active_users[str(ADMIN_ID)] = time.time()
-
             data = {
                 "users": active_users,
                 "stats": stats_data,
@@ -163,9 +187,7 @@ def save_all_data():
         except Exception as e:
             print(f"Ошибка сохранения бэкапа: {e}")
 
-# Восстанавливаем данные перед стартом
 restore_all_data()
-
 bot_start_time = time.time()
 
 def register_user(chat_id):
@@ -188,6 +210,24 @@ def send_welcome(message):
         "📊 Статистика бота: /stats\n"
         "🧑‍🎤 Поиск по автору: /author Имя"
     )
+
+# ОБРАБОТЧИК КНОПКИ ПРОВЕРКИ ПОДПИСКИ
+@bot.callback_query_handler(func=lambda call: call.data == "check_sub")
+def callback_check_sub(call):
+    chat_id = call.message.chat.id
+    if check_user_subscription(chat_id):
+        bot.answer_callback_query(call.id, "✅ Спасибо за подписку!", show_alert=True)
+        try:
+            bot.delete_message(chat_id, call.message.message_id)
+        except:
+            pass
+        register_user(chat_id)
+        bot.send_message(
+            chat_id,
+            "🎉 Подписка подтверждена! Теперь вы можете пользоваться ботом. Просто напишите название трека 🎵"
+        )
+    else:
+        bot.answer_callback_query(call.id, "❌ Вы еще не подписались на группу!", show_alert=True)
 
 # --- АДМИНСКАЯ КОМАНДА ДЛЯ РУЧНОЙ ПОПРАВКИ СТАТИСТИКИ ---
 @bot.message_handler(commands=['setusers'])
@@ -217,7 +257,6 @@ def get_settings_keyboard(chat_id):
         user_settings[chat_id_str] = {"search_limit": 10}
         
     limit = user_settings[chat_id_str].get("search_limit", 10)
-    
     markup = InlineKeyboardMarkup()
     
     filled_blocks = limit // 5
@@ -293,6 +332,21 @@ def handle_chat_member(message):
 # --- ИНЛАЙН-РЕЖИМ ---
 @bot.inline_handler(func=lambda query: True)
 def inline_query(query):
+    user_id = query.from_user.id
+    if not check_user_subscription(user_id):
+        results = [
+            telebot.types.InlineQueryResultArticle(
+                id="sub_required",
+                title="❌ Требуется подписка на группу!",
+                description="Нажмите сюда, чтобы подписаться и разблокировать бота",
+                input_message_content=telebot.types.InputTextMessageContent(
+                    message_text="❌ Для использования бота необходимо подписаться на группу: https://t.me/teruteg"
+                )
+            )
+        ]
+        bot.answer_inline_query(query.id, results, cache_time=1)
+        return
+
     search_text = query.query.strip()
     if not search_text:
         return
@@ -447,7 +501,6 @@ def stats_command(message):
     bot.get_me()
     ping_ms = int((time.time() - start_ping) * 1000)
     
-    # Автоматический подсчет + ручной оффсет
     now = time.time()
     month_ago = now - (28 * 24 * 60 * 60)
     real_users_count = sum(1 for uid, last_seen in active_users.items() if last_seen >= month_ago)
@@ -594,9 +647,16 @@ def handle_genre_selection(call):
     bot.answer_callback_query(call.id, "🎲 Собираю случайные треки...")
     search_music_by_query(call.message, query=genre_query, page=1, is_new=True, is_filter=False, is_random=True)
 
+# --- ОБРАБОТЧИК ТЕКСТОВОГО ПОИСКА С ПРОВЕРКОЙ ПОДПИСКИ ---
 @bot.message_handler(func=lambda message: message.chat.type == 'private' and not message.text.startswith('/'))
 def text_handler(message):
     chat_id = message.chat.id
+    
+    # 🛑 ПРОВЕРКА ПОДПИСКИ ПРИ ПОИСКЕ МУЗЫКИ
+    if not check_user_subscription(chat_id):
+        send_subscription_prompt(chat_id)
+        return
+
     register_user(chat_id)
     
     if chat_id in waiting_for_custom_stars:
@@ -807,15 +867,15 @@ def handle_download_callback(call):
                 
                 sent_msg = bot.send_audio(
                     chat_id, 
-                    audio, 
-                    title=info.get('title', title), 
+                    audio,
+                    title=info.get('title', title),
                     performer=info.get('uploader', uploader),
                     thumbnail=thumb_file
                 )
                 if thumb_file:
                     thumb_file.close()
-
-                audio_cache[track_url] = sent_msg.audio.file_id
+                file_id = sent_msg.audio.file_id
+                audio_cache[track_url] = file_id
 
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
@@ -830,7 +890,6 @@ def handle_download_callback(call):
 
             stats_data["total_downloads"] += 1
             save_all_data()
-
         except Exception as e:
             print(f"Ошибка при скачивании трека: {e}")
             try:
@@ -853,13 +912,13 @@ def handle_web_app_data(message):
         if data.get("action") == "set_tracks_per_page":
             count = int(data.get("count", 10))
             user_id_str = str(message.from_user.id)
-
+            
             if user_id_str not in user_settings:
                 user_settings[user_id_str] = {}
-
+                
             user_settings[user_id_str]["search_limit"] = count
             save_all_data()
-
+            
             bot.send_message(message.chat.id, f"✅ Настройки успешно сохранены!\nВыдача: {count} треков на страницу.")
     except Exception as e:
         print(f"Ошибка при получении данных из Web App: {e}")
