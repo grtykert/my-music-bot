@@ -202,15 +202,10 @@ def send_welcome(message):
         return
     register_user(chat_id)
     bot.reply_to(
-        message, 
-        "👋 Привет! Пиши название трека, я найду его. Пользуйся фильтрами и страницами! 🎵\n\n"
-        "🧭 Рекомендации по жанрам: /discover\n"
-        "⚙️ Настройки бота: /settings\n"
-        "🔎 Поиск прямо в чатах: `@bot_username название`\n"
+        message,
+        "👋 Привет! Напиши название песни, и я попробую её найти. 🎵\n\n"
         "💬 Наш канал: https://t.me/teruteg\n\n"
-        "💰 Поддержать разработчика: /donate\n"
-        "📊 Статистика бота: /stats\n"
-        "🧑‍🎤 Поиск по автору: /author Имя"
+        "💖 Поддержка разработчика: /donate"
     )
 
 # ОБРАБОТЧИК КНОПКИ ПРОВЕРКИ ПОДПИСКИ
@@ -989,6 +984,13 @@ def handle_web_app_data(message):
 # --- ОСНОВНОЙ БЛОК ЗАПУСКА С ЗАЩИТОЙ ОТ 409 ОШИБКИ ---
 if __name__ == '__main__':
     print("🚀 Запуск бота...")
+    try:
+        bot.set_my_commands([
+            telebot.types.BotCommand("donate", "Поддержка разработчика")
+        ])
+        print("✅ В меню команд оставлена только поддержка разработчика.")
+    except Exception as e:
+        print(f"⚠️ Не удалось обновить меню команд: {e}")
     while True:
         try:
             bot.remove_webhook()
