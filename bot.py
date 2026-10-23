@@ -45,7 +45,7 @@ BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", -1004445455425))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 5378591975))
 
 # ОБЯЗАТЕЛЬНЫЙ КАНАЛ/ГРУППА ДЛЯ ПОДПИСКИ
-REQUIRED_CHANNEL = "@teruteg"
+REQUIRED_CHANNEL = "12345567"
 
 bot = telebot.TeleBot(API_TOKEN)
 tracks_cache = {}
