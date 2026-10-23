@@ -68,6 +68,7 @@ def check_user_subscription(user_id):
         # Админ всегда имеет доступ без подписки
         if user_id == ADMIN_ID:
             return True
+            
       member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         if member.status in ['creator', 'administrator', 'member']:
             return True
@@ -83,6 +84,7 @@ def send_subscription_prompt(chat_id):
     markup.row(InlineKeyboardButton("🔄 Я подписался", callback_data="check_sub"))
     bot.send_message(
         chat_id,
+        
         "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: https://t.me/teruteg\n\nПосле подписки нажмите кнопку ниже:",
         reply_markup=markup,
         parse_mode="Markdown"
