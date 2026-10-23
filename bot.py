@@ -72,21 +72,21 @@ def check_user_subscription(user_id):
             return True
         if member.status in ['left', 'kicked', 'restricted']:
             return False
-        return True
+        return False
     except Exception as e:
         print(f"Ошибка проверки подписки: {e}")
         return False
+
+def send_subscription_prompt(chat_id):
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton("📢 Подписаться на группу", url="https://t.me/teruteg"))
     markup.row(InlineKeyboardButton("🔄 Я подписался", callback_data="check_sub"))
     bot.send_message(
         chat_id,
-        
         "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: https://t.me/teruteg\n\nПосле подписки нажмите кнопку ниже:",
         reply_markup=markup,
         parse_mode="Markdown"
     )
-
 # --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО СЖАТИЯ ---
 def compress_audio_if_needed(input_filename, max_size_mb=48):
     if not input_filename or not os.path.exists(input_filename):
