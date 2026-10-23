@@ -65,15 +65,8 @@ users_offset = 0  # Поправка для ручной корректиров�
 # --- ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ---
 def check_user_subscription(user_id):
     try:
-        # Админ всегда имеет доступ без подписки
         if user_id == ADMIN_ID:
             return True
-     def check_user_subscription(user_id):
-    try:
-        # Админ всегда имеет доступ без подписки
-        if user_id == ADMIN_ID:
-            return True
-            
         member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         if member.status in ['creator', 'administrator', 'member']:
             return True
@@ -82,8 +75,7 @@ def check_user_subscription(user_id):
         return True
     except Exception as e:
         print(f"Ошибка проверки подписки: {e}")
-        return False       
-     
+        return False
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton("📢 Подписаться на группу", url="https://t.me/teruteg"))
     markup.row(InlineKeyboardButton("🔄 Я подписался", callback_data="check_sub"))
