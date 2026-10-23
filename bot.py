@@ -68,14 +68,15 @@ def check_user_subscription(user_id):
         # Админ всегда имеет доступ без подписки
         if user_id == ADMIN_ID:
             return True
-        member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
-        if member.status in ['left', 'kicked']:
+      member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        if member.status in ['creator', 'administrator', 'member']:
+            return True
+        if member.status in ['left', 'kicked', 'restricted']:
             return False
         return True
     except Exception as e:
         print(f"Ошибка проверки подписки: {e}")
-        return True  # В случае сбоя API Telegram пропускаем, чтобы не блокировать бота насмерть
-
+        return False  # Временно ставим False для проверки блокировки
 def send_subscription_prompt(chat_id):
     markup = InlineKeyboardMarkup()
     markup.row(InlineKeyboardButton("📢 Подписаться на группу", url="https://t.me/teruteg"))
