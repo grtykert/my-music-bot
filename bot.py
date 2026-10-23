@@ -42,7 +42,7 @@ if not API_TOKEN:
     sys.exit(1)
 
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", -1004445455425))
-ADMIN_ID = int(os.environ.get("ADMIN_ID",5378591975))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 5378591975))
 
 # ОБЯЗАТЕЛЬНЫЙ КАНАЛ/ГРУППА ДЛЯ ПОДПИСКИ
 REQUIRED_CHANNEL = "@teruteg"
@@ -66,13 +66,11 @@ users_offset = 0  # Поправка для ручной корректиров�
 def check_user_subscription(user_id):
     try:
         member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
-        if member.status in ['creator', 'administrator', 'member']:
-            return True
-        if member.status in ['left', 'kicked', 'restricted']:
-            return False
-        return False
+        status = getattr(member, "status", "left")
+        print(f"Проверка подписки: user_id={user_id}, group={REQUIRED_CHANNEL}, status={status}")
+        return status in ("creator", "administrator", "member")
     except Exception as e:
-        print(f"Ошибка проверки подписки: {e}")
+        print(f"Ошибка проверки подписки для user_id={user_id} в {REQUIRED_CHANNEL}: {e}")
         return False
 
 def send_subscription_prompt(chat_id):
@@ -196,6 +194,9 @@ def register_user(chat_id):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     chat_id = message.chat.id
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     bot.reply_to(
         message, 
@@ -273,6 +274,9 @@ def get_settings_keyboard(chat_id):
 @bot.message_handler(commands=['settings'])
 def settings_command(message):
     chat_id = message.chat.id
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     bot.reply_to(
         message, 
@@ -384,6 +388,9 @@ def inline_query(query):
 @bot.chosen_inline_handler(func=lambda chosen: True)
 def handle_chosen_inline(chosen):
     user_id = chosen.from_user.id
+    if not check_user_subscription(user_id):
+        print(f"Инлайн-доступ заблокирован: пользователь {user_id} не подписан")
+        return
     register_user(user_id)
 
     def worker():
@@ -494,6 +501,9 @@ def handle_chosen_inline(chosen):
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
     chat_id = message.chat.id
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     
     start_ping = time.time()
@@ -522,6 +532,9 @@ def stats_command(message):
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
     chat_id = message.chat.id
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -580,6 +593,9 @@ def got_payment(message):
 @bot.message_handler(commands=['m', 'play', 'music'])
 def handle_group_music(message):
     chat_id = message.chat.id
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     
     args = message.text.split(maxsplit=1)
@@ -594,6 +610,9 @@ def handle_group_music(message):
 @bot.message_handler(commands=['author', 'artist', 'a'])
 def handle_author_music(message):
     chat_id = message.chat.id
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     
     args = message.text.split(maxsplit=1)
@@ -608,6 +627,9 @@ def handle_author_music(message):
 @bot.message_handler(commands=['discover', 'genres', 'd'])
 def handle_discover(message):
     chat_id = message.chat.id
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     
     text = (
@@ -636,6 +658,10 @@ def handle_discover(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("genre_"))
 def handle_genre_selection(call):
     chat_id = call.message.chat.id
+    if not check_user_subscription(call.from_user.id):
+        bot.answer_callback_query(call.id, "❌ Сначала подпишись на группу", show_alert=True)
+        send_subscription_prompt(chat_id)
+        return
     register_user(chat_id)
     
     genre_base = call.data.replace("genre_", "")
@@ -948,4 +974,3 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ Ошибка: {e}")
             time.sleep(5)
-
