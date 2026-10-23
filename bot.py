@@ -805,10 +805,16 @@ def handle_navigation(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_search")
 def handle_back_to_search(call):
-    bot.answer_callback_query(call.id)
     chat_id = call.message.chat.id
-    query = original_queries.get(chat_id, "музыка")
-    search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False, is_random=False)
+    user_id = call.from_user.id
+
+    if not check_user_subscription(user_id):
+        bot.answer_callback_query(call.id, "❌ Сначала подпишись на группу", show_alert=True)
+        send_subscription_prompt(chat_id)
+        return
+
+    bot.answer_callback_query(call.id)
+    bot.send_message(chat_id, "🔍 Напиши название другой песни:")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def handle_download_callback(call):
@@ -974,3 +980,4 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ Ошибка: {e}")
             time.sleep(5)
+
