@@ -69,7 +69,7 @@ def check_user_subscription(user_id):
         if user_id == ADMIN_ID:
             return True
             
-      member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+      member=bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         if member.status in ['creator', 'administrator', 'member']:
             return True
         if member.status in ['left', 'kicked', 'restricted']:
