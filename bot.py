@@ -82,7 +82,7 @@ def send_subscription_prompt(chat_id):
     markup.row(InlineKeyboardButton("🔄 Я подписался", callback_data="check_sub"))
     bot.send_message(
         chat_id,
-        "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: https://t.me/teruteg\n\nПосле подписки нажмите кнопку ниже:",
+        "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: https://t.me/+8JYfdTy2YhE0NDJi\n\nПосле подписки нажмите кнопку ниже:",
         reply_markup=markup,
         parse_mode="Markdown"
     )
@@ -197,14 +197,11 @@ def register_user(chat_id):
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     chat_id = message.chat.id
-    if not check_user_subscription(message.from_user.id):
-        send_subscription_prompt(chat_id)
-        return
     register_user(chat_id)
     bot.reply_to(
         message,
         "👋 Привет! Напиши название песни, и я попробую её найти. 🎵\n\n"
-        "💬 Наш канал: https://t.me/teruteg\n\n"
+        "💬 Наш канал: https://t.me/+8JYfdTy2YhE0NDJi\n\n"
         "💖 Поддержка разработчика: /donate"
     )
 
@@ -272,9 +269,6 @@ def get_settings_keyboard(chat_id):
 @bot.message_handler(commands=['settings'])
 def settings_command(message):
     chat_id = message.chat.id
-    if not check_user_subscription(message.from_user.id):
-        send_subscription_prompt(chat_id)
-        return
     register_user(chat_id)
     bot.reply_to(
         message, 
@@ -334,20 +328,6 @@ def handle_chat_member(message):
 @bot.inline_handler(func=lambda query: True)
 def inline_query(query):
     user_id = query.from_user.id
-    if not check_user_subscription(user_id):
-        results = [
-            telebot.types.InlineQueryResultArticle(
-                id="sub_required",
-                title="❌ Требуется подписка на группу!",
-                description="Нажмите сюда, чтобы подписаться и разблокировать бота",
-                input_message_content=telebot.types.InputTextMessageContent(
-                    message_text="❌ Для использования бота необходимо подписаться на группу: https://t.me/teruteg"
-                )
-            )
-        ]
-        bot.answer_inline_query(query.id, results, cache_time=1)
-        return
-
     search_text = query.query.strip()
     if not search_text:
         return
@@ -386,9 +366,6 @@ def inline_query(query):
 @bot.chosen_inline_handler(func=lambda chosen: True)
 def handle_chosen_inline(chosen):
     user_id = chosen.from_user.id
-    if not check_user_subscription(user_id):
-        print(f"Инлайн-доступ заблокирован: пользователь {user_id} не подписан")
-        return
     register_user(user_id)
 
     def worker():
@@ -499,9 +476,6 @@ def handle_chosen_inline(chosen):
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
     chat_id = message.chat.id
-    if not check_user_subscription(message.from_user.id):
-        send_subscription_prompt(chat_id)
-        return
     register_user(chat_id)
     
     start_ping = time.time()
@@ -530,9 +504,6 @@ def stats_command(message):
 @bot.message_handler(commands=['donate'])
 def donate_command(message):
     chat_id = message.chat.id
-    if not check_user_subscription(message.from_user.id):
-        send_subscription_prompt(chat_id)
-        return
     register_user(chat_id)
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
@@ -591,9 +562,6 @@ def got_payment(message):
 @bot.message_handler(commands=['m', 'play', 'music'])
 def handle_group_music(message):
     chat_id = message.chat.id
-    if not check_user_subscription(message.from_user.id):
-        send_subscription_prompt(chat_id)
-        return
     register_user(chat_id)
     
     args = message.text.split(maxsplit=1)
@@ -675,11 +643,6 @@ def handle_genre_selection(call):
 def text_handler(message):
     chat_id = message.chat.id
     
-    # 🛑 ПРОВЕРКА ПОДПИСКИ ПРИ ПОИСКЕ МУЗЫКИ
-    if not check_user_subscription(chat_id):
-        send_subscription_prompt(chat_id)
-        return
-
     register_user(chat_id)
     
     if chat_id in waiting_for_custom_stars:
@@ -697,11 +660,6 @@ def text_handler(message):
 
 def search_music_by_query(message, query, page=1, is_new=False, is_filter=False, is_random=False):
     chat_id = message.chat.id
-    user_id = message.from_user.id
-    if not check_user_subscription(user_id):
-        send_subscription_prompt(chat_id)
-        return
-    
     if is_new:
         msg = bot.reply_to(message, "🔍 Ищу варианты...")
     else:
@@ -837,11 +795,6 @@ def handle_back_to_search(call):
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
 def handle_download_callback(call):
     chat_id = call.message.chat.id
-    user_id = call.from_user.id
-    if not check_user_subscription(user_id):
-        bot.answer_callback_query(call.id, "❌ Сначала подпишись на группу", show_alert=True)
-        send_subscription_prompt(chat_id)
-        return
     register_user(chat_id)
     
     index = int(call.data.replace("dl_", ""))
