@@ -45,7 +45,7 @@ BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", -1004445455425))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 5378591975))
 
 # ОБЯЗАТЕЛЬНЫЙ КАНАЛ/ГРУППА ДЛЯ ПОДПИСКИ
-REQUIRED_CHANNEL = "@teruteg"
+REQUIRED_CHANNEL = "-1004362385382"
 
 bot = telebot.TeleBot(API_TOKEN)
 tracks_cache = {}
@@ -78,7 +78,7 @@ def check_user_subscription(user_id):
 
 def send_subscription_prompt(chat_id):
     markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("📢 Подписаться на группу", url="https://t.me/teruteg"))
+    markup.row(InlineKeyboardButton("📢 Подписаться на группу", url="https://t.me/+8JYfdTy2YhE0NDJi"))
     markup.row(InlineKeyboardButton("🔄 Я подписался", callback_data="check_sub"))
     bot.send_message(
         chat_id,
