@@ -10,6 +10,7 @@ import time
 import json
 import random
 import subprocess
+import urllib.request
 from PIL import Image
 
 # --- ПОДКЛЮЧЕНИЕ FFMPEG / FFPROBE ДЛЯ ОБЛОЖЕК И СЖАТИЯ ---
@@ -128,6 +129,53 @@ def prepare_telegram_thumbnail(image_filename):
                 pass
 
     return None
+
+# --- ПОИСК И ЗАГРУЗКА ОБЛОЖКИ ДЛЯ ТРЕКА ---
+def get_track_thumbnail(info, audio_filename):
+    base_name = os.path.splitext(audio_filename)[0]
+
+    for ext in (".jpg", ".jpeg", ".png", ".webp"):
+        candidate = base_name + ext
+        if os.path.exists(candidate):
+            prepared = prepare_telegram_thumbnail(candidate)
+            if prepared:
+                return candidate, prepared
+
+    thumbnail_url = info.get("thumbnail")
+    if not thumbnail_url:
+        thumbnails = info.get("thumbnails") or []
+        for item in reversed(thumbnails):
+            if item.get("url"):
+                thumbnail_url = item["url"]
+                break
+
+    if thumbnail_url:
+        downloaded_thumb = base_name + "_source_thumb"
+        try:
+            request = urllib.request.Request(
+                thumbnail_url,
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(request, timeout=15) as response:
+                data = response.read(8 * 1024 * 1024 + 1)
+            if len(data) > 8 * 1024 * 1024:
+                raise ValueError("Обложка слишком большая")
+            with open(downloaded_thumb, "wb") as image_file:
+                image_file.write(data)
+            prepared = prepare_telegram_thumbnail(downloaded_thumb)
+            if prepared:
+                return downloaded_thumb, prepared
+            os.remove(downloaded_thumb)
+        except Exception as e:
+            print(f"Не удалось получить обложку по URL: {e}")
+            if os.path.exists(downloaded_thumb):
+                try:
+                    os.remove(downloaded_thumb)
+                except Exception:
+                    pass
+
+    print(f"⚠️ Для трека «{info.get('title', 'Без названия')}» обложка не найдена")
+    return None, None
 
 # --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО СЖАТИЯ С СОХРАНЕНИЕМ ОБЛОЖКИ ---
 def compress_audio_if_needed(input_filename, thumbnail_filename=None, max_size_mb=48):
@@ -476,13 +524,7 @@ def handle_chosen_inline(chosen):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(track_url, download=True)
                 audio_filename = ydl.prepare_filename(info)
-                base_name = os.path.splitext(audio_filename)[0]
-                
-                for ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                    if os.path.exists(base_name + ext):
-                        original_thumb = base_name + ext
-                        thumbnail_filename = prepare_telegram_thumbnail(original_thumb)
-                        break
+                original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
 
             audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
 
@@ -910,13 +952,7 @@ def handle_download_callback(call):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(track_url, download=True)
                 audio_filename = ydl.prepare_filename(info)
-                base_name = os.path.splitext(audio_filename)[0]
-                
-                for ext in ['.jpg', '.jpeg', '.png', '.webp']:
-                    if os.path.exists(base_name + ext):
-                        original_thumb = base_name + ext
-                        thumbnail_filename = prepare_telegram_thumbnail(original_thumb)
-                        break
+                original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
 
             audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
 
