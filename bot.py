@@ -86,31 +86,90 @@ def send_subscription_prompt(chat_id):
         reply_markup=markup,
         parse_mode="Markdown"
     )
-# --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО СЖАТИЯ ---
-def compress_audio_if_needed(input_filename, max_size_mb=48):
+# --- ПОДГОТОВКА ОБЛОЖКИ ДЛЯ TELEGRAM ---
+def prepare_telegram_thumbnail(image_filename):
+    if not image_filename or not os.path.exists(image_filename):
+        return None
+
+    thumbnail_filename = os.path.splitext(image_filename)[0] + "_telegram.jpg"
+    max_thumbnail_size = 200 * 1024
+
+    try:
+        with Image.open(image_filename) as image:
+            image = image.convert("RGB")
+            image.thumbnail((320, 320), Image.LANCZOS)
+
+            quality = 85
+            while True:
+                image.save(thumbnail_filename, "JPEG", quality=quality, optimize=True)
+                if os.path.getsize(thumbnail_filename) <= max_thumbnail_size:
+                    return thumbnail_filename
+
+                if quality > 40:
+                    quality -= 10
+                else:
+                    width, height = image.size
+                    if max(width, height) <= 160:
+                        break
+                    image = image.resize(
+                        (max(1, int(width * 0.85)), max(1, int(height * 0.85))),
+                        Image.LANCZOS
+                    )
+                    quality = 70
+
+        if os.path.exists(thumbnail_filename):
+            os.remove(thumbnail_filename)
+    except Exception as e:
+        print(f"Ошибка подготовки обложки для Telegram: {e}")
+        if os.path.exists(thumbnail_filename):
+            try:
+                os.remove(thumbnail_filename)
+            except Exception:
+                pass
+
+    return None
+
+# --- ФУНКЦИЯ АВТОМАТИЧЕСКОГО СЖАТИЯ С СОХРАНЕНИЕМ ОБЛОЖКИ ---
+def compress_audio_if_needed(input_filename, thumbnail_filename=None, max_size_mb=48):
     if not input_filename or not os.path.exists(input_filename):
         return input_filename
-        
+
     file_size_mb = os.path.getsize(input_filename) / (1024 * 1024)
     if file_size_mb <= max_size_mb:
         return input_filename
-        
-    print(f"⚠️ Файл весит {file_size_mb:.1f} МБ. Сжимаем до 128k...")
+
+    print(f"⚠️ Файл весит {file_size_mb:.1f} МБ. Сжимаем до 128k с сохранением обложки...")
     output_filename = os.path.splitext(input_filename)[0] + "_compressed.mp3"
-    
-    cmd = [
-        "ffmpeg", "-y", "-i", input_filename, 
-        "-b:a", "128k", "-vn", output_filename
+
+    cmd = ["ffmpeg", "-y", "-i", input_filename]
+    if thumbnail_filename and os.path.exists(thumbnail_filename):
+        cmd += [
+            "-i", thumbnail_filename,
+            "-map", "0:a:0",
+            "-map", "1:v:0",
+            "-c:v", "copy",
+            "-metadata:s:v", "title=Album cover",
+            "-metadata:s:v", "comment=Cover (front)",
+            "-disposition:v", "attached_pic"
+        ]
+    else:
+        cmd += ["-map", "0:a:0", "-map", "0:v?", "-c:v", "copy"]
+
+    cmd += [
+        "-c:a", "libmp3lame",
+        "-b:a", "128k",
+        "-id3v2_version", "3",
+        output_filename
     ]
-    
+
     try:
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        if os.path.exists(output_filename):
+        if os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
             os.remove(input_filename)
             return output_filename
     except Exception as e:
         print(f"Ошибка сжатия через ffmpeg: {e}")
-        
+
     return input_filename
 
 # --- СИСТЕМА ЕДИНОГО БЭКАПА ЧЕРЕЗ ЗАКРЕП ---
@@ -422,16 +481,10 @@ def handle_chosen_inline(chosen):
                 for ext in ['.jpg', '.jpeg', '.png', '.webp']:
                     if os.path.exists(base_name + ext):
                         original_thumb = base_name + ext
-                        try:
-                            img = Image.open(original_thumb)
-                            img.thumbnail((320, 320)) 
-                            thumbnail_filename = base_name + "_telegram.jpg"
-                            img.convert("RGB").save(thumbnail_filename, "JPEG")
-                        except Exception as e:
-                            thumbnail_filename = original_thumb
+                        thumbnail_filename = prepare_telegram_thumbnail(original_thumb)
                         break
 
-            audio_filename = compress_audio_if_needed(audio_filename)
+            audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
@@ -862,16 +915,10 @@ def handle_download_callback(call):
                 for ext in ['.jpg', '.jpeg', '.png', '.webp']:
                     if os.path.exists(base_name + ext):
                         original_thumb = base_name + ext
-                        try:
-                            img = Image.open(original_thumb)
-                            img.thumbnail((320, 320)) 
-                            thumbnail_filename = base_name + "_telegram.jpg"
-                            img.convert("RGB").save(thumbnail_filename, "JPEG")
-                        except Exception as e:
-                            thumbnail_filename = original_thumb
+                        thumbnail_filename = prepare_telegram_thumbnail(original_thumb)
                         break
 
-            audio_filename = compress_audio_if_needed(audio_filename)
+            audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
