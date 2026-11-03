@@ -353,12 +353,28 @@ def set_users_command(message):
         bot.reply_to(message, "❌ У вас нет прав для этой команды.")
 
 # --- НАСТРОЙКИ И ПОЛЗУНОК ---
-def get_settings_keyboard(chat_id):
+def get_user_settings(chat_id):
     chat_id_str = str(chat_id)
-    if chat_id_str not in user_settings:
-        user_settings[chat_id_str] = {"search_limit": 10}
-        
-    limit = user_settings[chat_id_str].get("search_limit", 10)
+    settings = user_settings.get(chat_id_str)
+    if not isinstance(settings, dict):
+        settings = {}
+        user_settings[chat_id_str] = settings
+
+    settings.setdefault("search_limit", 10)
+    settings.setdefault("show_cover", True)
+    return settings
+
+
+def get_audio_cache_key(track_url, show_cover):
+    # Разные ключи не дают отправить сохранённый трек с обложкой,
+    # когда пользователь отключил обложки.
+    return track_url if show_cover else f"no_cover::{track_url}"
+
+
+def get_settings_keyboard(chat_id):
+    settings = get_user_settings(chat_id)
+    limit = settings.get("search_limit", 10)
+    show_cover = settings.get("show_cover", True)
     markup = InlineKeyboardMarkup()
     
     filled_blocks = limit // 5
@@ -370,6 +386,8 @@ def get_settings_keyboard(chat_id):
         InlineKeyboardButton("➕", callback_data="setslider_plus")
     )
     markup.row(InlineKeyboardButton(f"Шкала: {slider_text}", callback_data="ignore"))
+    cover_status = "Вкл ✅" if show_cover else "Выкл ❌"
+    markup.row(InlineKeyboardButton(f"🖼 Обложка: {cover_status}", callback_data="toggle_cover"))
     
     return markup
 
@@ -386,11 +404,8 @@ def settings_command(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("setslider_"))
 def handle_slider_callback(call):
-    chat_id_str = str(call.message.chat.id)
-    if chat_id_str not in user_settings:
-        user_settings[chat_id_str] = {"search_limit": 10}
-        
-    current_limit = user_settings[chat_id_str].get("search_limit", 10)
+    settings = get_user_settings(call.message.chat.id)
+    current_limit = settings.get("search_limit", 10)
     action = call.data.split("_")[1]
     
     if action == "minus":
@@ -398,8 +413,8 @@ def handle_slider_callback(call):
     elif action == "plus":
         current_limit = min(25, current_limit + 5)
         
-    if current_limit != user_settings[chat_id_str]["search_limit"]:
-        user_settings[chat_id_str]["search_limit"] = current_limit
+    if current_limit != settings["search_limit"]:
+        settings["search_limit"] = current_limit
         save_all_data()
         bot.edit_message_reply_markup(
             chat_id=call.message.chat.id, 
@@ -407,6 +422,19 @@ def handle_slider_callback(call):
             reply_markup=get_settings_keyboard(call.message.chat.id)
         )
     bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == "toggle_cover")
+def toggle_cover_setting(call):
+    settings = get_user_settings(call.message.chat.id)
+    settings["show_cover"] = not settings.get("show_cover", True)
+    save_all_data()
+    bot.edit_message_reply_markup(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=get_settings_keyboard(call.message.chat.id)
+    )
+    status = "включена" if settings["show_cover"] else "выключена"
+    bot.answer_callback_query(call.id, f"Обложка {status}")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ignore")
 def handle_ignore(call):
@@ -487,12 +515,14 @@ def handle_chosen_inline(chosen):
         title = track.get('title', 'Трек')
         uploader = track.get('uploader', 'Музыка')
         inline_msg_id = chosen.inline_message_id
+        show_cover = get_user_settings(user_id).get("show_cover", True)
+        cache_key = get_audio_cache_key(track_url, show_cover)
         
-        if track_url in audio_cache and not audio_cache[track_url].startswith("http"):
+        if cache_key in audio_cache and not audio_cache[cache_key].startswith("http"):
             try:
                 bot.edit_message_media(
                     media=InputMediaAudio(
-                        media=audio_cache[track_url],
+                        media=audio_cache[cache_key],
                         title=title,
                         performer=uploader
                     ),
@@ -512,19 +542,21 @@ def handle_chosen_inline(chosen):
             ydl_opts = {
                 "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
-                "writethumbnail": True,
+                "writethumbnail": show_cover,
                 "quiet": True,
                 "noprogress": True,
-                "socket_timeout": 15,
-                "postprocessors": [
+                "socket_timeout": 15
+            }
+            if show_cover:
+                ydl_opts["postprocessors"] = [
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
                     {"key": "EmbedThumbnail"}
                 ]
-            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(track_url, download=True)
                 audio_filename = ydl.prepare_filename(info)
-                original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
+                if show_cover:
+                    original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
 
             audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
 
@@ -541,7 +573,7 @@ def handle_chosen_inline(chosen):
                 if thumb_file:
                     thumb_file.close()
                 file_id = backup_msg.audio.file_id
-                audio_cache[track_url] = file_id
+                audio_cache[cache_key] = file_id
 
             bot.edit_message_media(
                 media=InputMediaAudio(
@@ -916,10 +948,12 @@ def handle_download_callback(call):
         audio_filename = None
         thumbnail_filename = None
         original_thumb = None
+        show_cover = get_user_settings(chat_id).get("show_cover", True)
+        cache_key = get_audio_cache_key(track_url, show_cover)
 
         try:
-            if track_url in audio_cache and not audio_cache[track_url].startswith("http"):
-                file_id = audio_cache[track_url]
+            if cache_key in audio_cache and not audio_cache[cache_key].startswith("http"):
+                file_id = audio_cache[cache_key]
                 bot.send_audio(chat_id, file_id, title=title, performer=uploader)
                 
                 markup = InlineKeyboardMarkup()
@@ -939,20 +973,22 @@ def handle_download_callback(call):
             ydl_opts = {
                 "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
-                "writethumbnail": True,
+                "writethumbnail": show_cover,
                 "quiet": True,
                 "noprogress": True,
-                "socket_timeout": 15,
-                "postprocessors": [
+                "socket_timeout": 15
+            }
+            if show_cover:
+                ydl_opts["postprocessors"] = [
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
                     {"key": "EmbedThumbnail"}
                 ]
-            }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(track_url, download=True)
                 audio_filename = ydl.prepare_filename(info)
-                original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
+                if show_cover:
+                    original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
 
             audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
 
@@ -969,7 +1005,7 @@ def handle_download_callback(call):
                 if thumb_file:
                     thumb_file.close()
                 file_id = sent_msg.audio.file_id
-                audio_cache[track_url] = file_id
+                audio_cache[cache_key] = file_id
 
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
@@ -1041,3 +1077,4 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ Ошибка: {e}")
             time.sleep(5)
+
