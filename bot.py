@@ -93,7 +93,19 @@ if not API_TOKEN:
     print("❌ Ошибка: Не задана переменная окружения BOT_TOKEN!")
     sys.exit(1)
 
-WEB_APP_URL = os.environ.get("WEB_APP_URL", "").strip().rstrip("/")
+WEB_APP_URL_RAW = os.environ.get("WEB_APP_URL", "").strip().strip('"').strip("'").rstrip("/")
+_web_app_parsed = urlparse(WEB_APP_URL_RAW)
+WEB_APP_URL = (
+    WEB_APP_URL_RAW
+    if _web_app_parsed.scheme == "https"
+    and _web_app_parsed.hostname
+    and not any(char.isspace() for char in WEB_APP_URL_RAW)
+    else ""
+)
+if WEB_APP_URL:
+    print(f"✅ Mini App URL настроен: {WEB_APP_URL}")
+else:
+    print("⚠️ WEB_APP_URL отсутствует или некорректен. Кнопка Mini App будет скрыта.")
 
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", -1004445455425))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 5378591975))
@@ -133,14 +145,15 @@ def check_user_subscription(user_id):
         return False
 
 def send_subscription_prompt(chat_id):
+    # Ссылку оставляем в тексте, чтобы не получать BUTTON_URL_INVALID из URL-кнопки.
     markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("📢 Подписаться на группу", url="https://t.me/+8JYfdTy2YhE0NDJi"))
     markup.row(InlineKeyboardButton("🔄 Я подписался", callback_data="check_sub"))
     bot.send_message(
         chat_id,
-        "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: https://t.me/+8JYfdTy2YhE0NDJi\n\nПосле подписки нажмите кнопку ниже:",
+        "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, вступи в нашу группу: https://t.me/+8JYfdTy2YhE0NDJi\n\nПосле вступления нажми кнопку ниже:",
         reply_markup=markup,
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        disable_web_page_preview=True
     )
 # --- ПОДГОТОВКА ОБЛОЖКИ ДЛЯ TELEGRAM ---
 def prepare_telegram_thumbnail(image_filename):
@@ -360,25 +373,36 @@ def register_user(chat_id):
 def send_welcome(message):
     chat_id = message.chat.id
     register_user(chat_id)
+
     text = (
         "👋 Привет! Напиши название песни, и я попробую её найти. 🎵\n\n"
+        "💬 Наша группа: https://t.me/+8JYfdTy2YhE0NDJi\n\n"
         "💖 Поддержка разработчика: /donate"
     )
-    markup = None
-    if message.chat.type == "private":
+    if message.chat.type == "private" and not WEB_APP_URL:
+        text += "\n\n⚠️ Mini App пока не настроен. Проверь WEB_APP_URL в переменных Render."
+
+    # Сначала обязательно отправляем обычное сообщение без кнопок:
+    # даже если Telegram отклонит Web App кнопку, /start всё равно ответит.
+    bot.send_message(chat_id, text, disable_web_page_preview=True)
+
+    if message.chat.type == "private" and WEB_APP_URL:
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton(
-            text="💬 Перейти в нашу группу",
-            url="https://t.me/+8JYfdTy2YhE0NDJi"
+            text="🎧 Открыть музыкальное приложение",
+            web_app=telebot.types.WebAppInfo(url=WEB_APP_URL)
         ))
-        if WEB_APP_URL:
-            markup.add(InlineKeyboardButton(
-                text="🎧 Открыть музыкальное приложение",
-                web_app=telebot.types.WebAppInfo(url=WEB_APP_URL)
-            ))
-        else:
-            text += "\n\n⚠️ Mini App пока не настроен: добавь WEB_APP_URL в переменные Render."
-    bot.reply_to(message, text, reply_markup=markup)
+        try:
+            bot.send_message(chat_id, "Музыкальное приложение:", reply_markup=markup)
+        except ApiTelegramException as e:
+            print(f"Telegram отклонил кнопку Mini App. Проверь WEB_APP_URL='{WEB_APP_URL}': {e}")
+            bot.send_message(
+                chat_id,
+                "⚠️ Не удалось создать кнопку приложения. Проверь WEB_APP_URL в Render."
+            )
+        except Exception as e:
+            print(f"Ошибка отправки кнопки Mini App: {e}")
+            bot.send_message(chat_id, "⚠️ Не удалось отправить кнопку приложения. Проверь логи Render.")
 
 # ОБРАБОТЧИК КНОПКИ ПРОВЕРКИ ПОДПИСКИ
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
