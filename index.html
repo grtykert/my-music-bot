@@ -1,262 +1,512 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Настройки поиска</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <style>
-        :root {
-            --bg: var(--tg-theme-bg-color, #0d1117);
-            --card-bg: var(--tg-theme-secondary-bg-color, #161b22);
-            --accent: #38bdf8;
-            --accent-gradient: linear-gradient(135deg, #38bdf8 0%, #6366f1 100%);
-            --text-main: var(--tg-theme-text-color, #f0f6fc);
-            --text-sub: var(--tg-theme-hint-color, #8b949e);
-            --border: rgba(255, 255, 255, 0.08);
-        }
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-            user-select: none;
-            -webkit-user-select: none;
-        }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Inter, sans-serif;
-            background-color: var(--bg);
-            color: var(--text-main);
-            padding: 20px 16px;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            min-height: 100vh;
-        }
-
-        .header {
-            text-align: center;
-            margin-top: 10px;
-            margin-bottom: 28px;
-        }
-
-        .icon-box {
-            width: 64px;
-            height: 64px;
-            background: linear-gradient(135deg, rgba(56, 189, 248, 0.15), rgba(99, 102, 241, 0.15));
-            border: 1px solid rgba(56, 189, 248, 0.3);
-            border-radius: 20px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0 auto 16px;
-            font-size: 28px;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
-        }
-
-        .header h1 {
-            font-size: 22px;
-            font-weight: 700;
-            letter-spacing: -0.3px;
-        }
-
-        .header p {
-            font-size: 13px;
-            color: var(--text-sub);
-            margin-top: 6px;
-            line-height: 1.4;
-        }
-
-        .card {
-            background: var(--card-bg);
-            border: 1px solid var(--border);
-            border-radius: 22px;
-            padding: 20px;
-            box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
-            backdrop-filter: blur(10px);
-        }
-
-        .card-top {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-        }
-
-        .card-title {
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-sub);
-            text-transform: uppercase;
-            letter-spacing: 0.8px;
-        }
-
-        .badge {
-            background: var(--accent-gradient);
-            color: #ffffff;
-            padding: 5px 14px;
-            border-radius: 12px;
-            font-size: 15px;
-            font-weight: 700;
-            box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
-        }
-
-        .slider-wrapper {
-            position: relative;
-            padding: 8px 0;
-        }
-
-        input[type=range] {
-            -webkit-appearance: none;
-            width: 100%;
-            height: 8px;
-            border-radius: 4px;
-            background: rgba(255, 255, 255, 0.1);
-            outline: none;
-        }
-
-        input[type=range]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            appearance: none;
-            width: 26px;
-            height: 26px;
-            border-radius: 50%;
-            background: #ffffff;
-            border: 3px solid #38bdf8;
-            cursor: pointer;
-            box-shadow: 0 0 16px rgba(56, 189, 248, 0.6);
-            transition: transform 0.1s ease;
-        }
-
-        input[type=range]::-webkit-slider-thumb:active {
-            transform: scale(1.15);
-        }
-
-        .scale-bar {
-            display: flex;
-            gap: 5px;
-            margin-top: 18px;
-        }
-
-        .scale-segment {
-            flex: 1;
-            height: 5px;
-            border-radius: 3px;
-            background: rgba(255, 255, 255, 0.08);
-            transition: background 0.2s ease, box-shadow 0.2s ease;
-        }
-
-        .scale-segment.active {
-            background: #38bdf8;
-            box-shadow: 0 0 8px rgba(56, 189, 248, 0.4);
-        }
-
-        .save-btn {
-            width: 100%;
-            padding: 16px;
-            border: none;
-            border-radius: 16px;
-            background: var(--accent-gradient);
-            color: #ffffff;
-            font-size: 16px;
-            font-weight: 700;
-            cursor: pointer;
-            box-shadow: 0 8px 24px rgba(56, 189, 248, 0.35);
-            transition: all 0.15s ease;
-            margin-top: auto;
-        }
-
-        .save-btn:active {
-            transform: scale(0.98);
-            opacity: 0.9;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#10131d">
+  <title>Музыка</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: var(--tg-theme-bg-color, #10131d);
+      --panel: var(--tg-theme-secondary-bg-color, #191e2b);
+      --panel-2: color-mix(in srgb, var(--panel) 74%, white 4%);
+      --text: var(--tg-theme-text-color, #f4f5fb);
+      --muted: var(--tg-theme-hint-color, #969db0);
+      --line: color-mix(in srgb, var(--text) 10%, transparent);
+      --accent: var(--tg-theme-button-color, #8b5cf6);
+      --accent-text: var(--tg-theme-button-text-color, #ffffff);
+      --purple: #9b7bff;
+      --cyan: #58d5e8;
+      --danger: #ff6b7b;
+      --radius: 22px;
+    }
+    * { box-sizing: border-box; }
+    html { min-height: 100%; background: var(--bg); }
+    body {
+      margin: 0; min-height: 100vh; min-height: 100dvh;
+      padding: 0 0 calc(88px + env(safe-area-inset-bottom));
+      color: var(--text); background:
+        radial-gradient(ellipse at 85% -5%, rgba(118, 86, 255, .18), transparent 38%),
+        radial-gradient(ellipse at -10% 28%, rgba(51, 190, 210, .08), transparent 30%), var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input { font: inherit; }
+    button { color: inherit; }
+    .app { width: min(100%, 620px); margin: 0 auto; padding: 18px 18px 22px; }
+    .topline { display:flex; align-items:center; justify-content:space-between; margin: 4px 2px 24px; }
+    .brand { display:flex; align-items:center; gap:11px; font-size:17px; font-weight:800; letter-spacing:-.3px; }
+    .brand-mark { display:grid; place-items:center; width:38px; height:38px; border-radius:13px; background:linear-gradient(145deg,#9d7cff,#5c62df); box-shadow:0 7px 22px #795eff35; font-size:19px; }
+    .avatar { display:grid; place-items:center; width:38px; height:38px; border:1px solid var(--line); border-radius:50%; background:var(--panel); color:var(--muted); }
+    .screen { display:none; animation: appear .18s ease-out; }
+    .screen.active { display:block; }
+    @keyframes appear { from { opacity:.4; transform:translateY(5px); } to { opacity:1; transform:none; } }
+    .eyebrow { color:var(--muted); font-size:12px; font-weight:700; letter-spacing:1.1px; text-transform:uppercase; }
+    h1 { margin:7px 0 8px; font-size:29px; line-height:1.1; letter-spacing:-1px; }
+    .subtitle { margin:0; color:var(--muted); font-size:14px; line-height:1.5; }
+    .hero { position:relative; overflow:hidden; margin:22px 0 24px; padding:21px; border:1px solid #a38cff30; border-radius:25px; background:linear-gradient(125deg,#28224b 0%,#252d50 54%,#1b3445 100%); box-shadow:0 18px 38px #00000020; }
+    .hero::after { content:"♫"; position:absolute; right:14px; top:-24px; color:#ffffff12; font-size:150px; font-weight:900; transform:rotate(13deg); pointer-events:none; }
+    .hero-label { position:relative; z-index:1; color:#d8d0ff; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:1px; }
+    .hero h2 { position:relative; z-index:1; margin:10px 0 7px; max-width:280px; font-size:23px; line-height:1.15; letter-spacing:-.5px; }
+    .hero p { position:relative; z-index:1; margin:0; max-width:275px; color:#d2d4ed; font-size:13px; line-height:1.45; }
+    .searchbox { position:relative; z-index:1; display:flex; gap:8px; margin-top:18px; padding:6px; border:1px solid #ffffff22; border-radius:15px; background:#10131d66; }
+    .searchbox input { width:100%; min-width:0; padding:8px 9px; border:0; outline:0; background:transparent; color:white; font-size:14px; user-select:text; }
+    .searchbox input::placeholder { color:#c5c6db9c; }
+    .search-btn { flex:0 0 42px; height:42px; border:0; border-radius:12px; background:#fff; color:#26213e; font-size:18px; font-weight:800; cursor:pointer; }
+    .section-head { display:flex; align-items:center; justify-content:space-between; margin:0 2px 13px; }
+    .section-head h3 { margin:0; font-size:17px; letter-spacing:-.3px; }
+    .section-note { color:var(--muted); font-size:12px; }
+    .genre-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+    .genre { min-height:78px; display:flex; align-items:center; gap:12px; padding:14px; border:1px solid var(--line); border-radius:18px; background:var(--panel); text-align:left; cursor:pointer; transition:transform .15s,border-color .15s; }
+    .genre:active { transform:scale(.98); }
+    .genre-icon { display:grid; place-items:center; flex:0 0 42px; height:42px; border-radius:14px; background:var(--tint, #8b5cf622); font-size:21px; }
+    .genre strong { display:block; font-size:14px; }
+    .genre small { display:block; margin-top:4px; color:var(--muted); font-size:11px; }
+    .page-head { margin:10px 1px 22px; }
+    .page-head h1 { font-size:27px; }
+    .empty { display:flex; flex-direction:column; align-items:center; padding:37px 22px; border:1px dashed var(--line); border-radius:22px; background:color-mix(in srgb,var(--panel) 60%, transparent); text-align:center; }
+    .empty-icon { display:grid; place-items:center; width:64px; height:64px; margin-bottom:15px; border-radius:21px; background:#9273ff1a; font-size:27px; }
+    .empty strong { font-size:16px; }
+    .empty p { max-width:260px; margin:7px 0 0; color:var(--muted); font-size:13px; line-height:1.5; }
+    .playlist-list { display:grid; gap:10px; margin-top:16px; }
+    .playlist-item { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 15px; border:1px solid var(--line); border-radius:17px; background:var(--panel); }
+    .playlist-item strong { display:block; font-size:14px; }
+    .playlist-item small { display:block; margin-top:4px; color:var(--muted); font-size:12px; }
+    .delete-btn { width:34px; height:34px; border:0; border-radius:11px; background:#ff6b7b16; color:var(--danger); cursor:pointer; }
+    .primary-btn { display:flex; justify-content:center; align-items:center; gap:8px; width:100%; min-height:50px; padding:13px 16px; border:0; border-radius:16px; background:linear-gradient(110deg,#9170ff,#6878ed); color:white; font-size:14px; font-weight:800; box-shadow:0 9px 22px #8064ee2b; cursor:pointer; }
+    .primary-btn:active { transform:scale(.985); }
+    .settings-card { padding:19px; border:1px solid var(--line); border-radius:21px; background:var(--panel); }
+    .setting-row { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .setting-title { font-size:15px; font-weight:750; }
+    .setting-description { margin-top:5px; color:var(--muted); font-size:12px; line-height:1.45; }
+    .value-badge { flex:0 0 auto; min-width:90px; padding:9px 12px; border-radius:13px; background:#9074ff22; color:#b9a6ff; text-align:center; font-size:14px; font-weight:800; }
+    .slider-wrap { margin:25px 3px 0; }
+    input[type="range"] {
+      --progress:25%; width:100%; height:7px; margin:0; padding:0; border:0; border-radius:99px; outline:none;
+      appearance:none; -webkit-appearance:none; background:linear-gradient(to right,#9a7bff 0%,#67cde7 var(--progress), color-mix(in srgb,var(--text) 13%,transparent) var(--progress), color-mix(in srgb,var(--text) 13%,transparent) 100%);
+      cursor:pointer; touch-action:pan-y;
+    }
+    input[type="range"]::-webkit-slider-thumb { appearance:none; -webkit-appearance:none; width:25px; height:25px; border:4px solid var(--bg); border-radius:50%; background:#fff; box-shadow:0 0 0 2px #9a7bff,0 3px 10px #0005; }
+    input[type="range"]::-moz-range-thumb { width:17px; height:17px; border:4px solid var(--bg); border-radius:50%; background:#fff; box-shadow:0 0 0 2px #9a7bff,0 3px 10px #0005; }
+    .range-labels { display:flex; justify-content:space-between; margin-top:14px; color:var(--muted); font-size:11px; }
+    .range-labels span { min-width:20px; text-align:center; }
+    .setting-divider { height:1px; margin:20px 0; background:var(--line); }
+    .info-box { display:flex; gap:11px; margin-top:15px; padding:13px; border-radius:15px; background:#58d5e812; color:var(--muted); font-size:12px; line-height:1.45; }
+    .info-box span { color:var(--cyan); font-size:16px; }
+    .save-area { margin-top:18px; }
+    .bottom-nav { position:fixed; z-index:20; bottom:0; left:0; right:0; display:flex; justify-content:center; padding:9px 10px calc(9px + env(safe-area-inset-bottom)); border-top:1px solid var(--line); background:color-mix(in srgb,var(--bg) 88%, transparent); backdrop-filter:blur(18px); }
+    .nav-inner { display:grid; grid-template-columns:repeat(5,1fr); width:min(100%,620px); gap:4px; }
+    .nav-item { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; min-height:53px; padding:5px 2px; border:0; border-radius:13px; background:transparent; color:var(--muted); font-size:10px; cursor:pointer; }
+    .nav-item .nav-icon { font-size:19px; line-height:1; }
+    .nav-item.active { background:#9478ff18; color:#bbaaff; font-weight:750; }
+    .toast { position:fixed; z-index:40; left:50%; bottom:calc(82px + env(safe-area-inset-bottom)); width:max-content; max-width:calc(100% - 36px); padding:12px 16px; border:1px solid var(--line); border-radius:14px; background:var(--panel); color:var(--text); box-shadow:0 10px 28px #0004; font-size:13px; text-align:center; opacity:0; transform:translate(-50%,10px); pointer-events:none; transition:.2s; }
+    .toast.show { opacity:1; transform:translate(-50%,0); }
+    .track-list { display:grid; gap:10px; margin:18px 0 22px; }
+    .track-card { display:flex; align-items:center; gap:12px; padding:11px; border:1px solid var(--line); border-radius:18px; background:var(--panel); }
+    .track-cover { flex:0 0 58px; width:58px; height:58px; border-radius:13px; object-fit:cover; background:#252b3b; }
+    .track-info { flex:1; min-width:0; }
+    .track-info strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+    .track-info small { display:block; margin-top:5px; color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .track-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:9px; }
+    .track-action { min-height:30px; padding:6px 9px; border:1px solid var(--line); border-radius:9px; background:transparent; color:var(--text); font-size:11px; font-weight:700; cursor:pointer; }
+    .track-action.primary { border:0; background:linear-gradient(110deg,#9170ff,#6878ed); color:white; }
+    .track-action.saved { color:#ff7e9a; border-color:#ff7e9a55; }
+    .list-section-title { margin:18px 2px 10px; font-size:16px; }
+    .loading { padding:20px; text-align:center; color:var(--muted); font-size:13px; }
+    .playlist-item { flex-wrap:wrap; }
+    .playlist-tracks { flex:0 0 100%; display:grid; gap:7px; margin-top:7px; }
+    .playlist-track { color:var(--muted); font-size:12px; }
+    .modal-backdrop { position:fixed; z-index:60; inset:0; display:none; align-items:center; justify-content:center; padding:22px; background:#0009; backdrop-filter:blur(7px); }
+    .modal-backdrop.open { display:flex; }
+    .modal-card { width:min(100%,380px); padding:21px; border:1px solid var(--line); border-radius:22px; background:var(--panel); box-shadow:0 20px 60px #0007; }
+    .modal-card h3 { margin:0 0 14px; font-size:18px; }
+    .modal-input { width:100%; padding:13px 14px; border:1px solid var(--line); border-radius:13px; outline:none; background:var(--bg); color:var(--text); font-size:14px; user-select:text; }
+    .modal-actions { display:flex; gap:9px; margin-top:15px; }
+    .modal-actions button { flex:1; min-height:43px; border:0; border-radius:12px; font-size:13px; font-weight:800; cursor:pointer; }
+    .modal-cancel { background:color-mix(in srgb,var(--text) 10%,transparent); color:var(--text); }
+    .modal-save { background:linear-gradient(110deg,#9170ff,#6878ed); color:white; }
+    @media (min-width:560px) { .app { padding-top:25px; } .hero { padding:25px; } .genre-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; } }
+  </style>
 </head>
 <body>
-    <div>
-        <div class="header">
-            <div class="icon-box">⚡</div>
-            <h1>Выдача треков</h1>
-            <p>Укажи количество треков на одной странице поиска</p>
+  <main class="app">
+    <header class="topline">
+      <div class="brand"><span class="brand-mark">♫</span><span>МУЗЫКА</span></div>
+      <div class="avatar" aria-label="Профиль">♪</div>
+    </header>
+
+    <section class="screen active" id="screen-home">
+      <div class="eyebrow">ТВОЙ МУЗЫКАЛЬНЫЙ ПРОСТРАНСТВО</div>
+      <h1>Слушай то,<br>что нравится.</h1>
+      <p class="subtitle">Ищи музыку и собирай свою коллекцию в одном месте.</p>
+      <div class="hero">
+        <div class="hero-label">ТВОЙ ПОИСК</div>
+        <h2>Какой трек<br>включим?</h2>
+        <p>Введи название песни или исполнителя.</p>
+        <form class="searchbox" id="searchForm">
+          <input id="searchInput" type="search" placeholder="Название трека или артист" autocomplete="off" aria-label="Поиск музыки">
+          <button class="search-btn" type="submit" aria-label="Найти">⌕</button>
+        </form>
+      </div>
+      <div id="searchResults" aria-live="polite"></div>
+      <div class="section-head"><h3>Настроение</h3><span class="section-note">Выбери жанр</span></div>
+      <div class="genre-grid">
+        <button class="genre" data-genre="Поп"><span class="genre-icon" style="--tint:#ff7e9a20">🎤</span><span><strong>Поп</strong><small>Хиты и новинки</small></span></button>
+        <button class="genre" data-genre="Рок"><span class="genre-icon" style="--tint:#ff9c5920">🎸</span><span><strong>Рок</strong><small>Громче и мощнее</small></span></button>
+        <button class="genre" data-genre="Хип-хоп"><span class="genre-icon" style="--tint:#9b7bff22">🎧</span><span><strong>Хип-хоп</strong><small>Ритм и бас</small></span></button>
+        <button class="genre" data-genre="Электроника"><span class="genre-icon" style="--tint:#58d5e822">⚡</span><span><strong>Электроника</strong><small>Для движения</small></span></button>
+        <button class="genre" data-genre="Джаз"><span class="genre-icon" style="--tint:#e6bd5d22">🎷</span><span><strong>Джаз</strong><small>Спокойный вайб</small></span></button>
+        <button class="genre" data-genre="Phonk"><span class="genre-icon" style="--tint:#ff6b7b22">🏁</span><span><strong>Phonk</strong><small>Плотный звук</small></span></button>
+      </div>
+    </section>
+
+    <section class="screen" id="screen-favorites">
+      <div class="page-head"><div class="eyebrow">ТВОЯ КОЛЛЕКЦИЯ</div><h1>Избранное ❤️</h1><p class="subtitle">Треки, которые захочется включить ещё раз.</p></div>
+      <div class="track-list" id="favoritesList"></div>
+      <div class="empty" id="favoritesEmpty"><div class="empty-icon">♡</div><strong>Пока здесь пусто</strong><p>Нажимай ❤️ у найденных треков — они сохранятся в твоём аккаунте Telegram.</p></div>
+    </section>
+
+    <section class="screen" id="screen-playlists">
+      <div class="page-head"><div class="eyebrow">СОБИРАЙ ПО-СВОЕМУ</div><h1>Плейлисты</h1><p class="subtitle">Создавай подборки под любое настроение.</p></div>
+      <button class="primary-btn" id="createPlaylist">＋ Создать плейлист</button>
+      <div class="playlist-list" id="playlistList"></div>
+      <div class="empty" id="playlistEmpty" style="margin-top:14px"><div class="empty-icon">♫</div><strong>Создай свою первую подборку</strong><p>Добавляй найденные треки в подборки через кнопку «＋ В плейлист».</p></div>
+    </section>
+
+    <section class="screen" id="screen-history">
+      <div class="page-head"><div class="eyebrow">НЕДАВНО СЛУШАЛ</div><h1>История</h1><p class="subtitle">Здесь будут твои недавно найденные и скачанные треки.</p></div>
+      <div class="track-list" id="historyList"></div>
+      <div class="empty" id="historyEmpty"><div class="empty-icon">◷</div><strong>История пока пуста</strong><p>Загруженные через приложение треки будут появляться здесь.</p></div>
+    </section>
+
+    <section class="screen" id="screen-settings">
+      <div class="page-head"><div class="eyebrow">ПОД ТЕБЯ</div><h1>Настройки</h1><p class="subtitle">Настрой выдачу так, как тебе удобно.</p></div>
+      <div class="settings-card">
+        <div class="setting-row">
+          <div><div class="setting-title">Треков на странице</div><div class="setting-description">Сколько результатов показывать за один раз.</div></div>
+          <div class="value-badge" id="trackCount">10 треков</div>
         </div>
-
-        <div class="card">
-            <div class="card-top">
-                <span class="card-title">Размер страницы</span>
-                <span class="badge" id="trackCount">10 треков</span>
-            </div>
-
-            <div class="slider-wrapper">
-                <input type="range" id="tracksRange" min="5" max="25" value="10" step="5">
-            </div>
-
-            <div class="scale-bar" id="scaleBar"></div>
+        <div class="slider-wrap">
+          <input type="range" id="tracksRange" min="5" max="25" value="10" step="5" aria-label="Количество треков на странице">
+          <div class="range-labels"><span>5</span><span>10</span><span>15</span><span>20</span><span>25</span></div>
         </div>
+        <div class="info-box"><span>ⓘ</span><div>Изменение сохранится в настройках бота. Ползунок можно двигать пальцем или нажимать на нужное место шкалы.</div></div>
+      </div>
+      <div class="save-area"><button class="primary-btn" id="saveSettings">Сохранить настройки</button></div>
+    </section>
+  </main>
+
+  <nav class="bottom-nav" aria-label="Основная навигация">
+    <div class="nav-inner">
+      <button class="nav-item active" data-screen="home"><span class="nav-icon">⌂</span><span>Главная</span></button>
+      <button class="nav-item" data-screen="favorites"><span class="nav-icon">♡</span><span>Избранное</span></button>
+      <button class="nav-item" data-screen="playlists"><span class="nav-icon">▤</span><span>Плейлисты</span></button>
+      <button class="nav-item" data-screen="history"><span class="nav-icon">◷</span><span>История</span></button>
+      <button class="nav-item" data-screen="settings"><span class="nav-icon">⚙</span><span>Настройки</span></button>
     </div>
+  </nav>
+  <div class="modal-backdrop" id="nameModal" role="dialog" aria-modal="true" aria-labelledby="nameModalTitle">
+    <div class="modal-card">
+      <h3 id="nameModalTitle">Название</h3>
+      <input class="modal-input" id="nameModalInput" maxlength="40" autocomplete="off" placeholder="Введи название">
+      <div class="modal-actions">
+        <button class="modal-cancel" id="nameModalCancel" type="button">Отмена</button>
+        <button class="modal-save" id="nameModalSave" type="button">Сохранить</button>
+      </div>
+    </div>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-    <button class="save-btn" onclick="saveSettings()">Сохранить настройки</button>
-
-    <script>
-        const tg = window.Telegram.WebApp;
+  <script>
+    (() => {
+      const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+      if (tg) {
         tg.ready();
         tg.expand();
+        try { tg.setHeaderColor('secondary_bg_color'); } catch (_) {}
+      }
+      const $ = (id) => document.getElementById(id);
+      const range = $('tracksRange');
+      const countBadge = $('trackCount');
+      const toast = $('toast');
+      const state = { favorites: [], history: [], playlists: [], searchLimit: 10 };
+      let toastTimer;
+      const initData = tg && tg.initData ? tg.initData : '';
+      let resolveNameDialog = null;
+      function askName(title, placeholder) {
+        $('nameModalTitle').textContent = title;
+        $('nameModalInput').placeholder = placeholder || 'Введи название';
+        $('nameModalInput').value = '';
+        $('nameModal').classList.add('open');
+        setTimeout(() => $('nameModalInput').focus(), 50);
+        return new Promise(resolve => { resolveNameDialog = resolve; });
+      }
+      function closeNameDialog(value) {
+        $('nameModal').classList.remove('open');
+        if (resolveNameDialog) resolveNameDialog(value);
+        resolveNameDialog = null;
+      }
+      $('nameModalSave').addEventListener('click', () => closeNameDialog($('nameModalInput').value.trim()));
+      $('nameModalCancel').addEventListener('click', () => closeNameDialog(null));
+      $('nameModal').addEventListener('click', event => { if (event.target === $('nameModal')) closeNameDialog(null); });
+      $('nameModalInput').addEventListener('keydown', event => {
+        if (event.key === 'Enter') closeNameDialog($('nameModalInput').value.trim());
+        if (event.key === 'Escape') closeNameDialog(null);
+      });
 
-        const rangeInput = document.getElementById('tracksRange');
-        const countDisplay = document.getElementById('trackCount');
-        const scaleBar = document.getElementById('scaleBar');
-        
-        const minVal = parseInt(rangeInput.min);
-        const maxVal = parseInt(rangeInput.max);
-        const stepVal = parseInt(rangeInput.step);
-        const totalSegments = (maxVal - minVal) / stepVal + 1;
+      function notify(message) {
+        toast.textContent = message;
+        toast.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => toast.classList.remove('show'), 2800);
+        if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+      }
+      function trackWord(value) {
+        const n = Math.abs(value) % 100, last = n % 10;
+        if (n > 10 && n < 20) return 'треков';
+        if (last === 1) return 'трек';
+        if (last >= 2 && last <= 4) return 'трека';
+        return 'треков';
+      }
+      function updateSlider() {
+        const min = Number(range.min), max = Number(range.max);
+        const value = Math.min(max, Math.max(min, Number(range.value)));
+        const percent = ((value - min) / (max - min)) * 100;
+        range.style.setProperty('--progress', `${percent}%`);
+        countBadge.textContent = `${value} ${trackWord(value)}`;
+      }
+      range.addEventListener('input', updateSlider);
+      range.addEventListener('change', updateSlider);
+      updateSlider();
 
-        function renderScale(val) {
-            scaleBar.innerHTML = '';
-            for (let i = 0; i < totalSegments; i++) {
-                const currentStepValue = minVal + (i * stepVal);
-                const seg = document.createElement('div');
-                seg.className = 'scale-segment' + (currentStepValue <= val ? ' active' : '');
-                scaleBar.appendChild(seg);
-            }
+      async function api(path, options = {}) {
+        if (!initData) throw new Error('Открой Mini App через Telegram, а не в обычном браузере.');
+        const headers = { 'X-Telegram-Init-Data': initData, ...(options.headers || {}) };
+        if (options.body) headers['Content-Type'] = 'application/json';
+        const response = await fetch(path, { ...options, headers });
+        let data = {};
+        try { data = await response.json(); } catch (_) {}
+        if (!response.ok) {
+          if (data.subscription_required && tg && tg.openTelegramLink) tg.openTelegramLink(data.invite_url || 'https://t.me/+8JYfdTy2YhE0NDJi');
+          throw new Error(data.error || 'Ошибка соединения с ботом.');
         }
+        return data;
+      }
+      function showScreen(name) {
+        document.querySelectorAll('.screen').forEach(el => el.classList.toggle('active', el.id === `screen-${name}`));
+        document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.screen === name));
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        if (name === 'favorites') renderCollection('favorites');
+        if (name === 'history') renderCollection('history');
+        if (name === 'playlists') renderPlaylists();
+      }
+      document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => showScreen(button.dataset.screen)));
 
-        function updateUI(val) {
-            countDisplay.textContent = val + ' ' + getTrackWord(val);
-            renderScale(val);
-        }
-
-        function getTrackWord(n) {
-            if (n === 1) return 'трек';
-            if (n >= 2 && n <= 4) return 'трека';
-            return 'треков';
-        }
-
-        rangeInput.addEventListener('input', (e) => {
-            const val = parseInt(e.target.value);
-            updateUI(val);
-            if (tg.HapticFeedback) {
-                tg.HapticFeedback.selectionChanged();
-            }
+      function formatDuration(seconds) {
+        if (!Number.isFinite(Number(seconds))) return '';
+        const n = Number(seconds);
+        return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`;
+      }
+      function createTrackCard(track, collectionName = '') {
+        const card = document.createElement('article');
+        card.className = 'track-card';
+        const cover = document.createElement('img');
+        cover.className = 'track-cover';
+        cover.alt = '';
+        cover.src = track.thumbnail || '';
+        cover.onerror = () => { cover.style.visibility = 'hidden'; };
+        const info = document.createElement('div');
+        info.className = 'track-info';
+        const title = document.createElement('strong');
+        title.textContent = track.title || 'Без названия';
+        const subtitle = document.createElement('small');
+        subtitle.textContent = `${track.uploader || 'Неизвестен'}${track.duration ? ' · ' + formatDuration(track.duration) : ''}`;
+        const actions = document.createElement('div');
+        actions.className = 'track-actions';
+        const isSaved = state.favorites.some(item => item.url === track.url);
+        const fav = document.createElement('button');
+        fav.className = 'track-action' + (isSaved ? ' saved' : '');
+        fav.textContent = isSaved ? '♥ В избранном' : '♡ В избранное';
+        fav.addEventListener('click', async () => {
+          try {
+            const result = await api('/api/favorite', { method: 'POST', body: JSON.stringify({ track }) });
+            state.favorites = result.favorites || [];
+            renderCollection('favorites');
+            fav.classList.toggle('saved', result.saved);
+            fav.textContent = result.saved ? '♥ В избранном' : '♡ В избранное';
+            notify(result.saved ? 'Добавлено в избранное.' : 'Удалено из избранного.');
+          } catch (e) { notify(e.message); }
         });
-
-        updateUI(parseInt(rangeInput.value));
-
-        function saveSettings() {
-            const val = parseInt(rangeInput.value);
-            if (tg.HapticFeedback) {
-                tg.HapticFeedback.notificationOccurred('success');
-            }
-            
-            tg.sendData(JSON.stringify({
-                action: 'set_tracks_per_page',
-                count: val
-            }));
-
-            tg.close();
+        const playlist = document.createElement('button');
+        playlist.className = 'track-action';
+        playlist.textContent = '＋ В плейлист';
+        playlist.addEventListener('click', async () => {
+          const name = await askName('Добавить в плейлист', 'Название плейлиста');
+          if (name === null) return;
+          try {
+            const result = await api('/api/playlist', { method: 'POST', body: JSON.stringify({ action: 'add_track', playlist_name: name, track }) });
+            state.playlists = result.playlists || [];
+            notify('Трек добавлен в плейлист.');
+          } catch (e) { notify(e.message); }
+        });
+        actions.append(fav, playlist);
+        const download = document.createElement('button');
+        download.className = 'track-action primary';
+        download.textContent = '↓ Скачать';
+        download.addEventListener('click', async () => {
+          download.disabled = true;
+          download.textContent = 'Отправляю…';
+          try {
+            const result = await api('/api/download', { method: 'POST', body: JSON.stringify({ track }) });
+            notify(result.message || 'Трек отправляется в Telegram.');
+            state.history = [track, ...state.history.filter(item => item.url !== track.url)].slice(0, 50);
+          } catch (e) { notify(e.message); }
+          finally { download.disabled = false; download.textContent = '↓ Скачать'; }
+        });
+        actions.append(download);
+        info.append(title, subtitle, actions);
+        card.append(cover, info);
+        return card;
+      }
+      function renderCollection(which) {
+        const list = $(which === 'favorites' ? 'favoritesList' : 'historyList');
+        const empty = $(which === 'favorites' ? 'favoritesEmpty' : 'historyEmpty');
+        const tracks = state[which] || [];
+        list.replaceChildren();
+        tracks.forEach(track => list.append(createTrackCard(track, which)));
+        empty.style.display = tracks.length ? 'none' : 'flex';
+      }
+      function renderPlaylists() {
+        const list = $('playlistList');
+        list.replaceChildren();
+        state.playlists.forEach(playlist => {
+          const row = document.createElement('div');
+          row.className = 'playlist-item';
+          const info = document.createElement('div');
+          const title = document.createElement('strong');
+          title.textContent = playlist.name;
+          const sub = document.createElement('small');
+          const tracks = Array.isArray(playlist.tracks) ? playlist.tracks : [];
+          sub.textContent = `${tracks.length} ${trackWord(tracks.length)}`;
+          info.append(title, sub);
+          const remove = document.createElement('button');
+          remove.className = 'delete-btn';
+          remove.type = 'button';
+          remove.textContent = '×';
+          remove.addEventListener('click', async () => {
+            try {
+              const result = await api('/api/playlist', { method: 'POST', body: JSON.stringify({ action: 'delete', playlist_id: playlist.id }) });
+              state.playlists = result.playlists || [];
+              renderPlaylists();
+              notify('Плейлист удалён.');
+            } catch (e) { notify(e.message); }
+          });
+          row.append(info, remove);
+          if (tracks.length) {
+            const trackNames = document.createElement('div');
+            trackNames.className = 'playlist-tracks';
+            tracks.forEach(track => {
+              const line = document.createElement('div');
+              line.className = 'playlist-track';
+              line.textContent = `♫ ${track.title} — ${track.uploader}`;
+              trackNames.append(line);
+            });
+            row.append(trackNames);
+          }
+          list.append(row);
+        });
+        $('playlistEmpty').style.display = state.playlists.length ? 'none' : 'flex';
+      }
+      async function runSearch(query) {
+        const results = $('searchResults');
+        results.replaceChildren();
+        const loading = document.createElement('div');
+        loading.className = 'loading';
+        loading.textContent = 'Ищу треки на SoundCloud…';
+        results.append(loading);
+        try {
+          const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
+          results.replaceChildren();
+          const heading = document.createElement('h3');
+          heading.className = 'list-section-title';
+          heading.textContent = `Результаты: ${query}`;
+          const list = document.createElement('div');
+          list.className = 'track-list';
+          if (!data.tracks.length) {
+            const empty = document.createElement('div');
+            empty.className = 'loading';
+            empty.textContent = 'Ничего не найдено. Попробуй другой запрос.';
+            results.append(heading, empty);
+            return;
+          }
+          data.tracks.forEach(track => list.append(createTrackCard(track)));
+          results.append(heading, list);
+          state.history = data.tracks.concat(state.history.filter(old => !data.tracks.some(t => t.url === old.url))).slice(0, 50);
+        } catch (e) {
+          results.replaceChildren();
+          const empty = document.createElement('div');
+          empty.className = 'loading';
+          empty.textContent = e.message;
+          results.append(empty);
+          notify(e.message);
         }
-    </script>
+      }
+      $('searchForm').addEventListener('submit', event => {
+        event.preventDefault();
+        const query = $('searchInput').value.trim();
+        if (!query) { notify('Сначала введи название трека или исполнителя.'); return; }
+        runSearch(query);
+      });
+      const genres = {
+        'Поп': 'pop hits', 'Рок': 'rock music', 'Хип-хоп': 'hip hop',
+        'Электроника': 'electronic dance music', 'Джаз': 'jazz', 'Phonk': 'phonk'
+      };
+      document.querySelectorAll('[data-genre]').forEach(button => button.addEventListener('click', () => {
+        const query = genres[button.dataset.genre] || button.dataset.genre;
+        $('searchInput').value = query;
+        runSearch(query);
+      }));
+      $('createPlaylist').addEventListener('click', async () => {
+        const name = await askName('Новый плейлист', 'Например, Избранные хиты');
+        if (name === null) return;
+        try {
+          const result = await api('/api/playlist', { method: 'POST', body: JSON.stringify({ action: 'create', name }) });
+          state.playlists = result.playlists || [];
+          renderPlaylists();
+          notify('Плейлист создан.');
+        } catch (e) { notify(e.message); }
+      });
+      $('saveSettings').addEventListener('click', async () => {
+        const count = Number(range.value);
+        try {
+          const result = await api('/api/settings', { method: 'POST', body: JSON.stringify({ count }) });
+          state.searchLimit = result.search_limit;
+          notify('Настройки сохранены в боте.');
+        } catch (e) { notify(e.message); }
+      });
+      async function loadAppData() {
+        if (!initData) {
+          notify('Открой приложение кнопкой в Telegram-боте.');
+          return;
+        }
+        try {
+          const data = await api('/api/data');
+          state.searchLimit = Number(data.search_limit) || 10;
+          state.favorites = Array.isArray(data.favorites) ? data.favorites : [];
+          state.history = Array.isArray(data.history) ? data.history : [];
+          state.playlists = Array.isArray(data.playlists) ? data.playlists : [];
+          range.value = String(state.searchLimit);
+          updateSlider();
+          renderCollection('favorites');
+          renderCollection('history');
+          renderPlaylists();
+        } catch (e) { notify(e.message); }
+      }
+      loadAppData();
+    })();
+  </script>
 </body>
 </html>
-
-
