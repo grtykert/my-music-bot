@@ -246,7 +246,7 @@
         <div class="player-times"><span id="playerCurrentTime">0:00</span><span id="playerDuration">0:00</span></div>
       </div>
     </div>
-    <audio id="audioPlayer" preload="none"></audio>
+    <audio id="audioPlayer" preload="auto"></audio>
   </section>
   <nav class="bottom-nav" aria-label="Основная навигация">
     <div class="nav-inner">
@@ -324,6 +324,29 @@
         return `/api/stream?url=${encodeURIComponent(track.url)}&auth=${encodeURIComponent(initData)}`;
       }
 
+      const preloadedUrls = new Set();
+      function preloadAudio(track) {
+        if (!track || !track.url || preloadedUrls.has(track.url)) return;
+        preloadedUrls.add(track.url);
+        try {
+          const a = new Audio();
+          a.preload = 'auto';
+          a.src = streamUrl(track);
+          a.load();
+        } catch (_) {}
+      }
+
+      function preloadSurroundingTracks() {
+        const queue = getCurrentQueue();
+        if (!queue || !queue.length || !state.nowPlaying) return;
+        const index = queue.findIndex(item => item.url === state.nowPlaying.url);
+        if (index !== -1) {
+          if (index + 1 < queue.length) preloadAudio(queue[index + 1]);
+          if (index + 2 < queue.length) preloadAudio(queue[index + 2]);
+          if (index - 1 >= 0) preloadAudio(queue[index - 1]);
+        }
+      }
+
       async function playTrack(track, source = null) {
         if (!track || !track.url) { notify('Не удалось открыть этот трек.'); return; }
         if (source) state.queueSource = source;
@@ -360,6 +383,7 @@
         try {
           await audioPlayer.play();
           $('playerStatus').textContent = 'Сейчас играет';
+          setTimeout(preloadSurroundingTracks, 300);
         } catch (error) {
           console.error('Ошибка запуска аудио:', error);
           $('playerStatus').textContent = 'Нажми ▶, чтобы начать';
@@ -528,7 +552,10 @@
         document.querySelectorAll('.screen').forEach(el => el.classList.toggle('active', el.id === `screen-${name}`));
         document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.screen === name));
         window.scrollTo({ top: 0, behavior: 'smooth' });
-        if (name === 'favorites') renderCollection('favorites');
+        if (name === 'favorites') {
+          renderCollection('favorites');
+          state.favorites.slice(0, 5).forEach(preloadAudio);
+        }
         if (name === 'history') renderCollection('history');
         if (name === 'playlists') renderPlaylists();
       }
@@ -542,6 +569,7 @@
       function createTrackCard(track, collectionName = '') {
         const card = document.createElement('article');
         card.className = 'track-card';
+        card.addEventListener('pointerdown', () => preloadAudio(track), { passive: true });
         const cover = document.createElement('div');
         cover.className = 'track-cover-wrap';
         cover.setAttribute('aria-label', 'Обложка трека');
@@ -568,6 +596,8 @@
         const listen = document.createElement('button');
         listen.className = 'track-action primary';
         listen.textContent = '▶ Слушать';
+        listen.addEventListener('pointerdown', () => preloadAudio(track), { passive: true });
+        listen.addEventListener('mouseenter', () => preloadAudio(track), { passive: true });
         listen.addEventListener('click', () => playTrack(track, collectionName));
         actions.append(listen);
         const isSaved = state.favorites.some(item => item.url === track.url);
@@ -751,6 +781,9 @@
           renderCollection('favorites');
           renderCollection('history');
           renderPlaylists();
+          if (state.favorites.length > 0) {
+            state.favorites.slice(0, 5).forEach(preloadAudio);
+          }
         } catch (e) { notify(e.message); }
       }
       loadAppData();
