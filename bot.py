@@ -362,18 +362,22 @@ def send_welcome(message):
     register_user(chat_id)
     text = (
         "👋 Привет! Напиши название песни, и я попробую её найти. 🎵\n\n"
-        "💬 Наша группа: https://t.me/+8JYfdTy2YhE0NDJi\n\n"
         "💖 Поддержка разработчика: /donate"
     )
     markup = None
-    if WEB_APP_URL and message.chat.type == "private":
+    if message.chat.type == "private":
         markup = InlineKeyboardMarkup()
         markup.add(InlineKeyboardButton(
-            text="🎧 Открыть музыкальное приложение",
-            web_app=telebot.types.WebAppInfo(url=WEB_APP_URL)
+            text="💬 Перейти в нашу группу",
+            url="https://t.me/+8JYfdTy2YhE0NDJi"
         ))
-    elif message.chat.type == "private":
-        text += "\n\n⚠️ Mini App пока не настроен: добавь WEB_APP_URL в переменные Render."
+        if WEB_APP_URL:
+            markup.add(InlineKeyboardButton(
+                text="🎧 Открыть музыкальное приложение",
+                web_app=telebot.types.WebAppInfo(url=WEB_APP_URL)
+            ))
+        else:
+            text += "\n\n⚠️ Mini App пока не настроен: добавь WEB_APP_URL в переменные Render."
     bot.reply_to(message, text, reply_markup=markup)
 
 # ОБРАБОТЧИК КНОПКИ ПРОВЕРКИ ПОДПИСКИ
