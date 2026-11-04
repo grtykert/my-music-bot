@@ -103,33 +103,30 @@
     .nav-item.active { background:#9478ff18; color:#bbaaff; font-weight:750; }
     .toast { position:fixed; z-index:40; left:50%; bottom:calc(82px + env(safe-area-inset-bottom)); width:max-content; max-width:calc(100% - 36px); padding:12px 16px; border:1px solid var(--line); border-radius:14px; background:var(--panel); color:var(--text); box-shadow:0 10px 28px #0004; font-size:13px; text-align:center; opacity:0; transform:translate(-50%,10px); pointer-events:none; transition:.2s; }
     .toast.show { opacity:1; transform:translate(-50%,0); }
-    body.has-player { padding-bottom:calc(205px + env(safe-area-inset-bottom)); }
-    .player-dock {
-      position:fixed; z-index:19; left:50%; bottom:calc(76px + env(safe-area-inset-bottom));
-      width:min(calc(100% - 24px),596px); padding:12px;
-      border:1px solid var(--line); border-radius:19px;
-      background:color-mix(in srgb,var(--panel) 97%,transparent);
-      box-shadow:0 12px 35px #0008; backdrop-filter:blur(18px);
-      transform:translateX(-50%);
-    }
-    .player-dock[hidden] { display:none; }
-    .player-head { display:flex; align-items:center; gap:11px; margin-bottom:10px; }
-    .player-cover { flex:0 0 46px; width:46px; height:46px; border-radius:11px; object-fit:cover; background:#252b3b; }
-    .player-meta { flex:1; min-width:0; }
-    .player-track-title { display:block; overflow:hidden; font-size:13px; font-weight:800; text-overflow:ellipsis; white-space:nowrap; }
-    .player-track-artist { display:block; overflow:hidden; margin-top:4px; color:var(--muted); font-size:11px; text-overflow:ellipsis; white-space:nowrap; }
-    .player-close { flex:0 0 32px; width:32px; height:32px; border:0; border-radius:10px; background:color-mix(in srgb,var(--text) 10%,transparent); color:var(--text); font-size:20px; cursor:pointer; }
-    .player-controls { display:flex; align-items:center; gap:12px; }
-    .player-toggle { flex:0 0 48px; width:48px; height:48px; border:0; border-radius:50%; background:linear-gradient(135deg,#9b7bff,#6878ed); color:#fff; font-size:20px; font-weight:800; cursor:pointer; box-shadow:0 6px 18px #8064ee35; }
-    .player-timeline { flex:1; min-width:0; }
-    #playerSeek { width:100%; height:6px; margin:7px 0 5px; accent-color:#9b7bff; }
-    .player-times { display:flex; justify-content:space-between; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
-    .player-status { min-height:14px; margin-top:5px; color:var(--muted); font-size:10px; }
-    .track-cover { display:block; }
-    @media (max-height:650px) { body.has-player { padding-bottom:calc(198px + env(safe-area-inset-bottom)); } }
     .track-list { display:grid; gap:10px; margin:18px 0 22px; }
     .track-card { display:flex; align-items:center; gap:12px; padding:11px; border:1px solid var(--line); border-radius:18px; background:var(--panel); }
-    .track-cover { flex:0 0 58px; width:58px; height:58px; border-radius:13px; object-fit:cover; background:#252b3b; }
+    .track-cover-wrap { position:relative; display:grid; place-items:center; flex:0 0 58px; width:58px; height:58px; overflow:hidden; border-radius:13px; background:linear-gradient(145deg,#342b58,#202b42); color:#c7b8ff; font-size:25px; }
+    .track-cover { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+    body.has-player { padding-bottom:calc(245px + env(safe-area-inset-bottom)); }
+    .player-dock { position:fixed; z-index:19; left:50%; bottom:calc(76px + env(safe-area-inset-bottom)); width:min(calc(100% - 24px),596px); padding:12px; border:1px solid var(--line); border-radius:19px; background:color-mix(in srgb,var(--panel) 96%,transparent); box-shadow:0 12px 35px #0008; backdrop-filter:blur(18px); transform:translateX(-50%); }
+    .player-dock[hidden] { display:none; }
+    .player-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:0 2px 9px; }
+    .player-meta { flex:1; min-width:0; }
+    .player-track-title { display:block; min-width:0; overflow:hidden; color:var(--text); font-size:13px; font-weight:800; text-overflow:ellipsis; white-space:nowrap; }
+    .player-status { display:block; margin-top:4px; color:var(--muted); font-size:11px; }
+    .player-close { flex:0 0 32px; width:32px; height:32px; border:0; border-radius:10px; background:color-mix(in srgb,var(--text) 10%,transparent); color:var(--text); font-size:20px; cursor:pointer; }
+    .player-main { display:flex; align-items:center; gap:12px; }
+    .player-cover-wrap { position:relative; display:grid; place-items:center; flex:0 0 62px; width:62px; height:62px; overflow:hidden; border-radius:14px; background:linear-gradient(145deg,#342b58,#202b42); color:#c7b8ff; font-size:27px; }
+    .player-cover { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+    .player-toggle { flex:0 0 48px; width:48px; height:48px; border:0; border-radius:50%; background:linear-gradient(145deg,#9d7cff,#6667e8); color:white; font-size:20px; cursor:pointer; }
+    .player-progress { flex:1; min-width:0; }
+    .player-seek { width:100%; height:6px; margin:0; appearance:none; -webkit-appearance:none; border:0; border-radius:99px; background:linear-gradient(to right,#9a7bff 0%,#67cde7 var(--seek-progress,0%),color-mix(in srgb,var(--text) 18%,transparent) var(--seek-progress,0%),color-mix(in srgb,var(--text) 18%,transparent) 100%); }
+    .player-seek:disabled { opacity:.5; }
+    .player-seek::-webkit-slider-thumb { appearance:none; -webkit-appearance:none; width:16px; height:16px; border:3px solid var(--bg); border-radius:50%; background:#fff; box-shadow:0 0 0 2px #9a7bff; }
+    .player-seek::-moz-range-thumb { width:12px; height:12px; border:3px solid var(--bg); border-radius:50%; background:#fff; box-shadow:0 0 0 2px #9a7bff; }
+    .player-times { display:flex; justify-content:space-between; margin-top:7px; color:var(--muted); font-size:10px; font-variant-numeric:tabular-nums; }
+    #audioPlayer { display:none; }
+    @media (max-height:650px) { body.has-player { padding-bottom:calc(230px + env(safe-area-inset-bottom)); } }
     .track-info { flex:1; min-width:0; }
     .track-info strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
     .track-info small { display:block; margin-top:5px; color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -225,24 +222,25 @@
 
   <section class="player-dock" id="playerDock" hidden aria-label="Музыкальный плеер">
     <div class="player-head">
-      <img class="player-cover" id="playerTrackCover" alt="Обложка трека" hidden>
       <div class="player-meta">
         <span class="player-track-title" id="playerTrackTitle">Сейчас играет</span>
-        <span class="player-track-artist" id="playerTrackArtist"></span>
+        <span class="player-status" id="playerStatus">Готов к воспроизведению</span>
       </div>
       <button class="player-close" id="closePlayer" type="button" aria-label="Закрыть плеер">×</button>
     </div>
-    <div class="player-controls">
+    <div class="player-main">
+      <div class="player-cover-wrap" id="playerCoverWrap" aria-label="Обложка трека">
+        <span>♫</span>
+        <img class="player-cover" id="playerCover" alt="" hidden>
+      </div>
       <button class="player-toggle" id="playerToggle" type="button" aria-label="Воспроизвести">▶</button>
-      <div class="player-timeline">
-        <input id="playerSeek" type="range" min="0" max="1000" value="0" step="1" aria-label="Перемотка трека" disabled>
+      <div class="player-progress">
+        <input class="player-seek" id="playerSeek" type="range" min="0" max="1000" value="0" disabled aria-label="Перемотка">
         <div class="player-times"><span id="playerCurrentTime">0:00</span><span id="playerDuration">0:00</span></div>
-        <div class="player-status" id="playerStatus">Готов к воспроизведению</div>
       </div>
     </div>
-    <audio id="audioPlayer" preload="none" playsinline></audio>
+    <audio id="audioPlayer" preload="none"></audio>
   </section>
-
   <nav class="bottom-nav" aria-label="Основная навигация">
     <div class="nav-inner">
       <button class="nav-item active" data-screen="home"><span class="nav-icon">⌂</span><span>Главная</span></button>
@@ -279,22 +277,10 @@
       const state = { favorites: [], history: [], playlists: [], searchLimit: 10, nowPlaying: null };
       const playerDock = $('playerDock');
       const audioPlayer = $('audioPlayer');
-      const playerTrackCover = $('playerTrackCover');
       const playerSeek = $('playerSeek');
       const playerToggle = $('playerToggle');
-      const FALLBACK_COVER = 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#9b7bff"/><stop offset="1" stop-color="#263a58"/></linearGradient></defs><rect width="160" height="160" rx="24" fill="url(#g)"/><text x="80" y="110" text-anchor="middle" font-size="92" fill="white">♫</text></svg>'
-      );
+      const initData = tg && tg.initData ? tg.initData : '';
       let toastTimer;
-
-      function setCover(image, url) {
-        image.referrerPolicy = 'no-referrer';
-        image.src = url || FALLBACK_COVER;
-        image.onerror = () => {
-          image.onerror = null;
-          image.src = FALLBACK_COVER;
-        };
-      }
 
       function formatClock(seconds) {
         if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -302,54 +288,66 @@
         return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
       }
 
+      function setPlayerCover(url) {
+        const image = $('playerCover');
+        const fallback = $('playerCoverWrap').querySelector('span');
+        image.hidden = true;
+        image.removeAttribute('src');
+        fallback.hidden = false;
+        if (!url) return;
+        image.onload = () => { image.hidden = false; fallback.hidden = true; };
+        image.onerror = () => { image.hidden = true; fallback.hidden = false; };
+        image.src = url;
+      }
+
       function updatePlayerControls() {
+        playerToggle.textContent = audioPlayer.paused ? '▶' : 'Ⅱ';
+        playerToggle.setAttribute('aria-label', audioPlayer.paused ? 'Воспроизвести' : 'Пауза');
         const duration = Number.isFinite(audioPlayer.duration) ? audioPlayer.duration : 0;
         const current = Number.isFinite(audioPlayer.currentTime) ? audioPlayer.currentTime : 0;
         $('playerCurrentTime').textContent = formatClock(current);
         $('playerDuration').textContent = formatClock(duration);
         playerSeek.disabled = !duration;
-        if (duration && document.activeElement !== playerSeek) {
-          playerSeek.value = String(Math.round((current / duration) * 1000));
-        }
-        playerToggle.textContent = audioPlayer.paused ? '▶' : 'Ⅱ';
-        playerToggle.setAttribute('aria-label', audioPlayer.paused ? 'Воспроизвести' : 'Пауза');
+        playerSeek.value = duration ? String(Math.round((current / duration) * 1000)) : '0';
+        const percent = duration ? (current / duration) * 100 : 0;
+        playerSeek.style.setProperty('--seek-progress', `${percent}%`);
       }
 
       function streamUrl(track) {
-        // Для media-запросов браузер не даёт добавить X-Telegram-Init-Data,
-        // поэтому сервер получает подписанный initData как параметр auth.
         return `/api/stream?url=${encodeURIComponent(track.url)}&auth=${encodeURIComponent(initData)}`;
       }
 
       async function playTrack(track) {
-        if (!track || !track.url) {
-          notify('Не удалось открыть этот трек.');
-          return;
-        }
+        if (!track || !track.url) { notify('Не удалось открыть этот трек.'); return; }
+
         if (state.nowPlaying && state.nowPlaying.url === track.url) {
           if (audioPlayer.paused) {
-            try { await audioPlayer.play(); }
-            catch (error) { notify('Не удалось продолжить воспроизведение.'); }
+            try {
+              await audioPlayer.play();
+              $('playerStatus').textContent = 'Сейчас играет';
+            } catch (error) {
+              $('playerStatus').textContent = 'Не удалось запустить аудио';
+              notify('Не удалось запустить аудио. Попробуй ещё раз.');
+            }
           } else {
             audioPlayer.pause();
+            $('playerStatus').textContent = 'Пауза';
           }
           updatePlayerControls();
           return;
         }
 
         state.nowPlaying = track;
-        $('playerTrackTitle').textContent = track.title || 'Без названия';
-        $('playerTrackArtist').textContent = track.uploader || 'Неизвестен';
-        setCover(playerTrackCover, track.thumbnail);
+        $('playerTrackTitle').textContent = `${track.title || 'Без названия'} — ${track.uploader || 'Неизвестен'}`;
+        $('playerStatus').textContent = 'Подключаю аудио…';
+        setPlayerCover(track.thumbnail);
         playerDock.hidden = false;
         document.body.classList.add('has-player');
-        $('playerStatus').textContent = 'Подключаю аудио…';
-        playerSeek.value = '0';
-        playerSeek.disabled = true;
         audioPlayer.pause();
         audioPlayer.src = streamUrl(track);
         audioPlayer.load();
         updatePlayerControls();
+
         if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
         try {
           await audioPlayer.play();
@@ -357,7 +355,7 @@
         } catch (error) {
           console.error('Ошибка запуска аудио:', error);
           $('playerStatus').textContent = 'Нажми ▶, чтобы начать';
-          notify('Не удалось запустить трек. Проверь соединение и попробуй ещё раз.');
+          notify('Не удалось запустить аудио. Проверь соединение и попробуй ещё раз.');
         }
         updatePlayerControls();
       }
@@ -387,33 +385,31 @@
         }
         updatePlayerControls();
       });
+
       playerSeek.addEventListener('input', () => {
-        const duration = audioPlayer.duration;
-        if (Number.isFinite(duration) && duration > 0) {
-          const target = (Number(playerSeek.value) / 1000) * duration;
-          $('playerCurrentTime').textContent = formatClock(target);
-        }
+        const duration = Number.isFinite(audioPlayer.duration) ? audioPlayer.duration : 0;
+        if (duration) $('playerCurrentTime').textContent = formatClock((Number(playerSeek.value) / 1000) * duration);
       });
       playerSeek.addEventListener('change', () => {
-        const duration = audioPlayer.duration;
-        if (Number.isFinite(duration) && duration > 0) {
-          audioPlayer.currentTime = (Number(playerSeek.value) / 1000) * duration;
-        }
+        const duration = Number.isFinite(audioPlayer.duration) ? audioPlayer.duration : 0;
+        if (duration) audioPlayer.currentTime = (Number(playerSeek.value) / 1000) * duration;
       });
-      ['timeupdate', 'loadedmetadata', 'durationchange', 'play', 'pause', 'ended'].forEach(eventName => {
-        audioPlayer.addEventListener(eventName, updatePlayerControls);
-      });
-      audioPlayer.addEventListener('playing', () => { $('playerStatus').textContent = 'Сейчас играет'; });
-      audioPlayer.addEventListener('waiting', () => { $('playerStatus').textContent = 'Загружаю аудио…'; });
-      audioPlayer.addEventListener('error', () => {
-        if (state.nowPlaying) {
-          $('playerStatus').textContent = 'Ошибка воспроизведения';
-          notify('Не удалось загрузить аудио. Попробуй нажать ▶ ещё раз.');
-        }
+      audioPlayer.addEventListener('timeupdate', updatePlayerControls);
+      audioPlayer.addEventListener('loadedmetadata', updatePlayerControls);
+      audioPlayer.addEventListener('durationchange', updatePlayerControls);
+      audioPlayer.addEventListener('play', updatePlayerControls);
+      audioPlayer.addEventListener('pause', updatePlayerControls);
+      audioPlayer.addEventListener('ended', () => {
+        $('playerStatus').textContent = 'Трек завершён';
         updatePlayerControls();
       });
+      audioPlayer.addEventListener('error', () => {
+        if (!state.nowPlaying) return;
+        $('playerStatus').textContent = 'Ошибка загрузки аудио';
+        notify('Не удалось загрузить аудио этого трека.');
+      });
+
       $('closePlayer').addEventListener('click', closePlayer);
-      const initData = tg && tg.initData ? tg.initData : '';
       let resolveNameDialog = null;
       function askName(title, placeholder) {
         $('nameModalTitle').textContent = title;
@@ -492,10 +488,21 @@
       function createTrackCard(track, collectionName = '') {
         const card = document.createElement('article');
         card.className = 'track-card';
-        const cover = document.createElement('img');
-        cover.className = 'track-cover';
-        cover.alt = '';
-        setCover(cover, track.thumbnail);
+        const cover = document.createElement('div');
+        cover.className = 'track-cover-wrap';
+        cover.setAttribute('aria-label', 'Обложка трека');
+        const coverFallback = document.createElement('span');
+        coverFallback.textContent = '♫';
+        cover.append(coverFallback);
+        if (track.thumbnail) {
+          const coverImage = document.createElement('img');
+          coverImage.className = 'track-cover';
+          coverImage.alt = '';
+          coverImage.loading = 'lazy';
+          coverImage.src = track.thumbnail;
+          coverImage.onerror = () => coverImage.remove();
+          cover.append(coverImage);
+        }
         const info = document.createElement('div');
         info.className = 'track-info';
         const title = document.createElement('strong');
@@ -506,7 +513,6 @@
         actions.className = 'track-actions';
         const listen = document.createElement('button');
         listen.className = 'track-action primary';
-        listen.type = 'button';
         listen.textContent = '▶ Слушать';
         listen.addEventListener('click', () => playTrack(track));
         actions.append(listen);
@@ -595,7 +601,7 @@
             tracks.forEach(track => {
               const line = document.createElement('div');
               line.className = 'playlist-track';
-              line.textContent = `♫ ${track.title || 'Без названия'} — ${track.uploader || 'Неизвестен'}`;
+              line.textContent = `♫ ${track.title} — ${track.uploader}`;
               trackNames.append(line);
             });
             row.append(trackNames);
@@ -629,6 +635,9 @@
           data.tracks.forEach(track => list.append(createTrackCard(track)));
           results.append(heading, list);
           state.history = data.tracks.concat(state.history.filter(old => !data.tracks.some(t => t.url === old.url))).slice(0, 50);
+          api('/api/history', { method: 'POST', body: JSON.stringify({ tracks: data.tracks }) })
+            .then(result => { if (Array.isArray(result.history)) state.history = result.history; })
+            .catch(error => console.warn('Не удалось сохранить историю:', error));
         } catch (e) {
           results.replaceChildren();
           const empty = document.createElement('div');
