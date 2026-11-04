@@ -14,7 +14,7 @@ import json
 import random
 import subprocess
 import urllib.request
-import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 
 # --- ПОДКЛЮЧЕНИЕ FFMPEG / FFPROBE ДЛЯ ОБЛОЖЕК И СЖАТИЯ ---
@@ -25,11 +25,16 @@ static_ffmpeg.add_paths()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class DummyHandler(BaseHTTPRequestHandler):
-    def _send_bytes(self, status, body, content_type):
+    protocol_version = "HTTP/1.1"
+
+    def _send_bytes(self, status, body, content_type, extra_headers=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
+        if extra_headers:
+            for key, value in extra_headers.items():
+                self.send_header(key, value)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -81,15 +86,36 @@ class DummyHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Некорректный запрос"})
 
     def do_HEAD(self):
-        self.send_response(200)
+        parsed = urlparse(self.path)
+        if parsed.path in ("/", "/index.html"):
+            index_path = os.path.join(BASE_DIR, "index.html")
+            try:
+                size = os.path.getsize(index_path)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(size))
+                self.end_headers()
+            except OSError:
+                self.send_response(404)
+                self.end_headers()
+            return
+        if parsed.path in ("/healthz", "/health"):
+            self.send_response(200)
+            self.end_headers()
+            return
+        self.send_response(404)
         self.end_headers()
 
     def log_message(self, format, *args):
         return
 
+
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
     ThreadingHTTPServer(("0.0.0.0", port), DummyHandler).serve_forever()
+
+
+threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- БОТ И БЭКАП ГРУППА ---
 API_TOKEN = os.environ.get("BOT_TOKEN")
@@ -122,10 +148,6 @@ tracks_cache = {}
 search_results_cache = {}
 search_cache_lock = threading.Lock()
 SEARCH_CACHE_TTL = 180
-# Кэш прямых аудиоссылок SoundCloud: ссылки временные, поэтому храним недолго.
-miniapp_stream_cache = {}
-miniapp_stream_cache_lock = threading.Lock()
-MINIAPP_STREAM_CACHE_TTL = 10 * 60
 inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
@@ -139,8 +161,6 @@ backup_msg_id = None
 data_lock = threading.Lock()
 users_offset = 0  # Поправка для ручной корректировки цифры в статистике
 
-threading.Thread(target=run_dummy_server, daemon=True).start()
-
 # --- ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ---
 def check_user_subscription(user_id):
     try:
@@ -153,15 +173,14 @@ def check_user_subscription(user_id):
         return False
 
 def send_subscription_prompt(chat_id):
-    # Ссылку оставляем в тексте, чтобы не получать BUTTON_URL_INVALID из URL-кнопки.
     markup = InlineKeyboardMarkup()
+    markup.row(InlineKeyboardButton("📢 Подписаться на группу", url="https://t.me/+8JYfdTy2YhE0NDJi"))
     markup.row(InlineKeyboardButton("🔄 Я подписался", callback_data="check_sub"))
     bot.send_message(
         chat_id,
-        "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, вступи в нашу группу: https://t.me/+8JYfdTy2YhE0NDJi\n\nПосле вступления нажми кнопку ниже:",
+        "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: https://t.me/+8JYfdTy2YhE0NDJi\n\nПосле подписки нажмите кнопку ниже:",
         reply_markup=markup,
-        parse_mode="Markdown",
-        disable_web_page_preview=True
+        parse_mode="Markdown"
     )
 # --- ПОДГОТОВКА ОБЛОЖКИ ДЛЯ TELEGRAM ---
 def prepare_telegram_thumbnail(image_filename):
@@ -389,9 +408,6 @@ def send_welcome(message):
     )
     if message.chat.type == "private" and not WEB_APP_URL:
         text += "\n\n⚠️ Mini App пока не настроен. Проверь WEB_APP_URL в переменных Render."
-
-    # Сначала обязательно отправляем обычное сообщение без кнопок:
-    # даже если Telegram отклонит Web App кнопку, /start всё равно ответит.
     bot.send_message(chat_id, text, disable_web_page_preview=True)
 
     if message.chat.type == "private" and WEB_APP_URL:
@@ -400,17 +416,7 @@ def send_welcome(message):
             text="🎧 Открыть музыкальное приложение",
             web_app=telebot.types.WebAppInfo(url=WEB_APP_URL)
         ))
-        try:
-            bot.send_message(chat_id, "Музыкальное приложение:", reply_markup=markup)
-        except ApiTelegramException as e:
-            print(f"Telegram отклонил кнопку Mini App. Проверь WEB_APP_URL='{WEB_APP_URL}': {e}")
-            bot.send_message(
-                chat_id,
-                "⚠️ Не удалось создать кнопку приложения. Проверь WEB_APP_URL в Render."
-            )
-        except Exception as e:
-            print(f"Ошибка отправки кнопки Mini App: {e}")
-            bot.send_message(chat_id, "⚠️ Не удалось отправить кнопку приложения. Проверь логи Render.")
+        bot.send_message(chat_id, "Музыкальное приложение:", reply_markup=markup)
 
 # ОБРАБОТЧИК КНОПКИ ПРОВЕРКИ ПОДПИСКИ
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
@@ -1098,15 +1104,12 @@ def handle_download_callback(call):
 
     threading.Thread(target=worker, daemon=True).start()
 
-# --- API MINI APP ---
-def validate_miniapp_request(handler, raw_data=None):
-    """Проверяет подпись initData Telegram и возвращает объект пользователя.
 
-    Для обычных fetch-запросов initData приходит в заголовке. Для HTML audio
-    браузер не позволяет добавить свой заголовок к media-запросу, поэтому
-    поток передаёт те же подписанные Telegram initData в параметре auth.
-    """
-    raw = raw_data if raw_data is not None else handler.headers.get("X-Telegram-Init-Data", "")
+# --- API MINI APP: AUTH, SEARCH, FAVORITES, HISTORY, PLAYLISTS, STREAM ---
+
+def validate_miniapp_request(handler, raw_init_data=None):
+    """Проверяет подпись initData Telegram. Для audio src данные передаются в query auth."""
+    raw = raw_init_data if raw_init_data is not None else handler.headers.get("X-Telegram-Init-Data", "")
     if not raw or len(raw) > 8192:
         return None
     try:
@@ -1147,6 +1150,26 @@ def get_user_settings(user_id):
     return settings
 
 
+def best_soundcloud_thumbnail(info):
+    if not isinstance(info, dict):
+        return ""
+    candidates = []
+    for key in ("thumbnail", "artwork_url"):
+        if info.get(key):
+            candidates.append(info[key])
+    for item in (info.get("thumbnails") or []):
+        if isinstance(item, dict) and item.get("url"):
+            candidates.append(item["url"])
+    for candidate in reversed(candidates):
+        url = str(candidate).strip()
+        parsed = urlparse(url)
+        if parsed.scheme == "https" and parsed.hostname and ("sndcdn.com" in parsed.hostname or "soundcloud.com" in parsed.hostname):
+            # SoundCloud's "-large" artwork is often the 100x100 variant.
+            url = url.replace("-large.", "-t500x500.")
+            return url[:1000]
+    return ""
+
+
 def normalize_miniapp_track(raw):
     if not isinstance(raw, dict):
         return None
@@ -1155,21 +1178,71 @@ def normalize_miniapp_track(raw):
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or not (host == "soundcloud.com" or host.endswith(".soundcloud.com")):
         return None
-    title = str(raw.get("title") or "Без названия")[:180]
-    uploader = str(raw.get("uploader") or "Неизвестен")[:120]
-    thumbnail = str(raw.get("thumbnail") or "")[:1000]
-    if thumbnail and urlparse(thumbnail).scheme != "https":
+    thumbnail = str(raw.get("thumbnail") or "").strip()[:1000]
+    thumb_parsed = urlparse(thumbnail)
+    if thumbnail and not (thumb_parsed.scheme == "https" and thumb_parsed.hostname):
         thumbnail = ""
-    duration = raw.get("duration")
     try:
-        duration = int(duration) if duration is not None else None
+        duration = int(raw.get("duration")) if raw.get("duration") is not None else None
     except (TypeError, ValueError):
         duration = None
-    return {"url": track_url, "title": title, "uploader": uploader, "thumbnail": thumbnail, "duration": duration}
+    return {
+        "url": track_url,
+        "title": str(raw.get("title") or "Без названия")[:180],
+        "uploader": str(raw.get("uploader") or "Неизвестен")[:120],
+        "thumbnail": thumbnail,
+        "duration": duration
+    }
+
+
+def resolve_soundcloud_metadata(track_url):
+    options = {
+        "quiet": True, "no_warnings": True, "skip_download": True,
+        "noplaylist": True, "socket_timeout": 12, "retries": 1,
+        "extractor_retries": 1
+    }
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(track_url, download=False)
+    return info or {}
+
+
+def fill_missing_track_covers(tracks, max_items=12):
+    """Подтягивает artwork для старых сохранённых треков, у которых раньше не было thumbnail."""
+    missing = [i for i, track in enumerate(tracks)
+               if isinstance(track, dict) and not track.get("thumbnail") and track.get("url")][:max_items]
+    if not missing:
+        return False
+    changed = False
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        jobs = {pool.submit(resolve_soundcloud_metadata, tracks[i]["url"]): i for i in missing}
+        for job in as_completed(jobs):
+            index = jobs[job]
+            try:
+                info = job.result()
+                cover = best_soundcloud_thumbnail(info)
+                if cover:
+                    tracks[index]["thumbnail"] = cover
+                    changed = True
+                if info.get("title") and tracks[index].get("title") in ("", "Без названия"):
+                    tracks[index]["title"] = str(info["title"])[:180]
+                    changed = True
+                if info.get("uploader") and tracks[index].get("uploader") in ("", "Неизвестен"):
+                    tracks[index]["uploader"] = str(info["uploader"])[:120]
+                    changed = True
+            except Exception as e:
+                print(f"Не удалось обновить обложку трека: {e}")
+    return changed
 
 
 def miniapp_is_subscribed(user_id):
     return check_user_subscription(user_id)
+
+
+def add_to_user_history(settings, track):
+    history = settings.setdefault("history", [])
+    history[:] = [item for item in history if item.get("url") != track["url"]]
+    history.insert(0, track)
+    del history[50:]
 
 
 def handle_miniapp_get_data(handler):
@@ -1177,6 +1250,11 @@ def handle_miniapp_get_data(handler):
     if not user:
         return api_json(handler, 401, {"error": "Открой приложение через Telegram, чтобы авторизоваться."})
     settings = get_user_settings(user["id"])
+    changed = False
+    changed |= fill_missing_track_covers(settings.get("favorites", []), max_items=10)
+    changed |= fill_missing_track_covers(settings.get("history", []), max_items=10)
+    if changed:
+        save_all_data()
     api_json(handler, 200, {
         "user": {"id": user["id"], "first_name": user.get("first_name", "Музыка")},
         "search_limit": int(settings.get("search_limit", 10)),
@@ -1186,50 +1264,16 @@ def handle_miniapp_get_data(handler):
     })
 
 
-def best_soundcloud_thumbnail(item):
-    """Возвращает наиболее крупную обложку из данных yt-dlp SoundCloud."""
-    if not isinstance(item, dict):
-        return ""
-    direct = item.get("thumbnail") or item.get("artwork_url")
-    if direct:
-        return str(direct)
-    thumbnails = item.get("thumbnails") or []
-    candidates = [entry for entry in thumbnails if isinstance(entry, dict) and entry.get("url")]
-    if candidates:
-        def image_size(entry):
-            try:
-                return int(entry.get("width") or 0) * int(entry.get("height") or 0)
-            except (TypeError, ValueError):
-                return 0
-        return str(max(candidates, key=image_size).get("url") or "")
-    user = item.get("user")
-    if isinstance(user, dict):
-        return str(user.get("avatar_url") or "")
-    return ""
-
-
-def resolve_soundcloud_metadata(track_url):
-    """Подтягивает полные метаданные одного трека, когда flat-поиск без обложки."""
-    try:
-        opts = {
-            "quiet": True, "no_warnings": True, "skip_download": True,
-            "socket_timeout": 10, "retries": 1, "extractor_retries": 1
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(track_url, download=False)
-        if isinstance(info, dict):
-            return info
-    except Exception as exc:
-        print(f"Не удалось получить метаданные/обложку SoundCloud: {exc}")
-    return {}
-
-
 def handle_miniapp_search(handler, query_params):
     user = validate_miniapp_request(handler)
     if not user:
         return api_json(handler, 401, {"error": "Открой приложение через Telegram."})
     if not miniapp_is_subscribed(user["id"]):
-        return api_json(handler, 403, {"error": "Сначала вступи в нашу группу.", "subscription_required": True, "invite_url": "https://t.me/+8JYfdTy2YhE0NDJi"})
+        return api_json(handler, 403, {
+            "error": "Сначала вступи в нашу группу.",
+            "subscription_required": True,
+            "invite_url": "https://t.me/+8JYfdTy2YhE0NDJi"
+        })
     query = str((query_params.get("q") or [""])[0]).strip()[:100]
     if not query:
         return api_json(handler, 400, {"error": "Введи название трека или исполнителя."})
@@ -1245,208 +1289,84 @@ def handle_miniapp_search(handler, query_params):
             result = ydl.extract_info(f"scsearch{max(20, limit * 2)}:{query}", download=False)
         entries = (result or {}).get("entries", []) or []
         tracks = []
-        coverless = []
         for item in entries:
             if not item:
                 continue
-            url = item.get("webpage_url") or item.get("url")
-            if not url or not str(url).startswith("https://"):
+            track_url = item.get("webpage_url") or item.get("original_url") or item.get("url")
+            if not track_url:
                 continue
-            thumbnail = best_soundcloud_thumbnail(item)
             normalized = normalize_miniapp_track({
-                "url": url,
+                "url": track_url,
                 "title": item.get("title"),
                 "uploader": item.get("uploader") or item.get("artist"),
-                "thumbnail": thumbnail,
+                "thumbnail": best_soundcloud_thumbnail(item),
                 "duration": item.get("duration")
             })
             if normalized:
                 tracks.append(normalized)
-                if not normalized.get("thumbnail"):
-                    coverless.append(len(tracks) - 1)
             if len(tracks) >= limit:
                 break
 
-        # extract_flat иногда не включает artwork_url. Догружаем обложки
-        # только для первых нескольких результатов, не замедляя весь список.
-        missing_indices = coverless[:min(8, len(coverless))]
-        if missing_indices:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                jobs = {pool.submit(resolve_soundcloud_metadata, tracks[index]["url"]): index for index in missing_indices}
+        # В плоских результатах SoundCloud часто не отдаёт artwork_url.
+        missing = [i for i, track in enumerate(tracks) if not track.get("thumbnail")][:min(8, len(tracks))]
+        if missing:
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                jobs = {pool.submit(resolve_soundcloud_metadata, tracks[i]["url"]): i for i in missing}
                 for job in as_completed(jobs):
-                    track_index = jobs[job]
-                    metadata = job.result() or {}
-                    cover = best_soundcloud_thumbnail(metadata)
-                    if cover:
-                        tracks[track_index]["thumbnail"] = cover[:1000]
-                    if metadata.get("duration") and not tracks[track_index].get("duration"):
-                        try:
-                            tracks[track_index]["duration"] = int(metadata["duration"])
-                        except (TypeError, ValueError):
-                            pass
+                    idx = jobs[job]
+                    try:
+                        metadata = job.result()
+                        cover = best_soundcloud_thumbnail(metadata)
+                        if cover:
+                            tracks[idx]["thumbnail"] = cover
+                        if metadata.get("duration") and not tracks[idx].get("duration"):
+                            tracks[idx]["duration"] = int(metadata["duration"])
+                    except Exception as e:
+                        print(f"Не удалось получить метаданные трека: {e}")
         api_json(handler, 200, {"tracks": tracks, "query": query})
     except Exception as e:
         print(f"Ошибка поиска Mini App: {e}")
         api_json(handler, 500, {"error": "Не удалось выполнить поиск. Попробуй ещё раз."})
 
 
-
-def get_miniapp_stream_info(track_url):
-    """Получает прямую аудиоссылку SoundCloud и кэширует её на 10 минут."""
-    now = time.time()
-    with miniapp_stream_cache_lock:
-        cached = miniapp_stream_cache.get(track_url)
-        if cached and cached[0] > now:
-            return cached[1]
-        if cached:
-            miniapp_stream_cache.pop(track_url, None)
-
-    options = {
-        "format": "bestaudio[protocol^=http][ext=mp3]/bestaudio[protocol^=http][ext=m4a]/bestaudio[protocol^=http]/bestaudio",
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
-        "socket_timeout": 20,
-        "retries": 1,
-        "extractor_retries": 1
-    }
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(track_url, download=False)
-
-    if not isinstance(info, dict):
-        raise ValueError("SoundCloud не вернул данные аудиопотока")
-
-    direct_url = info.get("url")
-    selected_format = info
-    if not direct_url:
-        formats = info.get("formats") or []
-        audio_formats = [item for item in formats if item.get("url") and item.get("vcodec") == "none"]
-        if not audio_formats:
-            audio_formats = [item for item in formats if item.get("url")]
-        if audio_formats:
-            selected_format = audio_formats[-1]
-            direct_url = selected_format.get("url")
-
-    if not direct_url:
-        raise ValueError("Не удалось получить прямую ссылку на аудио")
-
-    parsed = urlparse(direct_url)
-    host = (parsed.hostname or "").lower()
-    allowed = host == "soundcloud.com" or host.endswith(".soundcloud.com") or host == "sndcdn.com" or host.endswith(".sndcdn.com")
-    if parsed.scheme != "https" or not allowed:
-        raise ValueError("SoundCloud вернул неподдерживаемый адрес аудио")
-
-    headers = dict(info.get("http_headers") or {})
-    headers.update(selected_format.get("http_headers") or {})
-    headers.setdefault("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36")
-    headers.setdefault("Referer", "https://soundcloud.com/")
-    headers.setdefault("Origin", "https://soundcloud.com")
-    headers.pop("Accept-Encoding", None)
-
-    ext = (selected_format.get("ext") or info.get("ext") or "mp3").lower()
-    content_types = {
-        "mp3": "audio/mpeg", "m4a": "audio/mp4", "mp4": "audio/mp4",
-        "aac": "audio/aac", "ogg": "audio/ogg", "opus": "audio/ogg",
-        "webm": "audio/webm", "wav": "audio/wav", "flac": "audio/flac"
-    }
-    result = {
-        "url": direct_url,
-        "headers": headers,
-        "content_type": content_types.get(ext, "audio/mpeg")
-    }
-    with miniapp_stream_cache_lock:
-        miniapp_stream_cache[track_url] = (now + MINIAPP_STREAM_CACHE_TTL, result)
-        if len(miniapp_stream_cache) > 200:
-            expired = [key for key, value in miniapp_stream_cache.items() if value[0] <= now]
-            for key in expired:
-                miniapp_stream_cache.pop(key, None)
-    return result
-
-
 def handle_miniapp_stream(handler, query_params):
-    """Проксирует аудио через Render, чтобы HTML5-плеер не уходил в SoundCloud.
-
-    Поддерживает HTTP Range: это необходимо для перемотки в аудиоплеере.
-    """
-    raw_auth = str((query_params.get("auth") or [""])[0])
-    user = validate_miniapp_request(handler, raw_auth)
+    """Возвращает редирект на прямой аудиопоток SoundCloud. Браузер сам поддерживает Range/перемотку."""
+    auth_data = (query_params.get("auth") or [""])[0]
+    user = validate_miniapp_request(handler, auth_data)
     if not user:
-        return api_json(handler, 401, {"error": "Сессия Telegram недействительна. Перезапусти приложение."})
+        return api_json(handler, 401, {"error": "Авторизация истекла. Закрой и снова открой приложение."})
     if not miniapp_is_subscribed(user["id"]):
         return api_json(handler, 403, {"error": "Сначала вступи в нашу группу."})
-
-    raw_track_url = str((query_params.get("url") or [""])[0]).strip()
-    track = normalize_miniapp_track({"url": raw_track_url})
-    if not track:
+    track_url = (query_params.get("url") or [""])[0]
+    normalized = normalize_miniapp_track({"url": track_url})
+    if not normalized:
         return api_json(handler, 400, {"error": "Некорректная ссылка на трек."})
-
-    upstream = None
     try:
-        stream = get_miniapp_stream_info(track["url"])
-        request_headers = dict(stream["headers"])
-        range_header = handler.headers.get("Range")
-        if range_header:
-            request_headers["Range"] = range_header
-        request_headers["Accept"] = "*/*"
-        request_headers["Accept-Encoding"] = "identity"
-        request = urllib.request.Request(stream["url"], headers=request_headers, method="GET")
-        upstream = urllib.request.urlopen(request, timeout=30)
-
-        status = getattr(upstream, "status", 200)
-        handler.send_response(status)
-        upstream_type = upstream.headers.get("Content-Type", "")
-        if not upstream_type.lower().startswith("audio/"):
-            upstream_type = stream["content_type"]
-        handler.send_header("Content-Type", upstream_type)
-        handler.send_header("Accept-Ranges", upstream.headers.get("Accept-Ranges", "bytes"))
-        handler.send_header("Cache-Control", "private, max-age=60")
-        handler.send_header("Content-Disposition", "inline")
-        handler.send_header("X-Content-Type-Options", "nosniff")
-        for header_name in ("Content-Length", "Content-Range", "Last-Modified", "ETag"):
-            value = upstream.headers.get(header_name)
-            if value:
-                handler.send_header(header_name, value)
+        options = {
+            "format": "bestaudio[protocol^=http]/bestaudio/best",
+            "quiet": True, "no_warnings": True, "noplaylist": True,
+            "skip_download": True, "socket_timeout": 20,
+            "retries": 1, "extractor_retries": 1
+        }
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(track_url, download=False)
+        direct_url = info.get("url")
+        if not direct_url:
+            formats = info.get("requested_formats") or info.get("formats") or []
+            audio_formats = [f for f in formats if f.get("url") and f.get("acodec") not in (None, "none")]
+            if audio_formats:
+                audio_formats.sort(key=lambda f: (f.get("vcodec") == "none", f.get("abr") or 0), reverse=True)
+                direct_url = audio_formats[0]["url"]
+        if not direct_url or urlparse(direct_url).scheme not in ("http", "https"):
+            raise RuntimeError("SoundCloud не вернул прямую ссылку на аудио")
+        handler.send_response(302)
+        handler.send_header("Location", direct_url)
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Length", "0")
         handler.end_headers()
-
-        while True:
-            chunk = upstream.read(64 * 1024)
-            if not chunk:
-                break
-            handler.wfile.write(chunk)
-    except urllib.error.HTTPError as exc:
-        try:
-            handler.send_response(exc.code)
-            for header_name in ("Content-Range", "Accept-Ranges"):
-                value = exc.headers.get(header_name) if exc.headers else None
-                if value:
-                    handler.send_header(header_name, value)
-            handler.send_header("Content-Length", "0")
-            handler.end_headers()
-        except Exception:
-            pass
-    except (BrokenPipeError, ConnectionResetError):
-        pass
-    except Exception as exc:
-        print(f"Ошибка потокового аудио Mini App: {exc}")
-        try:
-            if not handler.wfile.closed:
-                api_json(handler, 502, {"error": "Не удалось запустить аудио. Попробуй ещё раз."})
-        except Exception:
-            pass
-    finally:
-        if upstream is not None:
-            try:
-                upstream.close()
-            except Exception:
-                pass
-
-def add_to_user_history(settings, track):
-    history = settings.setdefault("history", [])
-    history[:] = [item for item in history if item.get("url") != track["url"]]
-    history.insert(0, track)
-    del history[50:]
+    except Exception as e:
+        print(f"Ошибка получения аудиопотока: {e}")
+        api_json(handler, 502, {"error": "Не удалось получить аудио для этого трека."})
 
 
 def download_track_for_miniapp(user_id, track):
@@ -1540,6 +1460,17 @@ def handle_miniapp_post(handler, path, payload):
         save_all_data()
         return api_json(handler, 200, {"ok": True, "saved": saved, "favorites": favorites})
 
+    if path == "/api/history":
+        tracks = payload.get("tracks") or []
+        if not isinstance(tracks, list):
+            return api_json(handler, 400, {"error": "Некорректный список треков."})
+        for raw in reversed(tracks[:25]):
+            track = normalize_miniapp_track(raw)
+            if track:
+                add_to_user_history(settings, track)
+        save_all_data()
+        return api_json(handler, 200, {"ok": True, "history": settings["history"]})
+
     if path == "/api/playlist":
         action = payload.get("action")
         playlists = settings.setdefault("playlists", [])
@@ -1549,8 +1480,7 @@ def handle_miniapp_post(handler, path, payload):
                 return api_json(handler, 400, {"error": "Введи название плейлиста."})
             if any(p.get("name", "").casefold() == name.casefold() for p in playlists):
                 return api_json(handler, 409, {"error": "Такой плейлист уже существует."})
-            playlist = {"id": str(int(time.time() * 1000)), "name": name, "tracks": []}
-            playlists.insert(0, playlist)
+            playlists.insert(0, {"id": str(int(time.time() * 1000)), "name": name, "tracks": []})
         elif action == "delete":
             playlist_id = str(payload.get("playlist_id", ""))
             settings["playlists"] = [p for p in playlists if str(p.get("id")) != playlist_id]
@@ -1575,16 +1505,24 @@ def handle_miniapp_post(handler, path, payload):
 
     if path == "/api/download":
         if not miniapp_is_subscribed(user_id):
-            return api_json(handler, 403, {"error": "Сначала вступи в нашу группу.", "subscription_required": True, "invite_url": "https://t.me/+8JYfdTy2YhE0NDJi"})
+            return api_json(handler, 403, {
+                "error": "Сначала вступи в нашу группу.",
+                "subscription_required": True,
+                "invite_url": "https://t.me/+8JYfdTy2YhE0NDJi"
+            })
         track = normalize_miniapp_track(payload.get("track"))
         if not track:
             return api_json(handler, 400, {"error": "Некорректный трек."})
         add_to_user_history(settings, track)
         save_all_data()
         threading.Thread(target=download_track_for_miniapp, args=(user_id, track), daemon=True).start()
-        return api_json(handler, 202, {"ok": True, "message": "Отправляю трек в Telegram. Он появится в чате с ботом."})
+        return api_json(handler, 202, {
+            "ok": True,
+            "message": "Отправляю трек в Telegram. Он появится в чате с ботом."
+        })
 
     return api_json(handler, 404, {"error": "Неизвестный API-адрес."})
+
 
 
 # --- ОБРАБОТКА ДАННЫХ ИЗ WEB APP ---
