@@ -5,7 +5,10 @@ from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPri
 from telebot.apihelper import ApiTelegramException
 import yt_dlp
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs, parse_qsl
+import hmac
+import hashlib
 import time
 import json
 import random
@@ -17,11 +20,61 @@ from PIL import Image
 import static_ffmpeg
 static_ffmpeg.add_paths()
 
-# --- ВЕБ-СЕРВЕР (Для Render с поддержкой HEAD) ---
+# --- ВЕБ-СЕРВЕР: Mini App + API + Render health check ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 class DummyHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
+    def _send_bytes(self, status, body, content_type):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+
+    def _send_json(self, status, payload):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._send_bytes(status, body, "application/json; charset=utf-8")
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path in ("/", "/index.html"):
+            index_path = os.path.join(BASE_DIR, "index.html")
+            try:
+                with open(index_path, "rb") as f:
+                    self._send_bytes(200, f.read(), "text/html; charset=utf-8")
+            except OSError:
+                self._send_json(404, {"error": "index.html не найден"})
+            return
+        if parsed.path in ("/healthz", "/health"):
+            self._send_json(200, {"ok": True})
+            return
+        if parsed.path == "/api/data":
+            handle_miniapp_get_data(self)
+            return
+        if parsed.path == "/api/search":
+            handle_miniapp_search(self, parse_qs(parsed.query))
+            return
+        self._send_json(404, {"error": "Не найдено"})
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if not parsed.path.startswith("/api/"):
+            self._send_json(404, {"error": "Не найдено"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 256 * 1024:
+                self._send_json(400, {"error": "Некорректный размер запроса"})
+                return
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("Ожидался JSON-объект")
+            handle_miniapp_post(self, parsed.path, payload)
+        except Exception as e:
+            print(f"Ошибка API Mini App: {e}")
+            self._send_json(400, {"error": "Некорректный запрос"})
 
     def do_HEAD(self):
         self.send_response(200)
@@ -32,15 +85,15 @@ class DummyHandler(BaseHTTPRequestHandler):
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 10000))
-    HTTPServer(('0.0.0.0', port), DummyHandler).serve_forever()
-
-threading.Thread(target=run_dummy_server, daemon=True).start()
+    ThreadingHTTPServer(("0.0.0.0", port), DummyHandler).serve_forever()
 
 # --- БОТ И БЭКАП ГРУППА ---
 API_TOKEN = os.environ.get("BOT_TOKEN")
 if not API_TOKEN:
     print("❌ Ошибка: Не задана переменная окружения BOT_TOKEN!")
     sys.exit(1)
+
+WEB_APP_URL = os.environ.get("WEB_APP_URL", "").strip().rstrip("/")
 
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", -1004445455425))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 5378591975))
@@ -65,6 +118,8 @@ user_settings = {}  # Хранение настроек пользователе
 backup_msg_id = None
 data_lock = threading.Lock()
 users_offset = 0  # Поправка для ручной корректировки цифры в статистике
+
+threading.Thread(target=run_dummy_server, daemon=True).start()
 
 # --- ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ---
 def check_user_subscription(user_id):
@@ -305,12 +360,21 @@ def register_user(chat_id):
 def send_welcome(message):
     chat_id = message.chat.id
     register_user(chat_id)
-    bot.reply_to(
-        message,
+    text = (
         "👋 Привет! Напиши название песни, и я попробую её найти. 🎵\n\n"
-        "💬 Наш канал: https://t.me/+8JYfdTy2YhE0NDJi\n\n"
+        "💬 Наша группа: https://t.me/+8JYfdTy2YhE0NDJi\n\n"
         "💖 Поддержка разработчика: /donate"
     )
+    markup = None
+    if WEB_APP_URL and message.chat.type == "private":
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(
+            text="🎧 Открыть музыкальное приложение",
+            web_app=telebot.types.WebAppInfo(url=WEB_APP_URL)
+        ))
+    elif message.chat.type == "private":
+        text += "\n\n⚠️ Mini App пока не настроен: добавь WEB_APP_URL в переменные Render."
+    bot.reply_to(message, text, reply_markup=markup)
 
 # ОБРАБОТЧИК КНОПКИ ПРОВЕРКИ ПОДПИСКИ
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
@@ -353,28 +417,12 @@ def set_users_command(message):
         bot.reply_to(message, "❌ У вас нет прав для этой команды.")
 
 # --- НАСТРОЙКИ И ПОЛЗУНОК ---
-def get_user_settings(chat_id):
-    chat_id_str = str(chat_id)
-    settings = user_settings.get(chat_id_str)
-    if not isinstance(settings, dict):
-        settings = {}
-        user_settings[chat_id_str] = settings
-
-    settings.setdefault("search_limit", 10)
-    settings.setdefault("show_cover", True)
-    return settings
-
-
-def get_audio_cache_key(track_url, show_cover):
-    # Разные ключи не дают отправить сохранённый трек с обложкой,
-    # когда пользователь отключил обложки.
-    return track_url if show_cover else f"no_cover::{track_url}"
-
-
 def get_settings_keyboard(chat_id):
-    settings = get_user_settings(chat_id)
-    limit = settings.get("search_limit", 10)
-    show_cover = settings.get("show_cover", True)
+    chat_id_str = str(chat_id)
+    if chat_id_str not in user_settings:
+        user_settings[chat_id_str] = {"search_limit": 10}
+        
+    limit = user_settings[chat_id_str].get("search_limit", 10)
     markup = InlineKeyboardMarkup()
     
     filled_blocks = limit // 5
@@ -386,8 +434,6 @@ def get_settings_keyboard(chat_id):
         InlineKeyboardButton("➕", callback_data="setslider_plus")
     )
     markup.row(InlineKeyboardButton(f"Шкала: {slider_text}", callback_data="ignore"))
-    cover_status = "Вкл ✅" if show_cover else "Выкл ❌"
-    markup.row(InlineKeyboardButton(f"🖼 Обложка: {cover_status}", callback_data="toggle_cover"))
     
     return markup
 
@@ -404,8 +450,11 @@ def settings_command(message):
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("setslider_"))
 def handle_slider_callback(call):
-    settings = get_user_settings(call.message.chat.id)
-    current_limit = settings.get("search_limit", 10)
+    chat_id_str = str(call.message.chat.id)
+    if chat_id_str not in user_settings:
+        user_settings[chat_id_str] = {"search_limit": 10}
+        
+    current_limit = user_settings[chat_id_str].get("search_limit", 10)
     action = call.data.split("_")[1]
     
     if action == "minus":
@@ -413,8 +462,8 @@ def handle_slider_callback(call):
     elif action == "plus":
         current_limit = min(25, current_limit + 5)
         
-    if current_limit != settings["search_limit"]:
-        settings["search_limit"] = current_limit
+    if current_limit != user_settings[chat_id_str]["search_limit"]:
+        user_settings[chat_id_str]["search_limit"] = current_limit
         save_all_data()
         bot.edit_message_reply_markup(
             chat_id=call.message.chat.id, 
@@ -422,19 +471,6 @@ def handle_slider_callback(call):
             reply_markup=get_settings_keyboard(call.message.chat.id)
         )
     bot.answer_callback_query(call.id)
-
-@bot.callback_query_handler(func=lambda call: call.data == "toggle_cover")
-def toggle_cover_setting(call):
-    settings = get_user_settings(call.message.chat.id)
-    settings["show_cover"] = not settings.get("show_cover", True)
-    save_all_data()
-    bot.edit_message_reply_markup(
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        reply_markup=get_settings_keyboard(call.message.chat.id)
-    )
-    status = "включена" if settings["show_cover"] else "выключена"
-    bot.answer_callback_query(call.id, f"Обложка {status}")
 
 @bot.callback_query_handler(func=lambda call: call.data == "ignore")
 def handle_ignore(call):
@@ -515,14 +551,12 @@ def handle_chosen_inline(chosen):
         title = track.get('title', 'Трек')
         uploader = track.get('uploader', 'Музыка')
         inline_msg_id = chosen.inline_message_id
-        show_cover = get_user_settings(user_id).get("show_cover", True)
-        cache_key = get_audio_cache_key(track_url, show_cover)
         
-        if cache_key in audio_cache and not audio_cache[cache_key].startswith("http"):
+        if track_url in audio_cache and not audio_cache[track_url].startswith("http"):
             try:
                 bot.edit_message_media(
                     media=InputMediaAudio(
-                        media=audio_cache[cache_key],
+                        media=audio_cache[track_url],
                         title=title,
                         performer=uploader
                     ),
@@ -542,21 +576,19 @@ def handle_chosen_inline(chosen):
             ydl_opts = {
                 "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
-                "writethumbnail": show_cover,
+                "writethumbnail": True,
                 "quiet": True,
                 "noprogress": True,
-                "socket_timeout": 15
-            }
-            if show_cover:
-                ydl_opts["postprocessors"] = [
+                "socket_timeout": 15,
+                "postprocessors": [
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
                     {"key": "EmbedThumbnail"}
                 ]
+            }
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(track_url, download=True)
                 audio_filename = ydl.prepare_filename(info)
-                if show_cover:
-                    original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
+                original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
 
             audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
 
@@ -573,7 +605,7 @@ def handle_chosen_inline(chosen):
                 if thumb_file:
                     thumb_file.close()
                 file_id = backup_msg.audio.file_id
-                audio_cache[cache_key] = file_id
+                audio_cache[track_url] = file_id
 
             bot.edit_message_media(
                 media=InputMediaAudio(
@@ -948,12 +980,10 @@ def handle_download_callback(call):
         audio_filename = None
         thumbnail_filename = None
         original_thumb = None
-        show_cover = get_user_settings(chat_id).get("show_cover", True)
-        cache_key = get_audio_cache_key(track_url, show_cover)
 
         try:
-            if cache_key in audio_cache and not audio_cache[cache_key].startswith("http"):
-                file_id = audio_cache[cache_key]
+            if track_url in audio_cache and not audio_cache[track_url].startswith("http"):
+                file_id = audio_cache[track_url]
                 bot.send_audio(chat_id, file_id, title=title, performer=uploader)
                 
                 markup = InlineKeyboardMarkup()
@@ -973,22 +1003,20 @@ def handle_download_callback(call):
             ydl_opts = {
                 "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
                 "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
-                "writethumbnail": show_cover,
+                "writethumbnail": True,
                 "quiet": True,
                 "noprogress": True,
-                "socket_timeout": 15
-            }
-            if show_cover:
-                ydl_opts["postprocessors"] = [
+                "socket_timeout": 15,
+                "postprocessors": [
                     {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
                     {"key": "EmbedThumbnail"}
                 ]
+            }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(track_url, download=True)
                 audio_filename = ydl.prepare_filename(info)
-                if show_cover:
-                    original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
+                original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
 
             audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
 
@@ -1005,7 +1033,7 @@ def handle_download_callback(call):
                 if thumb_file:
                     thumb_file.close()
                 file_id = sent_msg.audio.file_id
-                audio_cache[cache_key] = file_id
+                audio_cache[track_url] = file_id
 
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
@@ -1033,6 +1061,280 @@ def handle_download_callback(call):
                     except: pass
 
     threading.Thread(target=worker, daemon=True).start()
+
+# --- API MINI APP ---
+def validate_miniapp_request(handler):
+    """Проверяет подпись initData Telegram и возвращает объект пользователя."""
+    raw = handler.headers.get("X-Telegram-Init-Data", "")
+    if not raw or len(raw) > 8192:
+        return None
+    try:
+        fields = dict(parse_qsl(raw, keep_blank_values=True))
+        received_hash = fields.pop("hash", None)
+        if not received_hash or "user" not in fields or "auth_date" not in fields:
+            return None
+        check_string = "\n".join(f"{key}={value}" for key, value in sorted(fields.items()))
+        secret_key = hmac.new(b"WebAppData", API_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+        calculated_hash = hmac.new(secret_key, check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calculated_hash, received_hash):
+            return None
+        auth_date = int(fields["auth_date"])
+        if auth_date > time.time() + 60 or time.time() - auth_date > 86400:
+            return None
+        user = json.loads(fields["user"])
+        if not isinstance(user, dict) or not user.get("id"):
+            return None
+        return user
+    except Exception as e:
+        print(f"Ошибка проверки Telegram initData: {e}")
+        return None
+
+
+def api_json(handler, status, payload):
+    handler._send_json(status, payload)
+
+
+def get_user_settings(user_id):
+    user_key = str(user_id)
+    if user_key not in user_settings or not isinstance(user_settings[user_key], dict):
+        user_settings[user_key] = {"search_limit": 10}
+    settings = user_settings[user_key]
+    settings.setdefault("search_limit", 10)
+    settings.setdefault("favorites", [])
+    settings.setdefault("history", [])
+    settings.setdefault("playlists", [])
+    return settings
+
+
+def normalize_miniapp_track(raw):
+    if not isinstance(raw, dict):
+        return None
+    track_url = str(raw.get("url", "")).strip()
+    parsed = urlparse(track_url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not (host == "soundcloud.com" or host.endswith(".soundcloud.com")):
+        return None
+    title = str(raw.get("title") or "Без названия")[:180]
+    uploader = str(raw.get("uploader") or "Неизвестен")[:120]
+    thumbnail = str(raw.get("thumbnail") or "")[:1000]
+    if thumbnail and urlparse(thumbnail).scheme != "https":
+        thumbnail = ""
+    duration = raw.get("duration")
+    try:
+        duration = int(duration) if duration is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    return {"url": track_url, "title": title, "uploader": uploader, "thumbnail": thumbnail, "duration": duration}
+
+
+def miniapp_is_subscribed(user_id):
+    return check_user_subscription(user_id)
+
+
+def handle_miniapp_get_data(handler):
+    user = validate_miniapp_request(handler)
+    if not user:
+        return api_json(handler, 401, {"error": "Открой приложение через Telegram, чтобы авторизоваться."})
+    settings = get_user_settings(user["id"])
+    api_json(handler, 200, {
+        "user": {"id": user["id"], "first_name": user.get("first_name", "Музыка")},
+        "search_limit": int(settings.get("search_limit", 10)),
+        "favorites": settings.get("favorites", []),
+        "history": settings.get("history", []),
+        "playlists": settings.get("playlists", [])
+    })
+
+
+def handle_miniapp_search(handler, query_params):
+    user = validate_miniapp_request(handler)
+    if not user:
+        return api_json(handler, 401, {"error": "Открой приложение через Telegram."})
+    if not miniapp_is_subscribed(user["id"]):
+        return api_json(handler, 403, {"error": "Сначала вступи в нашу группу.", "subscription_required": True, "invite_url": "https://t.me/+8JYfdTy2YhE0NDJi"})
+    query = str((query_params.get("q") or [""])[0]).strip()[:100]
+    if not query:
+        return api_json(handler, 400, {"error": "Введи название трека или исполнителя."})
+    settings = get_user_settings(user["id"])
+    limit = max(5, min(25, int(settings.get("search_limit", 10))))
+    try:
+        ydl_opts = {
+            "extract_flat": True, "quiet": True, "no_warnings": True,
+            "socket_timeout": 12, "retries": 1, "extractor_retries": 1,
+            "ignoreerrors": True
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            result = ydl.extract_info(f"scsearch{max(20, limit * 2)}:{query}", download=False)
+        entries = (result or {}).get("entries", []) or []
+        tracks = []
+        for item in entries:
+            if not item:
+                continue
+            url = item.get("url") or item.get("webpage_url")
+            if not url:
+                continue
+            if not str(url).startswith("https://"):
+                continue
+            normalized = normalize_miniapp_track({
+                "url": url,
+                "title": item.get("title"),
+                "uploader": item.get("uploader") or item.get("artist"),
+                "thumbnail": item.get("thumbnail"),
+                "duration": item.get("duration")
+            })
+            if normalized:
+                tracks.append(normalized)
+            if len(tracks) >= limit:
+                break
+        api_json(handler, 200, {"tracks": tracks, "query": query})
+    except Exception as e:
+        print(f"Ошибка поиска Mini App: {e}")
+        api_json(handler, 500, {"error": "Не удалось выполнить поиск. Попробуй ещё раз."})
+
+
+def add_to_user_history(settings, track):
+    history = settings.setdefault("history", [])
+    history[:] = [item for item in history if item.get("url") != track["url"]]
+    history.insert(0, track)
+    del history[50:]
+
+
+def download_track_for_miniapp(user_id, track):
+    track_url = track["url"]
+    title = track["title"]
+    uploader = track["uploader"]
+    audio_filename = thumbnail_filename = original_thumb = None
+    try:
+        cached_file_id = audio_cache.get(track_url)
+        if cached_file_id and not str(cached_file_id).startswith("http"):
+            bot.send_audio(user_id, cached_file_id, title=title, performer=uploader)
+            stats_data["total_downloads"] += 1
+            save_all_data()
+            return
+        ydl_opts = {
+            "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
+            "outtmpl": f"song_mini_{user_id}_%(id)s.%(ext)s",
+            "writethumbnail": True, "quiet": True, "noprogress": True,
+            "socket_timeout": 15,
+            "postprocessors": [
+                {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
+                {"key": "EmbedThumbnail"}
+            ]
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(track_url, download=True)
+            audio_filename = ydl.prepare_filename(info)
+            original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
+        audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
+        with open(audio_filename, "rb") as audio:
+            thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
+            try:
+                sent = bot.send_audio(
+                    user_id, audio,
+                    title=info.get("title", title),
+                    performer=info.get("uploader", uploader),
+                    thumbnail=thumb_file
+                )
+            finally:
+                if thumb_file:
+                    thumb_file.close()
+        audio_cache[track_url] = sent.audio.file_id
+        stats_data["total_downloads"] += 1
+        save_all_data()
+    except Exception as e:
+        print(f"Ошибка загрузки трека из Mini App: {e}")
+        try:
+            bot.send_message(user_id, f"❌ Не удалось скачать «{title[:80]}». Попробуй выбрать другой результат.")
+        except Exception as send_error:
+            print(f"Не удалось отправить сообщение об ошибке Mini App: {send_error}")
+    finally:
+        for file_path in (audio_filename, thumbnail_filename, original_thumb):
+            if file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
+
+
+def handle_miniapp_post(handler, path, payload):
+    user = validate_miniapp_request(handler)
+    if not user:
+        return api_json(handler, 401, {"error": "Открой приложение через Telegram."})
+    user_id = user["id"]
+    settings = get_user_settings(user_id)
+
+    if path == "/api/settings":
+        try:
+            count = int(payload.get("count", 10))
+        except (TypeError, ValueError):
+            return api_json(handler, 400, {"error": "Некорректное количество треков."})
+        if count not in (5, 10, 15, 20, 25):
+            return api_json(handler, 400, {"error": "Количество должно быть от 5 до 25."})
+        settings["search_limit"] = count
+        save_all_data()
+        return api_json(handler, 200, {"ok": True, "search_limit": count})
+
+    if path == "/api/favorite":
+        track = normalize_miniapp_track(payload.get("track"))
+        if not track:
+            return api_json(handler, 400, {"error": "Некорректный трек."})
+        favorites = settings.setdefault("favorites", [])
+        existing = next((item for item in favorites if item.get("url") == track["url"]), None)
+        if existing:
+            favorites.remove(existing)
+            saved = False
+        else:
+            favorites.insert(0, track)
+            del favorites[100:]
+            saved = True
+        save_all_data()
+        return api_json(handler, 200, {"ok": True, "saved": saved, "favorites": favorites})
+
+    if path == "/api/playlist":
+        action = payload.get("action")
+        playlists = settings.setdefault("playlists", [])
+        if action == "create":
+            name = str(payload.get("name", "")).strip()[:40]
+            if not name:
+                return api_json(handler, 400, {"error": "Введи название плейлиста."})
+            if any(p.get("name", "").casefold() == name.casefold() for p in playlists):
+                return api_json(handler, 409, {"error": "Такой плейлист уже существует."})
+            playlist = {"id": str(int(time.time() * 1000)), "name": name, "tracks": []}
+            playlists.insert(0, playlist)
+        elif action == "delete":
+            playlist_id = str(payload.get("playlist_id", ""))
+            settings["playlists"] = [p for p in playlists if str(p.get("id")) != playlist_id]
+        elif action == "add_track":
+            track = normalize_miniapp_track(payload.get("track"))
+            if not track:
+                return api_json(handler, 400, {"error": "Некорректный трек."})
+            playlist_name = str(payload.get("playlist_name", "")).strip()[:40]
+            if not playlist_name:
+                return api_json(handler, 400, {"error": "Введи название плейлиста."})
+            playlist = next((p for p in playlists if p.get("name", "").casefold() == playlist_name.casefold()), None)
+            if not playlist:
+                playlist = {"id": str(int(time.time() * 1000)), "name": playlist_name, "tracks": []}
+                playlists.insert(0, playlist)
+            if not any(item.get("url") == track["url"] for item in playlist.setdefault("tracks", [])):
+                playlist["tracks"].insert(0, track)
+        else:
+            return api_json(handler, 400, {"error": "Неизвестное действие с плейлистом."})
+        del settings["playlists"][100:]
+        save_all_data()
+        return api_json(handler, 200, {"ok": True, "playlists": settings["playlists"]})
+
+    if path == "/api/download":
+        if not miniapp_is_subscribed(user_id):
+            return api_json(handler, 403, {"error": "Сначала вступи в нашу группу.", "subscription_required": True, "invite_url": "https://t.me/+8JYfdTy2YhE0NDJi"})
+        track = normalize_miniapp_track(payload.get("track"))
+        if not track:
+            return api_json(handler, 400, {"error": "Некорректный трек."})
+        add_to_user_history(settings, track)
+        save_all_data()
+        threading.Thread(target=download_track_for_miniapp, args=(user_id, track), daemon=True).start()
+        return api_json(handler, 202, {"ok": True, "message": "Отправляю трек в Telegram. Он появится в чате с ботом."})
+
+    return api_json(handler, 404, {"error": "Неизвестный API-адрес."})
+
 
 # --- ОБРАБОТКА ДАННЫХ ИЗ WEB APP ---
 @bot.message_handler(content_types=['web_app_data'])
@@ -1077,4 +1379,3 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"❌ Ошибка: {e}")
             time.sleep(5)
-
