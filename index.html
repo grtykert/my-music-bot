@@ -17,11 +17,62 @@
       --line: color-mix(in srgb, var(--text) 10%, transparent);
       --accent: var(--tg-theme-button-color, #8b5cf6);
       --accent-text: var(--tg-theme-button-text-color, #ffffff);
+      --accent-grad: linear-gradient(110deg, #9170ff, #6878ed);
       --purple: #9b7bff;
       --cyan: #58d5e8;
       --danger: #ff6b7b;
+      --gold: #f59e0b;
       --radius: 22px;
+      --glow: rgba(145, 112, 255, 0.25);
     }
+
+    /* VIP ТЕМЫ ОФОРМЛЕНИЯ */
+    body.theme-cyberpunk {
+      --bg: #080811;
+      --panel: #121324;
+      --panel-2: #1b1d36;
+      --text: #00ffcc;
+      --muted: #ff007f;
+      --line: rgba(0, 255, 204, 0.25);
+      --accent: #ff007f;
+      --accent-grad: linear-gradient(110deg, #ff007f, #00f0ff);
+      --glow: rgba(255, 0, 127, 0.35);
+    }
+    body.theme-gold {
+      --bg: #110e08;
+      --panel: #1c170d;
+      --panel-2: #2a2213;
+      --text: #fff8e7;
+      --muted: #c4a46a;
+      --line: rgba(230, 189, 93, 0.25);
+      --accent: #e6bd5d;
+      --accent-grad: linear-gradient(110deg, #e6bd5d, #b3862b);
+      --glow: rgba(230, 189, 93, 0.35);
+    }
+    body.theme-glass {
+      --bg: #09111e;
+      --panel: rgba(255, 255, 255, 0.07);
+      --panel-2: rgba(255, 255, 255, 0.12);
+      --text: #ffffff;
+      --muted: #93a4be;
+      --line: rgba(255, 255, 255, 0.15);
+      --accent: #38bdf8;
+      --accent-grad: linear-gradient(110deg, #38bdf8, #818cf8);
+      --glow: rgba(56, 189, 248, 0.25);
+      backdrop-filter: blur(16px);
+    }
+    body.theme-oled {
+      --bg: #000000;
+      --panel: #0a0a0a;
+      --panel-2: #141414;
+      --text: #ffffff;
+      --muted: #737373;
+      --line: #222222;
+      --accent: #ffffff;
+      --accent-grad: linear-gradient(110deg, #555555, #ffffff);
+      --glow: rgba(255, 255, 255, 0.2);
+    }
+
     * { box-sizing: border-box; }
     html { min-height: 100%; background: var(--bg); }
     body {
@@ -32,32 +83,42 @@
         radial-gradient(ellipse at -10% 28%, rgba(51, 190, 210, .08), transparent 30%), var(--bg);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
       -webkit-font-smoothing: antialiased;
+      transition: background 0.3s ease, color 0.3s ease;
     }
     button, input { font: inherit; }
     button { color: inherit; }
     .app { width: min(100%, 620px); margin: 0 auto; padding: 18px 18px 22px; }
+    
     .topline { display:flex; align-items:center; justify-content:space-between; margin: 4px 2px 24px; }
     .brand { display:flex; align-items:center; gap:11px; font-size:17px; font-weight:800; letter-spacing:-.3px; }
     .brand-mark { display:grid; place-items:center; width:38px; height:38px; border-radius:13px; background:linear-gradient(145deg,#9d7cff,#5c62df); box-shadow:0 7px 22px #795eff35; font-size:19px; }
-    .avatar { display:grid; place-items:center; width:38px; height:38px; border:1px solid var(--line); border-radius:50%; background:var(--panel); color:var(--muted); }
+    .top-actions { display:flex; align-items:center; gap:8px; }
+    .vip-pill { display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:20px; font-size:11px; font-weight:800; border:0; background:linear-gradient(110deg,#f59e0b,#fbbf24); color:#1a1300; cursor:pointer; box-shadow:0 4px 14px rgba(245,158,11,0.3); }
+    .vip-pill.inactive { background:rgba(255,255,255,0.08); color:var(--muted); box-shadow:none; }
+    .avatar { display:grid; place-items:center; width:38px; height:38px; border:1px solid var(--line); border-radius:50%; background:var(--panel); color:var(--muted); cursor:pointer; }
+    
     .screen { display:none; animation: appear .18s ease-out; }
     .screen.active { display:block; }
     @keyframes appear { from { opacity:.4; transform:translateY(5px); } to { opacity:1; transform:none; } }
+
     .eyebrow { color:var(--muted); font-size:12px; font-weight:700; letter-spacing:1.1px; text-transform:uppercase; }
     h1 { margin:7px 0 8px; font-size:29px; line-height:1.1; letter-spacing:-1px; }
     .subtitle { margin:0; color:var(--muted); font-size:14px; line-height:1.5; }
+    
     .hero { position:relative; overflow:hidden; margin:22px 0 24px; padding:21px; border:1px solid #a38cff30; border-radius:25px; background:linear-gradient(125deg,#28224b 0%,#252d50 54%,#1b3445 100%); box-shadow:0 18px 38px #00000020; }
     .hero::after { content:"♫"; position:absolute; right:14px; top:-24px; color:#ffffff12; font-size:150px; font-weight:900; transform:rotate(13deg); pointer-events:none; }
     .hero-label { position:relative; z-index:1; color:#d8d0ff; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:1px; }
     .hero h2 { position:relative; z-index:1; margin:10px 0 7px; max-width:280px; font-size:23px; line-height:1.15; letter-spacing:-.5px; }
     .hero p { position:relative; z-index:1; margin:0; max-width:275px; color:#d2d4ed; font-size:13px; line-height:1.45; }
+    
     .search-tabs { position:relative; z-index:1; display:flex; gap:8px; margin-top:14px; }
     .search-tab { flex:1; min-height:36px; padding:7px 10px; border:1px solid #ffffff22; border-radius:12px; background:#10131d66; color:#d2d4ed; font-size:12px; font-weight:700; cursor:pointer; transition:.15s; }
-    .search-tab.active { background:linear-gradient(110deg,#9170ff,#6878ed); border-color:transparent; color:#fff; box-shadow:0 4px 14px #8064ee40; }
+    .search-tab.active { background:var(--accent-grad); border-color:transparent; color:#fff; box-shadow:0 4px 14px #8064ee40; }
     .searchbox { position:relative; z-index:1; display:flex; gap:8px; margin-top:14px; padding:6px; border:1px solid #ffffff22; border-radius:15px; background:#10131d66; }
     .searchbox input { width:100%; min-width:0; padding:8px 9px; border:0; outline:0; background:transparent; color:white; font-size:14px; user-select:text; }
     .searchbox input::placeholder { color:#c5c6db9c; }
     .search-btn { flex:0 0 42px; height:42px; border:0; border-radius:12px; background:#fff; color:#26213e; font-size:18px; font-weight:800; cursor:pointer; }
+    
     .section-head { display:flex; align-items:center; justify-content:space-between; margin:0 2px 13px; }
     .section-head h3 { margin:0; font-size:17px; letter-spacing:-.3px; }
     .section-note { color:var(--muted); font-size:12px; }
@@ -67,20 +128,27 @@
     .genre-icon { display:grid; place-items:center; flex:0 0 42px; height:42px; border-radius:14px; background:var(--tint, #8b5cf622); font-size:21px; }
     .genre strong { display:block; font-size:14px; }
     .genre small { display:block; margin-top:4px; color:var(--muted); font-size:11px; }
+    
     .page-head { margin:10px 1px 22px; }
     .page-head h1 { font-size:27px; }
     .empty { display:flex; flex-direction:column; align-items:center; padding:37px 22px; border:1px dashed var(--line); border-radius:22px; background:color-mix(in srgb,var(--panel) 60%, transparent); text-align:center; }
     .empty-icon { display:grid; place-items:center; width:64px; height:64px; margin-bottom:15px; border-radius:21px; background:#9273ff1a; font-size:27px; }
     .empty strong { font-size:16px; }
     .empty p { max-width:260px; margin:7px 0 0; color:var(--muted); font-size:13px; line-height:1.5; }
+    
     .playlist-list { display:grid; gap:10px; margin-top:16px; }
-    .playlist-item { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 15px; border:1px solid var(--line); border-radius:17px; background:var(--panel); }
+    .playlist-item { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; padding:14px 15px; border:1px solid var(--line); border-radius:17px; background:var(--panel); }
     .playlist-item strong { display:block; font-size:14px; }
     .playlist-item small { display:block; margin-top:4px; color:var(--muted); font-size:12px; }
+    .playlist-tracks { flex:0 0 100%; display:grid; gap:7px; margin-top:7px; }
+    .playlist-track { color:var(--muted); font-size:12px; }
     .delete-btn { width:34px; height:34px; border:0; border-radius:11px; background:#ff6b7b16; color:var(--danger); cursor:pointer; }
-    .primary-btn { display:flex; justify-content:center; align-items:center; gap:8px; width:100%; min-height:50px; padding:13px 16px; border:0; border-radius:16px; background:linear-gradient(110deg,#9170ff,#6878ed); color:white; font-size:14px; font-weight:800; box-shadow:0 9px 22px #8064ee2b; cursor:pointer; }
+    
+    .primary-btn { display:flex; justify-content:center; align-items:center; gap:8px; width:100%; min-height:50px; padding:13px 16px; border:0; border-radius:16px; background:var(--accent-grad); color:white; font-size:14px; font-weight:800; box-shadow:0 9px 22px var(--glow); cursor:pointer; }
     .primary-btn:active { transform:scale(.985); }
-    .settings-card { padding:19px; border:1px solid var(--line); border-radius:21px; background:var(--panel); }
+    
+    /* НАСТРОЙКИ */
+    .settings-card { padding:19px; border:1px solid var(--line); border-radius:21px; background:var(--panel); margin-bottom:14px; }
     .setting-row { display:flex; justify-content:space-between; align-items:center; gap:12px; }
     .setting-title { font-size:15px; font-weight:750; }
     .setting-description { margin-top:5px; color:var(--muted); font-size:12px; line-height:1.45; }
@@ -95,21 +163,53 @@
     input[type="range"]::-moz-range-thumb { width:17px; height:17px; border:4px solid var(--bg); border-radius:50%; background:#fff; box-shadow:0 0 0 2px #9a7bff,0 3px 10px #0005; }
     .range-labels { display:flex; justify-content:space-between; margin-top:14px; color:var(--muted); font-size:11px; }
     .range-labels span { min-width:20px; text-align:center; }
-    .setting-divider { height:1px; margin:20px 0; background:var(--line); }
     .info-box { display:flex; gap:11px; margin-top:15px; padding:13px; border-radius:15px; background:#58d5e812; color:var(--muted); font-size:12px; line-height:1.45; }
     .info-box span { color:var(--cyan); font-size:16px; }
-    .save-area { margin-top:18px; }
+
+    /* ВЫБОР ТЕМ */
+    .theme-selector { display:grid; grid-template-columns:repeat(2, 1fr); gap:8px; margin-top:12px; }
+    .theme-btn { padding:12px; border-radius:14px; border:1px solid var(--line); background:var(--panel-2); text-align:left; cursor:pointer; font-size:12px; font-weight:700; transition:0.15s; }
+    .theme-btn.active { border-color:var(--accent); outline:2px solid var(--accent); }
+
+    /* VIP СЕКЦИЯ */
+    .vip-banner { padding:22px; border-radius:24px; border:1px solid rgba(245, 158, 11, 0.4); background:radial-gradient(ellipse at 100% 0%, rgba(245, 158, 11, 0.22), transparent 65%), var(--panel); margin-bottom:18px; box-shadow:0 18px 38px #00000030; }
+    .vip-banner h2 { margin:4px 0 8px; font-size:24px; color:#fbbf24; }
+    .vip-features { list-style:none; padding:0; margin:16px 0 20px; display:grid; gap:10px; }
+    .vip-features li { display:flex; align-items:center; gap:10px; font-size:13px; line-height:1.4; }
+    .vip-features li span { font-size:18px; flex:0 0 24px; }
+    .vip-plans { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:14px; }
+    .vip-plan-card { padding:16px; border-radius:18px; border:1px solid rgba(245, 158, 11, 0.35); background:rgba(0,0,0,0.25); text-align:center; cursor:pointer; transition:transform 0.15s; }
+    .vip-plan-card:active { transform:scale(0.97); }
+    .vip-plan-card strong { display:block; font-size:15px; margin-bottom:4px; }
+    .vip-plan-card .price { font-size:19px; font-weight:900; color:#fbbf24; }
+
+    /* НАВИГАЦИЯ */
     .bottom-nav { position:fixed; z-index:20; bottom:0; left:0; right:0; display:flex; justify-content:center; padding:9px 10px calc(9px + env(safe-area-inset-bottom)); border-top:1px solid var(--line); background:color-mix(in srgb,var(--bg) 88%, transparent); backdrop-filter:blur(18px); }
-    .nav-inner { display:grid; grid-template-columns:repeat(5,1fr); width:min(100%,620px); gap:4px; }
+    .nav-inner { display:grid; grid-template-columns:repeat(6,1fr); width:min(100%,620px); gap:2px; }
     .nav-item { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; min-height:53px; padding:5px 2px; border:0; border-radius:13px; background:transparent; color:var(--muted); font-size:10px; cursor:pointer; }
     .nav-item .nav-icon { font-size:19px; line-height:1; }
-    .nav-item.active { background:#9478ff18; color:#bbaaff; font-weight:750; }
+    .nav-item.active { background:#9478ff18; color:var(--accent); font-weight:750; }
+    
     .toast { position:fixed; z-index:40; left:50%; bottom:calc(82px + env(safe-area-inset-bottom)); width:max-content; max-width:calc(100% - 36px); padding:12px 16px; border:1px solid var(--line); border-radius:14px; background:var(--panel); color:var(--text); box-shadow:0 10px 28px #0004; font-size:13px; text-align:center; opacity:0; transform:translate(-50%,10px); pointer-events:none; transition:.2s; }
     .toast.show { opacity:1; transform:translate(-50%,0); }
+
+    /* КАРТОЧКА ТРЕКА */
     .track-list { display:grid; gap:10px; margin:18px 0 22px; }
-    .track-card { display:flex; align-items:center; gap:12px; padding:11px; border:1px solid var(--line); border-radius:18px; background:var(--panel); }
+    .track-card { display:flex; flex-direction:column; padding:12px; border:1px solid var(--line); border-radius:18px; background:var(--panel); }
+    .track-main-row { display:flex; align-items:center; gap:12px; width:100%; }
     .track-cover-wrap { position:relative; display:grid; place-items:center; flex:0 0 58px; width:58px; height:58px; overflow:hidden; border-radius:13px; background:linear-gradient(145deg,#342b58,#202b42); color:#c7b8ff; font-size:25px; }
     .track-cover { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+    .track-info { flex:1; min-width:0; }
+    .track-info strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+    .track-info small { display:block; margin-top:5px; color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .track-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; padding-top:9px; border-top:1px dashed var(--line); }
+    .track-action { min-height:30px; padding:6px 9px; border:1px solid var(--line); border-radius:9px; background:transparent; color:var(--text); font-size:11px; font-weight:700; cursor:pointer; }
+    .track-action.primary { border:0; background:var(--accent-grad); color:white; }
+    .track-action.saved { color:#ff7e9a; border-color:#ff7e9a55; }
+    .list-section-title { margin:18px 2px 10px; font-size:16px; }
+    .loading { padding:20px; text-align:center; color:var(--muted); font-size:13px; }
+
+    /* ПЛЕЕР */
     body.has-player { padding-bottom:calc(245px + env(safe-area-inset-bottom)); }
     .player-dock { position:fixed; z-index:19; left:50%; bottom:calc(76px + env(safe-area-inset-bottom)); width:min(calc(100% - 24px),596px); padding:12px; border:1px solid var(--line); border-radius:19px; background:color-mix(in srgb,var(--panel) 96%,transparent); box-shadow:0 12px 35px #0008; backdrop-filter:blur(18px); transform:translateX(-50%); }
     .player-dock[hidden] { display:none; }
@@ -133,27 +233,22 @@
     .player-times { display:flex; justify-content:space-between; margin-top:7px; color:var(--muted); font-size:10px; font-variant-numeric:tabular-nums; }
     #audioPlayer { display:none; }
     @media (max-height:650px) { body.has-player { padding-bottom:calc(230px + env(safe-area-inset-bottom)); } }
-    .track-info { flex:1; min-width:0; }
-    .track-info strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
-    .track-info small { display:block; margin-top:5px; color:var(--muted); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .track-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:9px; }
-    .track-action { min-height:30px; padding:6px 9px; border:1px solid var(--line); border-radius:9px; background:transparent; color:var(--text); font-size:11px; font-weight:700; cursor:pointer; }
-    .track-action.primary { border:0; background:linear-gradient(110deg,#9170ff,#6878ed); color:white; }
-    .track-action.saved { color:#ff7e9a; border-color:#ff7e9a55; }
-    .list-section-title { margin:18px 2px 10px; font-size:16px; }
-    .loading { padding:20px; text-align:center; color:var(--muted); font-size:13px; }
-    .playlist-item { flex-wrap:wrap; }
-    .playlist-tracks { flex:0 0 100%; display:grid; gap:7px; margin-top:7px; }
-    .playlist-track { color:var(--muted); font-size:12px; }
-    .modal-backdrop { position:fixed; z-index:60; inset:0; display:none; align-items:center; justify-content:center; padding:22px; background:#0009; backdrop-filter:blur(7px); }
+
+    /* МОДАЛЬНЫЕ ОКНА */
+    .modal-backdrop { position:fixed; z-index:70; inset:0; display:none; align-items:center; justify-content:center; padding:22px; background:#0009; backdrop-filter:blur(8px); }
     .modal-backdrop.open { display:flex; }
-    .modal-card { width:min(100%,380px); padding:21px; border:1px solid var(--line); border-radius:22px; background:var(--panel); box-shadow:0 20px 60px #0007; }
+    .modal-card { width:min(100%,400px); max-height:85vh; overflow-y:auto; padding:21px; border:1px solid var(--line); border-radius:22px; background:var(--panel); box-shadow:0 20px 60px #0007; }
     .modal-card h3 { margin:0 0 14px; font-size:18px; }
     .modal-input { width:100%; padding:13px 14px; border:1px solid var(--line); border-radius:13px; outline:none; background:var(--bg); color:var(--text); font-size:14px; user-select:text; }
     .modal-actions { display:flex; gap:9px; margin-top:15px; }
     .modal-actions button { flex:1; min-height:43px; border:0; border-radius:12px; font-size:13px; font-weight:800; cursor:pointer; }
     .modal-cancel { background:color-mix(in srgb,var(--text) 10%,transparent); color:var(--text); }
-    .modal-save { background:linear-gradient(110deg,#9170ff,#6878ed); color:white; }
+    .modal-save { background:var(--accent-grad); color:white; }
+    
+    .lyrics-box { margin-top:12px; padding:14px; border-radius:14px; background:rgba(0,0,0,0.3); font-size:13px; line-height:1.6; white-space:pre-wrap; max-height:50vh; overflow-y:auto; color:var(--text); }
+    .effect-btn { display:block; width:100%; text-align:left; padding:12px; margin-bottom:8px; border:1px solid var(--line); border-radius:12px; background:rgba(255,255,255,0.04); cursor:pointer; transition:0.15s; }
+    .effect-btn:active { background:rgba(255,255,255,0.1); }
+    
     @media (min-width:560px) { .app { padding-top:25px; } .hero { padding:25px; } .genre-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; } }
   </style>
@@ -162,11 +257,15 @@
   <main class="app">
     <header class="topline">
       <div class="brand"><span class="brand-mark">♫</span><span>МУЗЫКА</span></div>
-      <div class="avatar" aria-label="Профиль">♪</div>
+      <div class="top-actions">
+        <button id="vipHeaderPill" class="vip-pill inactive" type="button">👑 VIP</button>
+        <div class="avatar" aria-label="Профиль" id="profileBtn">♪</div>
+      </div>
     </header>
 
+    <!-- ГЛАВНАЯ -->
     <section class="screen active" id="screen-home">
-      <div class="eyebrow">ТВОЙ МУЗЫКАЛЬНЫЙ ПРОСТРАНСТВО</div>
+      <div class="eyebrow">ТВОЁ МУЗЫКАЛЬНОЕ ПРОСТРАНСТВО</div>
       <h1>Слушай то,<br>что нравится.</h1>
       <p class="subtitle">Ищи музыку и собирай свою коллекцию в одном месте.</p>
       <div class="hero">
@@ -194,12 +293,14 @@
       </div>
     </section>
 
+    <!-- ИЗБРАННОЕ -->
     <section class="screen" id="screen-favorites">
       <div class="page-head"><div class="eyebrow">ТВОЯ КОЛЛЕКЦИЯ</div><h1>Избранное ❤️</h1><p class="subtitle">Треки, которые захочется включить ещё раз.</p></div>
       <div class="track-list" id="favoritesList"></div>
       <div class="empty" id="favoritesEmpty"><div class="empty-icon">♡</div><strong>Пока здесь пусто</strong><p>Нажимай ❤️ у найденных треков — они сохранятся в твоём аккаунте Telegram.</p></div>
     </section>
 
+    <!-- ПЛЕЙЛИСТЫ -->
     <section class="screen" id="screen-playlists">
       <div class="page-head"><div class="eyebrow">СОБИРАЙ ПО-СВОЕМУ</div><h1>Плейлисты</h1><p class="subtitle">Создавай подборки под любое настроение.</p></div>
       <button class="primary-btn" id="createPlaylist">＋ Создать плейлист</button>
@@ -207,29 +308,77 @@
       <div class="empty" id="playlistEmpty" style="margin-top:14px"><div class="empty-icon">♫</div><strong>Создай свою первую подборку</strong><p>Добавляй найденные треки в подборки через кнопку «＋ В плейлист».</p></div>
     </section>
 
+    <!-- ИСТОРИЯ -->
     <section class="screen" id="screen-history">
       <div class="page-head"><div class="eyebrow">НЕДАВНО СЛУШАЛ</div><h1>История</h1><p class="subtitle">Здесь будут твои недавно найденные и скачанные треки.</p></div>
       <div class="track-list" id="historyList"></div>
       <div class="empty" id="historyEmpty"><div class="empty-icon">◷</div><strong>История пока пуста</strong><p>Загруженные через приложение треки будут появляться здесь.</p></div>
     </section>
 
+    <!-- VIP ЭКРАН -->
+    <section class="screen" id="screen-vip">
+      <div class="page-head"><div class="eyebrow">ПРЕМИУМ ДОСТУП</div><h1>Подписка VIP 👑</h1><p class="subtitle">Все возможности без ограничений.</p></div>
+      <div class="vip-banner">
+        <h2>👑 Премиум VIP Статус</h2>
+        <p class="subtitle" style="color:var(--text);">Прокачай свой музыкальный опыт на максимум!</p>
+        
+        <ul class="vip-features">
+          <li><span>🚀</span><strong>Без обязательной подписки</strong> на каналы навсегда</li>
+          <li><span>📈</span><strong>Лимит до 50 треков</strong> в поиске за один раз</li>
+          <li><span>📜</span><strong>Тексты всех песен</strong> прямо в приложении и боте</li>
+          <li><span>🎚</span><strong>Bass Boost, 8D, Slowed & Nightcore</strong> при скачивании</li>
+          <li><span>🎨</span><strong>Эксклюзивные VIP-темы</strong> оформления интерфейса</li>
+        </ul>
+
+        <div id="vipStatusText" style="margin:10px 0; font-weight:800; color:#fbbf24;"></div>
+
+        <div class="vip-plans">
+          <div class="vip-plan-card" id="buyVipWeek">
+            <strong>1 Неделя</strong>
+            <div class="price">50 ⭐</div>
+            <small>Telegram Stars</small>
+          </div>
+          <div class="vip-plan-card" id="buyVipMonth">
+            <strong>1 Месяц</strong>
+            <div class="price">150 ⭐</div>
+            <small>Выгода 25%</small>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- НАСТРОЙКИ -->
     <section class="screen" id="screen-settings">
-      <div class="page-head"><div class="eyebrow">ПОД ТЕБЯ</div><h1>Настройки</h1><p class="subtitle">Настрой выдачу так, как тебе удобно.</p></div>
+      <div class="page-head"><div class="eyebrow">ПОД ТЕБЯ</div><h1>Настройки</h1><p class="subtitle">Настрой выдачу и стиль плеера так, как тебе удобно.</p></div>
       <div class="settings-card">
         <div class="setting-row">
-          <div><div class="setting-title">Треков на странице</div><div class="setting-description">Сколько результатов показывать за один раз.</div></div>
+          <div><div class="setting-title">Треков на странице</div><div class="setting-description" id="sliderNote">Сколько результатов показывать за один раз.</div></div>
           <div class="value-badge" id="trackCount">10 треков</div>
         </div>
         <div class="slider-wrap">
           <input type="range" id="tracksRange" min="5" max="25" value="10" step="5" aria-label="Количество треков на странице">
-          <div class="range-labels"><span>5</span><span>10</span><span>15</span><span>20</span><span>25</span></div>
+          <div class="range-labels" id="rangeLabels"><span>5</span><span>10</span><span>15</span><span>20</span><span>25</span></div>
         </div>
-        <div class="info-box"><span>ⓘ</span><div>Изменение сохранится в настройках бота. Ползунок можно двигать пальцем или нажимать на нужное место шкалы.</div></div>
+        <div class="info-box"><span>ⓘ</span><div>Для обычных пользователей доступно до 25 треков. С VIP-подпиской шкала расширяется до 50 треков!</div></div>
       </div>
+
+      <div class="settings-card">
+        <div class="setting-title">🎨 Оформление (Темы интерфейса)</div>
+        <div class="setting-description">VIP-темы доступны только подписчикам.</div>
+        <div class="theme-selector">
+          <button class="theme-btn active" data-theme="default" type="button">Стандартная</button>
+          <button class="theme-btn" data-theme="cyberpunk" type="button">⚡ Cyberpunk (VIP)</button>
+          <button class="theme-btn" data-theme="gold" type="button">👑 Gold (VIP)</button>
+          <button class="theme-btn" data-theme="glass" type="button">🪞 Glass (VIP)</button>
+          <button class="theme-btn" data-theme="oled" type="button">🖤 OLED Black (VIP)</button>
+        </div>
+      </div>
+
       <div class="save-area"><button class="primary-btn" id="saveSettings">Сохранить настройки</button></div>
     </section>
   </main>
 
+  <!-- ПЛЕЕР -->
   <section class="player-dock" id="playerDock" hidden aria-label="Музыкальный плеер">
     <div class="player-head">
       <div class="player-meta">
@@ -255,15 +404,20 @@
     </div>
     <audio id="audioPlayer" preload="auto"></audio>
   </section>
+
+  <!-- НАВИГАЦИЯ -->
   <nav class="bottom-nav" aria-label="Основная навигация">
     <div class="nav-inner">
       <button class="nav-item active" data-screen="home"><span class="nav-icon">⌂</span><span>Главная</span></button>
       <button class="nav-item" data-screen="favorites"><span class="nav-icon">♡</span><span>Избранное</span></button>
       <button class="nav-item" data-screen="playlists"><span class="nav-icon">▤</span><span>Плейлисты</span></button>
       <button class="nav-item" data-screen="history"><span class="nav-icon">◷</span><span>История</span></button>
+      <button class="nav-item" data-screen="vip"><span class="nav-icon">👑</span><span>VIP</span></button>
       <button class="nav-item" data-screen="settings"><span class="nav-icon">⚙</span><span>Настройки</span></button>
     </div>
   </nav>
+
+  <!-- МОДАЛЬНОЕ ОКНО ПЛЕЙЛИСТА -->
   <div class="modal-backdrop" id="nameModal" role="dialog" aria-modal="true" aria-labelledby="nameModalTitle">
     <div class="modal-card">
       <h3 id="nameModalTitle">Название</h3>
@@ -274,6 +428,30 @@
       </div>
     </div>
   </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО ТЕКСТА ПЕСНИ (LYRICS) -->
+  <div class="modal-backdrop" id="lyricsModal">
+    <div class="modal-card">
+      <h3 id="lyricsTitle" style="margin:0;">📜 Текст песни</h3>
+      <div class="lyrics-box" id="lyricsBody">Загрузка слов песни...</div>
+      <button class="primary-btn" style="margin-top:14px;" id="closeLyricsBtn" type="button">Закрыть</button>
+    </div>
+  </div>
+
+  <!-- МОДАЛЬНОЕ ОКНО СКАЧИВАНИЯ С АУДИОЭФФЕКТАМИ (FFMPEG) -->
+  <div class="modal-backdrop" id="effectModal">
+    <div class="modal-card">
+      <h3 style="margin:0 0 8px;">🎚 Выбери аудио-эффект</h3>
+      <p class="subtitle" style="margin-bottom:14px;">(Премиум эквалайзер доступен с VIP)</p>
+      <button class="effect-btn" data-fx="none" type="button"><strong>🔊 Обычный звук</strong><br><small>Оригинальное студийное качество</small></button>
+      <button class="effect-btn" data-fx="bassboost" type="button"><strong>🔊 Bass Boost (VIP)</strong><br><small>Мощное усиление низких частот</small></button>
+      <button class="effect-btn" data-fx="8d" type="button"><strong>🎧 8D Audio (VIP)</strong><br><small>Объёмный вращающийся звук для наушников</small></button>
+      <button class="effect-btn" data-fx="slowed" type="button"><strong>🐢 Slowed & Reverb (VIP)</strong><br><small>Замедленный атмосферный вайб</small></button>
+      <button class="effect-btn" data-fx="nightcore" type="button"><strong>⚡ Nightcore (VIP)</strong><br><small>Ускоренный динамичный бит и ритм</small></button>
+      <button class="primary-btn" style="margin-top:10px; background:rgba(255,255,255,0.08);" id="closeEffectBtn" type="button">Отмена</button>
+    </div>
+  </div>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script>
@@ -288,13 +466,18 @@
       const range = $('tracksRange');
       const countBadge = $('trackCount');
       const toast = $('toast');
-      const state = { favorites: [], history: [], playlists: [], searchLimit: 10, nowPlaying: null, queueSource: null, lastSearchResults: [] };
+      const state = {
+        favorites: [], history: [], playlists: [], searchLimit: 10,
+        nowPlaying: null, queueSource: null, lastSearchResults: [],
+        isVip: false, vipExpires: 0, theme: 'default'
+      };
       const playerDock = $('playerDock');
       const audioPlayer = $('audioPlayer');
       const playerSeek = $('playerSeek');
       const playerToggle = $('playerToggle');
       const initData = tg && tg.initData ? tg.initData : '';
       let toastTimer;
+      let targetDownloadTrack = null;
 
       function formatClock(seconds) {
         if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -495,6 +678,7 @@
       });
       $('playerPrev').addEventListener('click', playPrevTrack);
       $('closePlayer').addEventListener('click', closePlayer);
+
       let resolveNameDialog = null;
       function askName(title, placeholder) {
         $('nameModalTitle').textContent = title;
@@ -524,6 +708,7 @@
         toastTimer = setTimeout(() => toast.classList.remove('show'), 2800);
         if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
       }
+
       function trackWord(value) {
         const n = Math.abs(value) % 100, last = n % 10;
         if (n > 10 && n < 20) return 'треков';
@@ -531,6 +716,7 @@
         if (last >= 2 && last <= 4) return 'трека';
         return 'треков';
       }
+
       function updateSlider() {
         const min = Number(range.min), max = Number(range.max);
         const value = Math.min(max, Math.max(min, Number(range.value)));
@@ -540,7 +726,50 @@
       }
       range.addEventListener('input', updateSlider);
       range.addEventListener('change', updateSlider);
-      updateSlider();
+
+      function applyTheme(name) {
+        document.body.className = '';
+        if (name && name !== 'default') {
+          document.body.classList.add(`theme-${name}`);
+        }
+        document.querySelectorAll('.theme-btn').forEach(btn => {
+          btn.classList.toggle('active', btn.dataset.theme === name);
+        });
+        state.theme = name;
+      }
+
+      document.querySelectorAll('.theme-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const t = btn.dataset.theme;
+          if (t !== 'default' && !state.isVip) {
+            notify('👑 Эта тема доступна только для VIP подписчиков!');
+            return;
+          }
+          applyTheme(t);
+        });
+      });
+
+      function updateVipUI() {
+        const pill = $('vipHeaderPill');
+        if (state.isVip) {
+          pill.className = 'vip-pill';
+          pill.textContent = '👑 VIP';
+          range.max = "50";
+          $('sliderNote').textContent = 'VIP режим активен: выдача до 50 треков!';
+          $('rangeLabels').innerHTML = '<span>5</span><span>15</span><span>25</span><span>35</span><span>50</span>';
+          const expDate = new Date(state.vipExpires * 1000).toLocaleDateString('ru-RU');
+          $('vipStatusText').textContent = `✅ Твой VIP активен до ${expDate}`;
+        } else {
+          pill.className = 'vip-pill inactive';
+          pill.textContent = '👑 VIP';
+          range.max = "25";
+          if (Number(range.value) > 25) range.value = "25";
+          $('sliderNote').textContent = 'Обычный лимит: до 25 (до 50 с VIP).';
+          $('rangeLabels').innerHTML = '<span>5</span><span>10</span><span>15</span><span>20</span><span>25</span>';
+          $('vipStatusText').textContent = '❌ У тебя пока нет активного VIP-статуса';
+        }
+        updateSlider();
+      }
 
       async function api(path, options = {}) {
         if (!initData) throw new Error('Открой Mini App через Telegram, а не в обычном браузере.');
@@ -555,6 +784,7 @@
         }
         return data;
       }
+
       function showScreen(name) {
         document.querySelectorAll('.screen').forEach(el => el.classList.toggle('active', el.id === `screen-${name}`));
         document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.screen === name));
@@ -567,16 +797,72 @@
         if (name === 'playlists') renderPlaylists();
       }
       document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => showScreen(button.dataset.screen)));
+      $('vipHeaderPill').addEventListener('click', () => showScreen('vip'));
+      $('profileBtn').addEventListener('click', () => showScreen('settings'));
+
+      // Покупка VIP в боте через Stars
+      $('buyVipWeek').addEventListener('click', () => {
+        notify('Открываю счёт на 50 ⭐ в чате бота...');
+        if (tg && tg.openTelegramLink) tg.openTelegramLink('https://t.me/' + (tg.initDataUnsafe?.bot_username || '') + '?start=vip');
+      });
+      $('buyVipMonth').addEventListener('click', () => {
+        notify('Открываю счёт на 150 ⭐ в чате бота...');
+        if (tg && tg.openTelegramLink) tg.openTelegramLink('https://t.me/' + (tg.initDataUnsafe?.bot_username || '') + '?start=vip');
+      });
 
       function formatDuration(seconds) {
         if (!Number.isFinite(Number(seconds))) return '';
         const n = Number(seconds);
         return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`;
       }
+
+      // ТЕКСТ ПЕСНИ
+      async function openLyrics(track) {
+        $('lyricsTitle').textContent = `📜 ${track.title}`;
+        $('lyricsBody').textContent = 'Ищу текст песни в базе...';
+        $('lyricsModal').classList.add('open');
+        try {
+          const res = await api(`/api/lyrics?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.uploader)}`);
+          $('lyricsBody').textContent = res.lyrics || 'Текст для этого трека не найден.';
+        } catch (e) {
+          $('lyricsBody').textContent = e.message;
+        }
+      }
+      $('closeLyricsBtn').onclick = () => $('lyricsModal').classList.remove('open');
+
+      // СКАЧИВАНИЕ С АУДИОЭФФЕКТАМИ
+      document.querySelectorAll('.effect-btn').forEach(btn => {
+        btn.onclick = async () => {
+          const fx = btn.dataset.fx;
+          if (fx !== 'none' && !state.isVip) {
+            notify('👑 Эквалайзер и аудиоэффекты доступны только с VIP!');
+            return;
+          }
+          $('effectModal').classList.remove('open');
+          if (!targetDownloadTrack) return;
+          notify('⏳ Обрабатываю трек и отправляю в бота...');
+          try {
+            const res = await api('/api/download', {
+              method: 'POST',
+              body: JSON.stringify({ track: targetDownloadTrack, effect: fx })
+            });
+            notify(res.message || 'Трек отправлен в Telegram!');
+            state.history = [targetDownloadTrack, ...state.history.filter(item => item.url !== targetDownloadTrack.url)].slice(0, 50);
+          } catch (e) {
+            notify(e.message);
+          }
+        };
+      });
+      $('closeEffectBtn').onclick = () => $('effectModal').classList.remove('open');
+
       function createTrackCard(track, collectionName = '') {
         const card = document.createElement('article');
         card.className = 'track-card';
         card.addEventListener('pointerdown', () => preloadAudio(track), { passive: true });
+
+        const mainRow = document.createElement('div');
+        mainRow.className = 'track-main-row';
+
         const cover = document.createElement('div');
         cover.className = 'track-cover-wrap';
         cover.setAttribute('aria-label', 'Обложка трека');
@@ -592,14 +878,19 @@
           coverImage.onerror = () => coverImage.remove();
           cover.append(coverImage);
         }
+
         const info = document.createElement('div');
         info.className = 'track-info';
         const title = document.createElement('strong');
         title.textContent = track.title || 'Без названия';
         const subtitle = document.createElement('small');
         subtitle.textContent = `${track.uploader || 'Неизвестен'}${track.duration ? ' · ' + formatDuration(track.duration) : ''}`;
+        info.append(title, subtitle);
+        mainRow.append(cover, info);
+
         const actions = document.createElement('div');
         actions.className = 'track-actions';
+
         const listen = document.createElement('button');
         listen.className = 'track-action primary';
         listen.textContent = '▶ Слушать';
@@ -607,6 +898,7 @@
         listen.addEventListener('mouseenter', () => preloadAudio(track), { passive: true });
         listen.addEventListener('click', () => playTrack(track, collectionName));
         actions.append(listen);
+
         const isSaved = state.favorites.some(item => item.url === track.url);
         const fav = document.createElement('button');
         fav.className = 'track-action' + (isSaved ? ' saved' : '');
@@ -621,6 +913,7 @@
             notify(result.saved ? 'Добавлено в избранное.' : 'Удалено из избранного.');
           } catch (e) { notify(e.message); }
         });
+
         const playlist = document.createElement('button');
         playlist.className = 'track-action';
         playlist.textContent = '＋ В плейлист';
@@ -633,25 +926,25 @@
             notify('Трек добавлен в плейлист.');
           } catch (e) { notify(e.message); }
         });
-        actions.append(fav, playlist);
+
+        const lyricsBtn = document.createElement('button');
+        lyricsBtn.className = 'track-action';
+        lyricsBtn.textContent = '📜 Текст';
+        lyricsBtn.addEventListener('click', () => openLyrics(track));
+
         const download = document.createElement('button');
         download.className = 'track-action primary';
         download.textContent = '↓ Скачать';
-        download.addEventListener('click', async () => {
-          download.disabled = true;
-          download.textContent = 'Отправляю…';
-          try {
-            const result = await api('/api/download', { method: 'POST', body: JSON.stringify({ track }) });
-            notify(result.message || 'Трек отправляется в Telegram.');
-            state.history = [track, ...state.history.filter(item => item.url !== track.url)].slice(0, 50);
-          } catch (e) { notify(e.message); }
-          finally { download.disabled = false; download.textContent = '↓ Скачать'; }
+        download.addEventListener('click', () => {
+          targetDownloadTrack = track;
+          $('effectModal').classList.add('open');
         });
-        actions.append(download);
-        info.append(title, subtitle, actions);
-        card.append(cover, info);
+
+        actions.append(fav, playlist, lyricsBtn, download);
+        card.append(mainRow, actions);
         return card;
       }
+
       function renderCollection(which) {
         const list = $(which === 'favorites' ? 'favoritesList' : 'historyList');
         const empty = $(which === 'favorites' ? 'favoritesEmpty' : 'historyEmpty');
@@ -660,6 +953,7 @@
         tracks.forEach(track => list.append(createTrackCard(track, which)));
         empty.style.display = tracks.length ? 'none' : 'flex';
       }
+
       function renderPlaylists() {
         const list = $('playlistList');
         list.replaceChildren();
@@ -701,6 +995,7 @@
         });
         $('playlistEmpty').style.display = state.playlists.length ? 'none' : 'flex';
       }
+
       let searchMode = 'track';
       $('tabModeTrack').addEventListener('click', () => {
         searchMode = 'track';
@@ -758,6 +1053,7 @@
           notify(e.message);
         }
       }
+
       $('searchForm').addEventListener('submit', event => {
         event.preventDefault();
         const query = $('searchInput').value.trim();
@@ -767,6 +1063,7 @@
         }
         runSearch(query);
       });
+
       const genres = {
         'Поп': 'pop hits', 'Рок': 'rock music', 'Хип-хоп': 'hip hop',
         'Электроника': 'electronic dance music', 'Джаз': 'jazz', 'Phonk': 'phonk'
@@ -776,6 +1073,7 @@
         $('searchInput').value = query;
         runSearch(query);
       }));
+
       $('createPlaylist').addEventListener('click', async () => {
         const name = await askName('Новый плейлист', 'Например, Избранные хиты');
         if (name === null) return;
@@ -786,14 +1084,16 @@
           notify('Плейлист создан.');
         } catch (e) { notify(e.message); }
       });
+
       $('saveSettings').addEventListener('click', async () => {
         const count = Number(range.value);
         try {
-          const result = await api('/api/settings', { method: 'POST', body: JSON.stringify({ count }) });
+          const result = await api('/api/settings', { method: 'POST', body: JSON.stringify({ count, theme: state.theme }) });
           state.searchLimit = result.search_limit;
-          notify('Настройки сохранены в боте.');
+          notify('Настройки и тема сохранены в боте.');
         } catch (e) { notify(e.message); }
       });
+
       async function loadAppData() {
         if (!initData) {
           notify('Открой приложение кнопкой в Telegram-боте.');
@@ -805,8 +1105,13 @@
           state.favorites = Array.isArray(data.favorites) ? data.favorites : [];
           state.history = Array.isArray(data.history) ? data.history : [];
           state.playlists = Array.isArray(data.playlists) ? data.playlists : [];
+          state.isVip = !!data.is_vip;
+          state.vipExpires = Number(data.vip_expires) || 0;
+          state.theme = data.theme || 'default';
+          
           range.value = String(state.searchLimit);
-          updateSlider();
+          applyTheme(state.theme);
+          updateVipUI();
           renderCollection('favorites');
           renderCollection('history');
           renderPlaylists();
