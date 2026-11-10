@@ -1,3 +1,4 @@
+
 import os
 import sys
 import telebot
@@ -103,6 +104,9 @@ class DummyHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             return
+        if parsed.path == "/api/stream":
+            handle_miniapp_stream(self, parse_qs(parsed.query))
+            return
         self.send_response(404)
         self.end_headers()
 
@@ -148,6 +152,9 @@ tracks_cache = {}
 search_results_cache = {}
 search_cache_lock = threading.Lock()
 SEARCH_CACHE_TTL = 180
+stream_url_cache = {}
+stream_cache_lock = threading.Lock()
+STREAM_CACHE_TTL = 1800
 inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
@@ -417,6 +424,23 @@ def send_welcome(message):
             web_app=telebot.types.WebAppInfo(url=WEB_APP_URL)
         ))
         bot.send_message(chat_id, "Музыкальное приложение:", reply_markup=markup)
+
+@bot.message_handler(commands=['app', 'webapp', 'mini', 'player'])
+def open_app_command(message):
+    chat_id = message.chat.id
+    register_user(chat_id)
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
+    if not WEB_APP_URL:
+        bot.send_message(chat_id, "⚠️ Mini App пока не настроен. Проверь WEB_APP_URL в переменных Render.")
+        return
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(
+        text="🎧 Открыть музыкальное приложение",
+        web_app=telebot.types.WebAppInfo(url=WEB_APP_URL)
+    ))
+    bot.send_message(chat_id, "👇 Нажми на кнопку ниже, чтобы открыть приложение:", reply_markup=markup)
 
 # ОБРАБОТЧИК КНОПКИ ПРОВЕРКИ ПОДПИСКИ
 @bot.callback_query_handler(func=lambda call: call.data == "check_sub")
@@ -1262,6 +1286,9 @@ def handle_miniapp_get_data(handler):
         "history": settings.get("history", []),
         "playlists": settings.get("playlists", [])
     })
+    favs = settings.get("favorites", [])
+    if favs:
+        threading.Thread(target=prewarm_tracks_stream_urls, args=(favs[:20],), daemon=True).start()
 
 
 def handle_miniapp_search(handler, query_params):
@@ -1275,8 +1302,9 @@ def handle_miniapp_search(handler, query_params):
             "invite_url": "https://t.me/+8JYfdTy2YhE0NDJi"
         })
     query = str((query_params.get("q") or [""])[0]).strip()[:100]
+    search_type = str((query_params.get("type") or ["track"])[0]).strip().lower()
     if not query:
-        return api_json(handler, 400, {"error": "Введи название трека или исполнителя."})
+        return api_json(handler, 400, {"error": "Введи имя автора или название трека."})
     settings = get_user_settings(user["id"])
     limit = max(5, min(25, int(settings.get("search_limit", 10))))
     try:
@@ -1285,8 +1313,9 @@ def handle_miniapp_search(handler, query_params):
             "socket_timeout": 12, "retries": 1, "extractor_retries": 1,
             "ignoreerrors": True
         }
+        search_query = f"scsearch{max(30, limit * 3) if search_type == 'author' else max(20, limit * 2)}:{query}"
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            result = ydl.extract_info(f"scsearch{max(20, limit * 2)}:{query}", download=False)
+            result = ydl.extract_info(search_query, download=False)
         entries = (result or {}).get("entries", []) or []
         tracks = []
         for item in entries:
@@ -1304,8 +1333,14 @@ def handle_miniapp_search(handler, query_params):
             })
             if normalized:
                 tracks.append(normalized)
-            if len(tracks) >= limit:
-                break
+
+        if search_type == "author":
+            q_low = query.lower()
+            exact_author = [t for t in tracks if q_low in (t.get("uploader") or "").lower()]
+            other_author = [t for t in tracks if q_low not in (t.get("uploader") or "").lower()]
+            tracks = (exact_author + other_author)[:limit]
+        else:
+            tracks = tracks[:limit]
 
         # В плоских результатах SoundCloud часто не отдаёт artwork_url.
         missing = [i for i, track in enumerate(tracks) if not track.get("thumbnail")][:min(8, len(tracks))]
@@ -1323,10 +1358,58 @@ def handle_miniapp_search(handler, query_params):
                             tracks[idx]["duration"] = int(metadata["duration"])
                     except Exception as e:
                         print(f"Не удалось получить метаданные трека: {e}")
+        if tracks:
+            threading.Thread(target=prewarm_tracks_stream_urls, args=(tracks[:2],), daemon=True).start()
         api_json(handler, 200, {"tracks": tracks, "query": query})
     except Exception as e:
         print(f"Ошибка поиска Mini App: {e}")
         api_json(handler, 500, {"error": "Не удалось выполнить поиск. Попробуй ещё раз."})
+
+
+def get_soundcloud_stream_url(track_url):
+    now = time.time()
+    with stream_cache_lock:
+        cached = stream_url_cache.get(track_url)
+        if cached and (now - cached[1] < STREAM_CACHE_TTL):
+            return cached[0]
+
+    options = {
+        "format": "bestaudio[protocol^=http]/bestaudio/best",
+        "quiet": True, "no_warnings": True, "noplaylist": True,
+        "skip_download": True, "socket_timeout": 15,
+        "retries": 1, "extractor_retries": 1
+    }
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(track_url, download=False)
+    direct_url = info.get("url")
+    if not direct_url:
+        formats = info.get("requested_formats") or info.get("formats") or []
+        audio_formats = [f for f in formats if f.get("url") and f.get("acodec") not in (None, "none")]
+        if audio_formats:
+            audio_formats.sort(key=lambda f: (f.get("vcodec") == "none", f.get("abr") or 0), reverse=True)
+            direct_url = audio_formats[0]["url"]
+    if not direct_url or urlparse(direct_url).scheme not in ("http", "https"):
+        raise RuntimeError("SoundCloud не вернул прямую ссылку на аудио")
+
+    with stream_cache_lock:
+        stream_url_cache[track_url] = (direct_url, now)
+    return direct_url
+
+
+def prewarm_tracks_stream_urls(tracks, max_count=20):
+    def _warm_one(item):
+        url = item.get("url") if isinstance(item, dict) else None
+        if url:
+            try:
+                get_soundcloud_stream_url(url)
+            except Exception:
+                pass
+
+    items = tracks[:max_count] if tracks else []
+    if not items:
+        return
+    with ThreadPoolExecutor(max_workers=min(5, max(1, len(items)))) as executor:
+        list(executor.map(_warm_one, items))
 
 
 def handle_miniapp_stream(handler, query_params):
@@ -1342,26 +1425,10 @@ def handle_miniapp_stream(handler, query_params):
     if not normalized:
         return api_json(handler, 400, {"error": "Некорректная ссылка на трек."})
     try:
-        options = {
-            "format": "bestaudio[protocol^=http]/bestaudio/best",
-            "quiet": True, "no_warnings": True, "noplaylist": True,
-            "skip_download": True, "socket_timeout": 20,
-            "retries": 1, "extractor_retries": 1
-        }
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(track_url, download=False)
-        direct_url = info.get("url")
-        if not direct_url:
-            formats = info.get("requested_formats") or info.get("formats") or []
-            audio_formats = [f for f in formats if f.get("url") and f.get("acodec") not in (None, "none")]
-            if audio_formats:
-                audio_formats.sort(key=lambda f: (f.get("vcodec") == "none", f.get("abr") or 0), reverse=True)
-                direct_url = audio_formats[0]["url"]
-        if not direct_url or urlparse(direct_url).scheme not in ("http", "https"):
-            raise RuntimeError("SoundCloud не вернул прямую ссылку на аудио")
+        direct_url = get_soundcloud_stream_url(track_url)
         handler.send_response(302)
         handler.send_header("Location", direct_url)
-        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Cache-Control", "public, max-age=1800")
         handler.send_header("Content-Length", "0")
         handler.end_headers()
     except Exception as e:
@@ -1457,6 +1524,7 @@ def handle_miniapp_post(handler, path, payload):
             favorites.insert(0, track)
             del favorites[100:]
             saved = True
+            threading.Thread(target=prewarm_tracks_stream_urls, args=([track],), daemon=True).start()
         save_all_data()
         return api_json(handler, 200, {"ok": True, "saved": saved, "favorites": favorites})
 
@@ -1549,6 +1617,7 @@ if __name__ == '__main__':
     print("🚀 Запуск бота...")
     try:
         bot.set_my_commands([
+            telebot.types.BotCommand("app", "🎧 Открыть плеер"),
             telebot.types.BotCommand("donate", "Поддержка разработчика")
         ])
         print("✅ В меню команд оставлена только поддержка разработчика.")
