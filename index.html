@@ -51,7 +51,10 @@
     .hero-label { position:relative; z-index:1; color:#d8d0ff; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:1px; }
     .hero h2 { position:relative; z-index:1; margin:10px 0 7px; max-width:280px; font-size:23px; line-height:1.15; letter-spacing:-.5px; }
     .hero p { position:relative; z-index:1; margin:0; max-width:275px; color:#d2d4ed; font-size:13px; line-height:1.45; }
-    .searchbox { position:relative; z-index:1; display:flex; gap:8px; margin-top:18px; padding:6px; border:1px solid #ffffff22; border-radius:15px; background:#10131d66; }
+    .search-tabs { position:relative; z-index:1; display:flex; gap:8px; margin-top:14px; }
+    .search-tab { flex:1; min-height:36px; padding:7px 10px; border:1px solid #ffffff22; border-radius:12px; background:#10131d66; color:#d2d4ed; font-size:12px; font-weight:700; cursor:pointer; transition:.15s; }
+    .search-tab.active { background:linear-gradient(110deg,#9170ff,#6878ed); border-color:transparent; color:#fff; box-shadow:0 4px 14px #8064ee40; }
+    .searchbox { position:relative; z-index:1; display:flex; gap:8px; margin-top:14px; padding:6px; border:1px solid #ffffff22; border-radius:15px; background:#10131d66; }
     .searchbox input { width:100%; min-width:0; padding:8px 9px; border:0; outline:0; background:transparent; color:white; font-size:14px; user-select:text; }
     .searchbox input::placeholder { color:#c5c6db9c; }
     .search-btn { flex:0 0 42px; height:42px; border:0; border-radius:12px; background:#fff; color:#26213e; font-size:18px; font-weight:800; cursor:pointer; }
@@ -168,8 +171,12 @@
       <p class="subtitle">Ищи музыку и собирай свою коллекцию в одном месте.</p>
       <div class="hero">
         <div class="hero-label">ТВОЙ ПОИСК</div>
-        <h2>Какой трек<br>включим?</h2>
-        <p>Введи название песни или исполнителя.</p>
+        <h2 id="searchHeroTitle">Какой трек<br>включим?</h2>
+        <p id="searchHeroDesc">Введи название песни или исполнителя.</p>
+        <div class="search-tabs">
+          <button type="button" class="search-tab active" id="tabModeTrack">🎵 По трекам</button>
+          <button type="button" class="search-tab" id="tabModeAuthor">👤 По авторам</button>
+        </div>
         <form class="searchbox" id="searchForm">
           <input id="searchInput" type="search" placeholder="Название трека или артист" autocomplete="off" aria-label="Поиск музыки">
           <button class="search-btn" type="submit" aria-label="Найти">⌕</button>
@@ -694,25 +701,44 @@
         });
         $('playlistEmpty').style.display = state.playlists.length ? 'none' : 'flex';
       }
-      async function runSearch(query) {
+      let searchMode = 'track';
+      $('tabModeTrack').addEventListener('click', () => {
+        searchMode = 'track';
+        $('tabModeTrack').classList.add('active');
+        $('tabModeAuthor').classList.remove('active');
+        $('searchHeroTitle').innerHTML = 'Какой трек<br>включим?';
+        $('searchHeroDesc').textContent = 'Введи название песни или исполнителя.';
+        $('searchInput').placeholder = 'Название трека или артист';
+      });
+      $('tabModeAuthor').addEventListener('click', () => {
+        searchMode = 'author';
+        $('tabModeAuthor').classList.add('active');
+        $('tabModeTrack').classList.remove('active');
+        $('searchHeroTitle').innerHTML = 'Какого автора<br>послушаем?';
+        $('searchHeroDesc').textContent = 'Введи имя исполнителя или группы (например, Miyagi).';
+        $('searchInput').placeholder = 'Имя автора или группы';
+      });
+
+      async function runSearch(query, forcedMode = null) {
+        const mode = forcedMode || searchMode;
         const results = $('searchResults');
         results.replaceChildren();
         const loading = document.createElement('div');
         loading.className = 'loading';
-        loading.textContent = 'Ищу треки на SoundCloud…';
+        loading.textContent = mode === 'author' ? `Ищу треки автора «${query}» на SoundCloud…` : 'Ищу треки на SoundCloud…';
         results.append(loading);
         try {
-          const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
+          const data = await api(`/api/search?q=${encodeURIComponent(query)}&type=${encodeURIComponent(mode)}`);
           results.replaceChildren();
           const heading = document.createElement('h3');
           heading.className = 'list-section-title';
-          heading.textContent = `Результаты: ${query}`;
+          heading.textContent = mode === 'author' ? `Треки автора: ${query}` : `Результаты: ${query}`;
           const list = document.createElement('div');
           list.className = 'track-list';
           if (!data.tracks.length) {
             const empty = document.createElement('div');
             empty.className = 'loading';
-            empty.textContent = 'Ничего не найдено. Попробуй другой запрос.';
+            empty.textContent = mode === 'author' ? `У автора «${query}» ничего не найдено.` : 'Ничего не найдено. Попробуй другой запрос.';
             results.append(heading, empty);
             return;
           }
@@ -735,7 +761,10 @@
       $('searchForm').addEventListener('submit', event => {
         event.preventDefault();
         const query = $('searchInput').value.trim();
-        if (!query) { notify('Сначала введи название трека или исполнителя.'); return; }
+        if (!query) {
+          notify(searchMode === 'author' ? 'Введи имя исполнителя или группы.' : 'Сначала введи название трека или исполнителя.');
+          return;
+        }
         runSearch(query);
       });
       const genres = {
