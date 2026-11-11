@@ -1,4 +1,3 @@
-
 import os
 import sys
 import telebot
@@ -65,6 +64,9 @@ class DummyHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/stream":
             handle_miniapp_stream(self, parse_qs(parsed.query))
+            return
+        if parsed.path == "/api/lyrics":
+            handle_miniapp_lyrics(self, parse_qs(parsed.query))
             return
         self._send_json(404, {"error": "Не найдено"})
 
@@ -168,8 +170,29 @@ backup_msg_id = None
 data_lock = threading.Lock()
 users_offset = 0  # Поправка для ручной корректировки цифры в статистике
 
+# --- VIP ФУНКЦИИ ---
+def is_user_vip(user_id):
+    uid = str(user_id)
+    if uid not in user_settings:
+        return False
+    vip_expires = user_settings[uid].get("vip_expires", 0)
+    return vip_expires > time.time()
+
+def set_vip_status(user_id, duration_days=None, remove=False):
+    uid = str(user_id)
+    if uid not in user_settings:
+        user_settings[uid] = {"search_limit": 10}
+    if remove:
+        user_settings[uid]["vip_expires"] = 0
+    elif duration_days:
+        user_settings[uid]["vip_expires"] = time.time() + (duration_days * 24 * 60 * 60)
+    save_all_data()
+
 # --- ФУНКЦИЯ ПРОВЕРКИ ПОДПИСКИ ---
 def check_user_subscription(user_id):
+    # VIP пользователи обходят проверку подписки
+    if is_user_vip(user_id):
+        return True
     try:
         member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         status = getattr(member, "status", "left")
@@ -185,10 +208,11 @@ def send_subscription_prompt(chat_id):
     markup.row(InlineKeyboardButton("🔄 Я подписался", callback_data="check_sub"))
     bot.send_message(
         chat_id,
-        "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: https://t.me/+8JYfdTy2YhE0NDJi\n\nПосле подписки нажмите кнопку ниже:",
+        "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: https://t.me/+8JYfdTy2YhE0NDJi\n\nПосле подписки нажмите кнопку ниже:\n\n*Или купите VIP, чтобы отключить это требование навсегда!*",
         reply_markup=markup,
         parse_mode="Markdown"
     )
+
 # --- ПОДГОТОВКА ОБЛОЖКИ ДЛЯ TELEGRAM ---
 def prepare_telegram_thumbnail(image_filename):
     if not image_filename or not os.path.exists(image_filename):
@@ -482,6 +506,32 @@ def set_users_command(message):
     else:
         bot.reply_to(message, "❌ У вас нет прав для этой команды.")
 
+# --- АДМИН КОМАНДЫ VIP ---
+@bot.message_handler(commands=['givevip'])
+def give_vip_admin(message):
+    if message.chat.id == ADMIN_ID:
+        args = message.text.split()
+        if len(args) < 2:
+            return bot.reply_to(message, "❗️ Пример: `/givevip ID Дни`\nНапр: `/givevip 5378591975 30`", parse_mode="Markdown")
+        uid = args[1]
+        days = int(args[2]) if len(args) > 2 else 30
+        set_vip_status(uid, duration_days=days)
+        bot.reply_to(message, f"✅ Пользователю {uid} выдан VIP статус на {days} дн.")
+    else:
+        bot.reply_to(message, "❌ У вас нет прав.")
+
+@bot.message_handler(commands=['takevip'])
+def take_vip_admin(message):
+    if message.chat.id == ADMIN_ID:
+        args = message.text.split()
+        if len(args) < 2:
+            return bot.reply_to(message, "❗️ Пример: `/takevip ID`", parse_mode="Markdown")
+        uid = args[1]
+        set_vip_status(uid, remove=True)
+        bot.reply_to(message, f"❌ VIP статус пользователя {uid} отозван.")
+    else:
+        bot.reply_to(message, "❌ У вас нет прав.")
+
 # --- НАСТРОЙКИ И ПОЛЗУНОК ---
 def get_settings_keyboard(chat_id):
     chat_id_str = str(chat_id)
@@ -523,10 +573,13 @@ def handle_slider_callback(call):
     current_limit = user_settings[chat_id_str].get("search_limit", 10)
     action = call.data.split("_")[1]
     
+    # VIP лимит до 50, обычный до 25
+    max_limit = 50 if is_user_vip(call.from_user.id) else 25
+    
     if action == "minus":
         current_limit = max(5, current_limit - 5)
     elif action == "plus":
-        current_limit = min(25, current_limit + 5)
+        current_limit = min(max_limit, current_limit + 5)
         
     if current_limit != user_settings[chat_id_str]["search_limit"]:
         user_settings[chat_id_str]["search_limit"] = current_limit
@@ -734,46 +787,48 @@ def donate_command(message):
     markup.add(
         InlineKeyboardButton(text="⭐ 5 звёзд", callback_data="donate_5"),
         InlineKeyboardButton(text="⭐ 10 звёзд", callback_data="donate_10"),
-        InlineKeyboardButton(text="⭐ 15 звёзд", callback_data="donate_15"),
-        InlineKeyboardButton(text="⭐ 25 звёзд", callback_data="donate_25"),
+        InlineKeyboardButton(text="👑 VIP Неделя (50⭐)", callback_data="buy_vip_7"),
+        InlineKeyboardButton(text="👑 VIP Месяц (150⭐)", callback_data="buy_vip_30"),
         InlineKeyboardButton(text="✍️ Своё количество", callback_data="donate_custom")
     )
     bot.send_message(
         chat_id, 
-        "💖 Спасибо за желание поддержать проект!\nВыбери сумму в звёздах или введи своё количество:", 
+        "💖 Спасибо за желание поддержать проект!\nВыбери сумму в звёздах или купи VIP статус:", 
         reply_markup=markup
     )
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("donate_"))
+@bot.callback_query_handler(func=lambda call: call.data.startswith(("donate_", "buy_vip_")))
 def handle_donate_callback(call):
     chat_id = call.message.chat.id
-    action = call.data.replace("donate_", "")
-
-    if action == "custom":
+    action = call.data
+    
+    if action == "donate_custom":
         waiting_for_custom_stars.add(chat_id)
         bot.answer_callback_query(call.id)
         bot.send_message(chat_id, "✍️ Напиши число — сколько звёзд отправить (например: `50`):", parse_mode="Markdown")
         return
 
-    try:
-        stars_count = int(action)
-        send_invoice_stars(chat_id, stars_count)
-        bot.answer_callback_query(call.id)
-    except Exception as e:
-        print(f"Ошибка инвойса: {e}")
-        bot.answer_callback_query(call.id, "❌ Произошла ошибка.")
+    if action.startswith("buy_vip_"):
+        days = int(action.replace("buy_vip_", ""))
+        amount = 50 if days == 7 else 150
+        send_invoice_stars(chat_id, amount, f"VIP Подписка на {days} дн.", f"vip_{days}")
+    else:
+        stars_count = int(action.replace("donate_", ""))
+        send_invoice_stars(chat_id, stars_count, "Поддержка проекта", "donate")
+    
+    bot.answer_callback_query(call.id)
 
-def send_invoice_stars(chat_id, amount):
-    prices = [LabeledPrice(label=f'Поддержка на {amount} ⭐', amount=amount)]
+def send_invoice_stars(chat_id, amount, title, payload):
+    prices = [LabeledPrice(label=title, amount=amount)]
     bot.send_invoice(
         chat_id=chat_id,
-        title='Поддержка проекта',
-        description=f'Спасибо за донат в {amount} ⭐!',
-        invoice_payload=f'donate_{amount}',
+        title=title,
+        description=f'Сумма: {amount} ⭐',
+        invoice_payload=payload,
         provider_token='',
         currency='XTR',
         prices=prices,
-        start_parameter='donate'
+        start_parameter='vip'
     )
 
 @bot.pre_checkout_query_handler(func=lambda query: True)
@@ -782,7 +837,14 @@ def checkout(pre_checkout_query):
 
 @bot.message_handler(content_types=['successful_payment'])
 def got_payment(message):
-    bot.reply_to(message, "🎉 Ура! Огромное спасибо за донат! Твоя поддержка бесценна ❤️")
+    payload = message.successful_payment.invoice_payload
+    user_id = message.from_user.id
+    if payload.startswith("vip_"):
+        days = int(payload.replace("vip_", ""))
+        set_vip_status(user_id, duration_days=days)
+        bot.reply_to(message, f"🎉 Поздравляем! Вам выдан VIP статус на {days} дней! Теперь все функции разблокированы ❤️")
+    else:
+        bot.reply_to(message, "🎉 Ура! Огромное спасибо за донат! Твоя поддержка бесценна ❤️")
 
 @bot.message_handler(commands=['m', 'play', 'music'])
 def handle_group_music(message):
@@ -880,6 +942,10 @@ def text_handler(message):
             bot.reply_to(message, "❌ Пожалуйста, введи корректное число. Попробуй снова через /donate")
         return
 
+    if not check_user_subscription(message.from_user.id):
+        send_subscription_prompt(chat_id)
+        return
+
     original_queries[chat_id] = message.text
     search_music_by_query(message, query=message.text, page=1, is_new=True, is_random=False)
 
@@ -892,9 +958,12 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
 
     def worker():
         try:
+            # ЛИМИТЫ: VIP до 50, Обычный до 25
+            max_possible = 50 if is_user_vip(chat_id) else 25
             user_limit = user_settings.get(str(chat_id), {}).get("search_limit", 10)
+            effective_limit = min(max_possible, user_limit)
             
-            limit_ydl = 50 if is_random else max(20, user_limit * page)
+            limit_ydl = 50 if is_random else max(20, effective_limit * page)
             normalized_query = " ".join(query.casefold().split())
             cache_key = (normalized_query, limit_ydl)
             now = time.time()
@@ -929,14 +998,14 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
                         search_results_cache.pop(oldest_key, None)
                 
             if is_random:
-                if len(all_tracks) >= user_limit:
-                    tracks = random.sample(all_tracks, user_limit)
+                if len(all_tracks) >= effective_limit:
+                    tracks = random.sample(all_tracks, effective_limit)
                 else:
                     tracks = all_tracks.copy()
                     random.shuffle(tracks)
             else:
-                start = (page - 1) * user_limit
-                tracks = all_tracks[start:start + user_limit]
+                start = (page - 1) * effective_limit
+                tracks = all_tracks[start:start + effective_limit]
                 
             if not tracks:
                 bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id, reply_markup=None)
@@ -1188,7 +1257,6 @@ def best_soundcloud_thumbnail(info):
         url = str(candidate).strip()
         parsed = urlparse(url)
         if parsed.scheme == "https" and parsed.hostname and ("sndcdn.com" in parsed.hostname or "soundcloud.com" in parsed.hostname):
-            # SoundCloud's "-large" artwork is often the 100x100 variant.
             url = url.replace("-large.", "-t500x500.")
             return url[:1000]
     return ""
@@ -1231,7 +1299,6 @@ def resolve_soundcloud_metadata(track_url):
 
 
 def fill_missing_track_covers(tracks, max_items=12):
-    """Подтягивает artwork для старых сохранённых треков, у которых раньше не было thumbnail."""
     missing = [i for i, track in enumerate(tracks)
                if isinstance(track, dict) and not track.get("thumbnail") and track.get("url")][:max_items]
     if not missing:
@@ -1279,12 +1346,16 @@ def handle_miniapp_get_data(handler):
     changed |= fill_missing_track_covers(settings.get("history", []), max_items=10)
     if changed:
         save_all_data()
+    
+    uid = user["id"]
     api_json(handler, 200, {
-        "user": {"id": user["id"], "first_name": user.get("first_name", "Музыка")},
+        "user": {"id": uid, "first_name": user.get("first_name", "Музыка")},
         "search_limit": int(settings.get("search_limit", 10)),
         "favorites": settings.get("favorites", []),
         "history": settings.get("history", []),
-        "playlists": settings.get("playlists", [])
+        "playlists": settings.get("playlists", []),
+        "is_vip": is_user_vip(uid),
+        "vip_expires": settings.get("vip_expires", 0)
     })
     favs = settings.get("favorites", [])
     if favs:
@@ -1306,7 +1377,11 @@ def handle_miniapp_search(handler, query_params):
     if not query:
         return api_json(handler, 400, {"error": "Введи имя автора или название трека."})
     settings = get_user_settings(user["id"])
-    limit = max(5, min(25, int(settings.get("search_limit", 10))))
+    
+    # VIP ЛИМИТ: До 50, обычный до 25
+    max_possible = 50 if is_user_vip(user["id"]) else 25
+    limit = max(5, min(max_possible, int(settings.get("search_limit", 10))))
+    
     try:
         ydl_opts = {
             "extract_flat": True, "quiet": True, "no_warnings": True,
@@ -1342,7 +1417,6 @@ def handle_miniapp_search(handler, query_params):
         else:
             tracks = tracks[:limit]
 
-        # В плоских результатах SoundCloud часто не отдаёт artwork_url.
         missing = [i for i, track in enumerate(tracks) if not track.get("thumbnail")][:min(8, len(tracks))]
         if missing:
             with ThreadPoolExecutor(max_workers=3) as pool:
@@ -1413,7 +1487,6 @@ def prewarm_tracks_stream_urls(tracks, max_count=20):
 
 
 def handle_miniapp_stream(handler, query_params):
-    """Возвращает редирект на прямой аудиопоток SoundCloud. Браузер сам поддерживает Range/перемотку."""
     auth_data = (query_params.get("auth") or [""])[0]
     user = validate_miniapp_request(handler, auth_data)
     if not user:
@@ -1436,7 +1509,15 @@ def handle_miniapp_stream(handler, query_params):
         api_json(handler, 502, {"error": "Не удалось получить аудио для этого трека."})
 
 
-def download_track_for_miniapp(user_id, track):
+def handle_miniapp_lyrics(handler, query_params):
+    # Простая заглушка для текстов (в реальности нужен API Genius/Musixmatch)
+    title = (query_params.get("title") or [""])[0]
+    artist = (query_params.get("artist") or [""])[0]
+    api_json(handler, 200, {
+        "lyrics": f"Текст песни «{title}» исполнителя {artist} сейчас недоступен в базе. Попробуйте позже!"
+    })
+
+def download_track_for_miniapp(user_id, track, effect="none"):
     track_url = track["url"]
     title = track["title"]
     uploader = track["uploader"]
@@ -1462,6 +1543,24 @@ def download_track_for_miniapp(user_id, track):
             info = ydl.extract_info(track_url, download=True)
             audio_filename = ydl.prepare_filename(info)
             original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
+        
+        # --- ПРИМЕНЕНИЕ ЭФФЕКТОВ (FFMPEG) ---
+        if effect != "none":
+            output_filename = "fx_" + audio_filename
+            audio_filter = ""
+            if effect == "bassboost":
+                audio_filter = "bass=g=10"
+            elif effect == "slowed":
+                audio_filter = "atempo=0.8,aecho=0.8:0.88:60:0.4"
+            elif effect == "nightcore":
+                audio_filter = "atempo=1.25"
+            elif effect == "8d":
+                audio_filter = "apulsator=hz=0.1"
+            
+            cmd = ["ffmpeg", "-y", "-i", audio_filename, "-af", audio_filter, output_filename]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            audio_filename = output_filename
+
         audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
         with open(audio_filename, "rb") as audio:
             thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
@@ -1505,8 +1604,12 @@ def handle_miniapp_post(handler, path, payload):
             count = int(payload.get("count", 10))
         except (TypeError, ValueError):
             return api_json(handler, 400, {"error": "Некорректное количество треков."})
-        if count not in (5, 10, 15, 20, 25):
-            return api_json(handler, 400, {"error": "Количество должно быть от 5 до 25."})
+        
+        # Лимит: VIP до 50, обычный до 25
+        max_possible = 50 if is_user_vip(user_id) else 25
+        if count < 5 or count > max_possible:
+            return api_json(handler, 400, {"error": f"Лимит для вашего статуса: от 5 до {max_possible}."})
+        
         settings["search_limit"] = count
         save_all_data()
         return api_json(handler, 200, {"ok": True, "search_limit": count})
@@ -1581,9 +1684,14 @@ def handle_miniapp_post(handler, path, payload):
         track = normalize_miniapp_track(payload.get("track"))
         if not track:
             return api_json(handler, 400, {"error": "Некорректный трек."})
+        
+        effect = payload.get("effect", "none")
+        if effect != "none" and not is_user_vip(user_id):
+            return api_json(handler, 403, {"error": "Аудио-эффекты доступны только с VIP подпиской!"})
+
         add_to_user_history(settings, track)
         save_all_data()
-        threading.Thread(target=download_track_for_miniapp, args=(user_id, track), daemon=True).start()
+        threading.Thread(target=download_track_for_miniapp, args=(user_id, track, effect), daemon=True).start()
         return api_json(handler, 202, {
             "ok": True,
             "message": "Отправляю трек в Telegram. Он появится в чате с ботом."
