@@ -59,7 +59,6 @@
       --accent: #38bdf8;
       --accent-grad: linear-gradient(110deg, #38bdf8, #818cf8);
       --glow: rgba(56, 189, 248, 0.25);
-      backdrop-filter: blur(16px);
     }
     body.theme-oled {
       --bg: #000000;
@@ -72,9 +71,12 @@
       --accent-grad: linear-gradient(110deg, #555555, #ffffff);
       --glow: rgba(255, 255, 255, 0.2);
     }
+    /* фон страницы тоже следует теме */
+    html { background: var(--bg); }
+    body.theme-cyberpunk, body.theme-gold, body.theme-glass, body.theme-oled { background: var(--bg); }
 
     * { box-sizing: border-box; }
-    html { min-height: 100%; background: var(--bg); }
+    html { min-height: 100%; }
     body {
       margin: 0; min-height: 100vh; min-height: 100dvh;
       padding: 0 0 calc(88px + env(safe-area-inset-bottom));
@@ -88,7 +90,7 @@
     button, input { font: inherit; }
     button { color: inherit; }
     .app { width: min(100%, 620px); margin: 0 auto; padding: 18px 18px 22px; }
-    
+
     .topline { display:flex; align-items:center; justify-content:space-between; margin: 4px 2px 24px; }
     .brand { display:flex; align-items:center; gap:11px; font-size:17px; font-weight:800; letter-spacing:-.3px; }
     .brand-mark { display:grid; place-items:center; width:38px; height:38px; border-radius:13px; background:linear-gradient(145deg,#9d7cff,#5c62df); box-shadow:0 7px 22px #795eff35; font-size:19px; }
@@ -96,7 +98,7 @@
     .vip-pill { display:inline-flex; align-items:center; gap:5px; padding:6px 12px; border-radius:20px; font-size:11px; font-weight:800; border:0; background:linear-gradient(110deg,#f59e0b,#fbbf24); color:#1a1300; cursor:pointer; box-shadow:0 4px 14px rgba(245,158,11,0.3); }
     .vip-pill.inactive { background:rgba(255,255,255,0.08); color:var(--muted); box-shadow:none; }
     .avatar { display:grid; place-items:center; width:38px; height:38px; border:1px solid var(--line); border-radius:50%; background:var(--panel); color:var(--muted); cursor:pointer; }
-    
+
     .screen { display:none; animation: appear .18s ease-out; }
     .screen.active { display:block; }
     @keyframes appear { from { opacity:.4; transform:translateY(5px); } to { opacity:1; transform:none; } }
@@ -104,13 +106,13 @@
     .eyebrow { color:var(--muted); font-size:12px; font-weight:700; letter-spacing:1.1px; text-transform:uppercase; }
     h1 { margin:7px 0 8px; font-size:29px; line-height:1.1; letter-spacing:-1px; }
     .subtitle { margin:0; color:var(--muted); font-size:14px; line-height:1.5; }
-    
+
     .hero { position:relative; overflow:hidden; margin:22px 0 24px; padding:21px; border:1px solid #a38cff30; border-radius:25px; background:linear-gradient(125deg,#28224b 0%,#252d50 54%,#1b3445 100%); box-shadow:0 18px 38px #00000020; }
     .hero::after { content:"♫"; position:absolute; right:14px; top:-24px; color:#ffffff12; font-size:150px; font-weight:900; transform:rotate(13deg); pointer-events:none; }
     .hero-label { position:relative; z-index:1; color:#d8d0ff; font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:1px; }
-    .hero h2 { position:relative; z-index:1; margin:10px 0 7px; max-width:280px; font-size:23px; line-height:1.15; letter-spacing:-.5px; }
+    .hero h2 { position:relative; z-index:1; margin:10px 0 7px; max-width:280px; font-size:23px; line-height:1.15; letter-spacing:-.5px; color:#fff; }
     .hero p { position:relative; z-index:1; margin:0; max-width:275px; color:#d2d4ed; font-size:13px; line-height:1.45; }
-    
+
     .search-tabs { position:relative; z-index:1; display:flex; gap:8px; margin-top:14px; }
     .search-tab { flex:1; min-height:36px; padding:7px 10px; border:1px solid #ffffff22; border-radius:12px; background:#10131d66; color:#d2d4ed; font-size:12px; font-weight:700; cursor:pointer; transition:.15s; }
     .search-tab.active { background:var(--accent-grad); border-color:transparent; color:#fff; box-shadow:0 4px 14px #8064ee40; }
@@ -118,7 +120,7 @@
     .searchbox input { width:100%; min-width:0; padding:8px 9px; border:0; outline:0; background:transparent; color:white; font-size:14px; user-select:text; }
     .searchbox input::placeholder { color:#c5c6db9c; }
     .search-btn { flex:0 0 42px; height:42px; border:0; border-radius:12px; background:#fff; color:#26213e; font-size:18px; font-weight:800; cursor:pointer; }
-    
+
     .section-head { display:flex; align-items:center; justify-content:space-between; margin:0 2px 13px; }
     .section-head h3 { margin:0; font-size:17px; letter-spacing:-.3px; }
     .section-note { color:var(--muted); font-size:12px; }
@@ -128,14 +130,14 @@
     .genre-icon { display:grid; place-items:center; flex:0 0 42px; height:42px; border-radius:14px; background:var(--tint, #8b5cf622); font-size:21px; }
     .genre strong { display:block; font-size:14px; }
     .genre small { display:block; margin-top:4px; color:var(--muted); font-size:11px; }
-    
+
     .page-head { margin:10px 1px 22px; }
     .page-head h1 { font-size:27px; }
     .empty { display:flex; flex-direction:column; align-items:center; padding:37px 22px; border:1px dashed var(--line); border-radius:22px; background:color-mix(in srgb,var(--panel) 60%, transparent); text-align:center; }
     .empty-icon { display:grid; place-items:center; width:64px; height:64px; margin-bottom:15px; border-radius:21px; background:#9273ff1a; font-size:27px; }
     .empty strong { font-size:16px; }
     .empty p { max-width:260px; margin:7px 0 0; color:var(--muted); font-size:13px; line-height:1.5; }
-    
+
     .playlist-list { display:grid; gap:10px; margin-top:16px; }
     .playlist-item { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; padding:14px 15px; border:1px solid var(--line); border-radius:17px; background:var(--panel); }
     .playlist-item strong { display:block; font-size:14px; }
@@ -143,10 +145,10 @@
     .playlist-tracks { flex:0 0 100%; display:grid; gap:7px; margin-top:7px; }
     .playlist-track { color:var(--muted); font-size:12px; }
     .delete-btn { width:34px; height:34px; border:0; border-radius:11px; background:#ff6b7b16; color:var(--danger); cursor:pointer; }
-    
+
     .primary-btn { display:flex; justify-content:center; align-items:center; gap:8px; width:100%; min-height:50px; padding:13px 16px; border:0; border-radius:16px; background:var(--accent-grad); color:white; font-size:14px; font-weight:800; box-shadow:0 9px 22px var(--glow); cursor:pointer; }
     .primary-btn:active { transform:scale(.985); }
-    
+
     /* НАСТРОЙКИ */
     .settings-card { padding:19px; border:1px solid var(--line); border-radius:21px; background:var(--panel); margin-bottom:14px; }
     .setting-row { display:flex; justify-content:space-between; align-items:center; gap:12px; }
@@ -169,6 +171,7 @@
     /* ВЫБОР ТЕМ */
     .theme-selector { display:grid; grid-template-columns:repeat(2, 1fr); gap:8px; margin-top:12px; }
     .theme-btn { padding:12px; border-radius:14px; border:1px solid var(--line); background:var(--panel-2); text-align:left; cursor:pointer; font-size:12px; font-weight:700; transition:0.15s; }
+    .theme-btn.locked { opacity:.55; }
     .theme-btn.active { border-color:var(--accent); outline:2px solid var(--accent); }
 
     /* VIP СЕКЦИЯ */
@@ -180,6 +183,7 @@
     .vip-plans { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:14px; }
     .vip-plan-card { padding:16px; border-radius:18px; border:1px solid rgba(245, 158, 11, 0.35); background:rgba(0,0,0,0.25); text-align:center; cursor:pointer; transition:transform 0.15s; }
     .vip-plan-card:active { transform:scale(0.97); }
+    .vip-plan-card.busy { opacity:.5; pointer-events:none; }
     .vip-plan-card strong { display:block; font-size:15px; margin-bottom:4px; }
     .vip-plan-card .price { font-size:19px; font-weight:900; color:#fbbf24; }
 
@@ -189,8 +193,8 @@
     .nav-item { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; min-height:53px; padding:5px 2px; border:0; border-radius:13px; background:transparent; color:var(--muted); font-size:10px; cursor:pointer; }
     .nav-item .nav-icon { font-size:19px; line-height:1; }
     .nav-item.active { background:#9478ff18; color:var(--accent); font-weight:750; }
-    
-    .toast { position:fixed; z-index:40; left:50%; bottom:calc(82px + env(safe-area-inset-bottom)); width:max-content; max-width:calc(100% - 36px); padding:12px 16px; border:1px solid var(--line); border-radius:14px; background:var(--panel); color:var(--text); box-shadow:0 10px 28px #0004; font-size:13px; text-align:center; opacity:0; transform:translate(-50%,10px); pointer-events:none; transition:.2s; }
+
+    .toast { position:fixed; z-index:90; left:50%; bottom:calc(82px + env(safe-area-inset-bottom)); width:max-content; max-width:calc(100% - 36px); padding:12px 16px; border:1px solid var(--line); border-radius:14px; background:var(--panel); color:var(--text); box-shadow:0 10px 28px #0004; font-size:13px; text-align:center; opacity:0; transform:translate(-50%,10px); pointer-events:none; transition:.2s; }
     .toast.show { opacity:1; transform:translate(-50%,0); }
 
     /* КАРТОЧКА ТРЕКА */
@@ -244,11 +248,12 @@
     .modal-actions button { flex:1; min-height:43px; border:0; border-radius:12px; font-size:13px; font-weight:800; cursor:pointer; }
     .modal-cancel { background:color-mix(in srgb,var(--text) 10%,transparent); color:var(--text); }
     .modal-save { background:var(--accent-grad); color:white; }
-    
-    .lyrics-box { margin-top:12px; padding:14px; border-radius:14px; background:rgba(0,0,0,0.3); font-size:13px; line-height:1.6; white-space:pre-wrap; max-height:50vh; overflow-y:auto; color:var(--text); }
+
+    .lyrics-box { margin-top:12px; padding:14px; border-radius:14px; background:rgba(0,0,0,0.3); font-size:13px; line-height:1.6; white-space:pre-wrap; max-height:50vh; overflow-y:auto; color:var(--text); user-select:text; }
     .effect-btn { display:block; width:100%; text-align:left; padding:12px; margin-bottom:8px; border:1px solid var(--line); border-radius:12px; background:rgba(255,255,255,0.04); cursor:pointer; transition:0.15s; }
     .effect-btn:active { background:rgba(255,255,255,0.1); }
-    
+    .effect-btn small { color:var(--muted); }
+
     @media (min-width:560px) { .app { padding-top:25px; } .hero { padding:25px; } .genre-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; } }
   </style>
@@ -321,29 +326,30 @@
       <div class="vip-banner">
         <h2>👑 Премиум VIP Статус</h2>
         <p class="subtitle" style="color:var(--text);">Прокачай свой музыкальный опыт на максимум!</p>
-        
+
         <ul class="vip-features">
-          <li><span>🚀</span><strong>Без обязательной подписки</strong> на каналы навсегда</li>
-          <li><span>📈</span><strong>Лимит до 50 треков</strong> в поиске за один раз</li>
-          <li><span>📜</span><strong>Тексты всех песен</strong> прямо в приложении и боте</li>
-          <li><span>🎚</span><strong>Bass Boost, 8D, Slowed & Nightcore</strong> при скачивании</li>
-          <li><span>🎨</span><strong>Эксклюзивные VIP-темы</strong> оформления интерфейса</li>
+          <li><span>🚀</span><div><strong>Без обязательной подписки</strong> на группу, пока VIP активен</div></li>
+          <li><span>📈</span><div><strong>Лимит до 50 треков</strong> в поиске за один раз</div></li>
+          <li><span>📜</span><div><strong>Тексты песен</strong> прямо в приложении и в боте</div></li>
+          <li><span>🎚</span><div><strong>Bass Boost, 8D, Slowed & Nightcore</strong> при скачивании</div></li>
+          <li><span>🎨</span><div><strong>Эксклюзивные VIP-темы</strong> оформления интерфейса</div></li>
         </ul>
 
         <div id="vipStatusText" style="margin:10px 0; font-weight:800; color:#fbbf24;"></div>
 
         <div class="vip-plans">
-          <div class="vip-plan-card" id="buyVipWeek">
+          <div class="vip-plan-card" id="buyVipWeek" role="button" tabindex="0">
             <strong>1 Неделя</strong>
             <div class="price">50 ⭐</div>
             <small>Telegram Stars</small>
           </div>
-          <div class="vip-plan-card" id="buyVipMonth">
+          <div class="vip-plan-card" id="buyVipMonth" role="button" tabindex="0">
             <strong>1 Месяц</strong>
             <div class="price">150 ⭐</div>
             <small>Выгода 25%</small>
           </div>
         </div>
+        <p class="subtitle" style="margin-top:12px; font-size:12px;">Покупка продлевает уже активную подписку.</p>
       </div>
     </section>
 
@@ -443,12 +449,12 @@
     <div class="modal-card">
       <h3 style="margin:0 0 8px;">🎚 Выбери аудио-эффект</h3>
       <p class="subtitle" style="margin-bottom:14px;">(Премиум эквалайзер доступен с VIP)</p>
-      <button class="effect-btn" data-fx="none" type="button"><strong>🔊 Обычный звук</strong><br><small>Оригинальное студийное качество</small></button>
-      <button class="effect-btn" data-fx="bassboost" type="button"><strong>🔊 Bass Boost (VIP)</strong><br><small>Мощное усиление низких частот</small></button>
+      <button class="effect-btn" data-fx="none" type="button"><strong>🔊 Обычный звук</strong><br><small>Оригинальное качество</small></button>
+      <button class="effect-btn" data-fx="bassboost" type="button"><strong>🔉 Bass Boost (VIP)</strong><br><small>Мощное усиление низких частот</small></button>
       <button class="effect-btn" data-fx="8d" type="button"><strong>🎧 8D Audio (VIP)</strong><br><small>Объёмный вращающийся звук для наушников</small></button>
       <button class="effect-btn" data-fx="slowed" type="button"><strong>🐢 Slowed & Reverb (VIP)</strong><br><small>Замедленный атмосферный вайб</small></button>
       <button class="effect-btn" data-fx="nightcore" type="button"><strong>⚡ Nightcore (VIP)</strong><br><small>Ускоренный динамичный бит и ритм</small></button>
-      <button class="primary-btn" style="margin-top:10px; background:rgba(255,255,255,0.08);" id="closeEffectBtn" type="button">Отмена</button>
+      <button class="primary-btn" style="margin-top:10px; background:rgba(255,255,255,0.08); box-shadow:none;" id="closeEffectBtn" type="button">Отмена</button>
     </div>
   </div>
 
@@ -727,38 +733,51 @@
       range.addEventListener('input', updateSlider);
       range.addEventListener('change', updateSlider);
 
+      // Темы: меняем только theme-* классы, чтобы не затирать has-player
       function applyTheme(name) {
-        document.body.className = '';
-        if (name && name !== 'default') {
-          document.body.classList.add(`theme-${name}`);
-        }
+        const theme = name || 'default';
+        Array.from(document.body.classList)
+          .filter(c => c.startsWith('theme-'))
+          .forEach(c => document.body.classList.remove(c));
+        if (theme !== 'default') document.body.classList.add(`theme-${theme}`);
         document.querySelectorAll('.theme-btn').forEach(btn => {
-          btn.classList.toggle('active', btn.dataset.theme === name);
+          btn.classList.toggle('active', btn.dataset.theme === theme);
         });
-        state.theme = name;
+        state.theme = theme;
       }
 
       document.querySelectorAll('.theme-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', async () => {
           const t = btn.dataset.theme;
           if (t !== 'default' && !state.isVip) {
             notify('👑 Эта тема доступна только для VIP подписчиков!');
             return;
           }
+          const previous = state.theme;
           applyTheme(t);
+          // сразу сохраняем тему на сервере
+          try {
+            await api('/api/settings', { method: 'POST', body: JSON.stringify({ count: Number(range.value), theme: t }) });
+          } catch (e) {
+            applyTheme(previous);
+            notify(e.message);
+          }
         });
       });
 
       function updateVipUI() {
         const pill = $('vipHeaderPill');
+        document.querySelectorAll('.theme-btn').forEach(btn => {
+          btn.classList.toggle('locked', btn.dataset.theme !== 'default' && !state.isVip);
+        });
         if (state.isVip) {
           pill.className = 'vip-pill';
           pill.textContent = '👑 VIP';
           range.max = "50";
           $('sliderNote').textContent = 'VIP режим активен: выдача до 50 треков!';
           $('rangeLabels').innerHTML = '<span>5</span><span>15</span><span>25</span><span>35</span><span>50</span>';
-          const expDate = new Date(state.vipExpires * 1000).toLocaleDateString('ru-RU');
-          $('vipStatusText').textContent = `✅ Твой VIP активен до ${expDate}`;
+          const exp = new Date(state.vipExpires * 1000);
+          $('vipStatusText').textContent = `✅ Твой VIP активен до ${exp.toLocaleDateString('ru-RU')} ${exp.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`;
         } else {
           pill.className = 'vip-pill inactive';
           pill.textContent = '👑 VIP';
@@ -800,15 +819,38 @@
       $('vipHeaderPill').addEventListener('click', () => showScreen('vip'));
       $('profileBtn').addEventListener('click', () => showScreen('settings'));
 
-      // Покупка VIP в боте через Stars
-      $('buyVipWeek').addEventListener('click', () => {
-        notify('Открываю счёт на 50 ⭐ в чате бота...');
-        if (tg && tg.openTelegramLink) tg.openTelegramLink('https://t.me/' + (tg.initDataUnsafe?.bot_username || '') + '?start=vip');
-      });
-      $('buyVipMonth').addEventListener('click', () => {
-        notify('Открываю счёт на 150 ⭐ в чате бота...');
-        if (tg && tg.openTelegramLink) tg.openTelegramLink('https://t.me/' + (tg.initDataUnsafe?.bot_username || '') + '?start=vip');
-      });
+      // ПОКУПКА VIP через Telegram Stars (счёт открывается прямо внутри Mini App)
+      async function buyVip(plan, card) {
+        if (!tg || !tg.openInvoice) {
+          notify('Обнови Telegram или купи VIP командой /vip в боте.');
+          return;
+        }
+        card.classList.add('busy');
+        try {
+          const res = await api('/api/invoice', { method: 'POST', body: JSON.stringify({ plan }) });
+          tg.openInvoice(res.invoice_url, async (status) => {
+            card.classList.remove('busy');
+            if (status === 'paid') {
+              notify('✅ Оплата прошла! Активирую VIP…');
+              // сервер получает платёж чуть позже — пробуем обновить статус несколько раз
+              for (let i = 0; i < 6; i++) {
+                await new Promise(r => setTimeout(r, 1500));
+                await loadAppData(true);
+                if (state.isVip) { notify('👑 VIP активирован!'); break; }
+              }
+            } else if (status === 'failed') {
+              notify('❌ Не удалось оплатить. Попробуй ещё раз.');
+            } else if (status === 'cancelled') {
+              notify('Оплата отменена.');
+            }
+          });
+        } catch (e) {
+          card.classList.remove('busy');
+          notify(e.message);
+        }
+      }
+      $('buyVipWeek').addEventListener('click', () => buyVip('week', $('buyVipWeek')));
+      $('buyVipMonth').addEventListener('click', () => buyVip('month', $('buyVipMonth')));
 
       function formatDuration(seconds) {
         if (!Number.isFinite(Number(seconds))) return '';
@@ -816,19 +858,25 @@
         return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}`;
       }
 
-      // ТЕКСТ ПЕСНИ
+      // ТЕКСТ ПЕСНИ (VIP)
       async function openLyrics(track) {
+        if (!state.isVip) {
+          notify('👑 Тексты песен доступны только с VIP!');
+          showScreen('vip');
+          return;
+        }
         $('lyricsTitle').textContent = `📜 ${track.title}`;
         $('lyricsBody').textContent = 'Ищу текст песни в базе...';
         $('lyricsModal').classList.add('open');
         try {
-          const res = await api(`/api/lyrics?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.uploader)}`);
+          const res = await api(`/api/lyrics?title=${encodeURIComponent(track.title)}&artist=${encodeURIComponent(track.uploader || '')}`);
           $('lyricsBody').textContent = res.lyrics || 'Текст для этого трека не найден.';
         } catch (e) {
           $('lyricsBody').textContent = e.message;
         }
       }
       $('closeLyricsBtn').onclick = () => $('lyricsModal').classList.remove('open');
+      $('lyricsModal').addEventListener('click', e => { if (e.target === $('lyricsModal')) $('lyricsModal').classList.remove('open'); });
 
       // СКАЧИВАНИЕ С АУДИОЭФФЕКТАМИ
       document.querySelectorAll('.effect-btn').forEach(btn => {
@@ -839,21 +887,23 @@
             return;
           }
           $('effectModal').classList.remove('open');
-          if (!targetDownloadTrack) return;
-          notify('⏳ Обрабатываю трек и отправляю в бота...');
+          const track = targetDownloadTrack;
+          if (!track) return;
+          notify(fx === 'none' ? '⏳ Отправляю трек в бота...' : '⏳ Обрабатываю трек, это займёт до минуты...');
           try {
             const res = await api('/api/download', {
               method: 'POST',
-              body: JSON.stringify({ track: targetDownloadTrack, effect: fx })
+              body: JSON.stringify({ track, effect: fx })
             });
             notify(res.message || 'Трек отправлен в Telegram!');
-            state.history = [targetDownloadTrack, ...state.history.filter(item => item.url !== targetDownloadTrack.url)].slice(0, 50);
+            state.history = [track, ...state.history.filter(item => item.url !== track.url)].slice(0, 50);
           } catch (e) {
             notify(e.message);
           }
         };
       });
       $('closeEffectBtn').onclick = () => $('effectModal').classList.remove('open');
+      $('effectModal').addEventListener('click', e => { if (e.target === $('effectModal')) $('effectModal').classList.remove('open'); });
 
       function createTrackCard(track, collectionName = '') {
         const card = document.createElement('article');
@@ -1090,13 +1140,14 @@
         try {
           const result = await api('/api/settings', { method: 'POST', body: JSON.stringify({ count, theme: state.theme }) });
           state.searchLimit = result.search_limit;
-          notify('Настройки и тема сохранены в боте.');
+          notify('Настройки и тема сохранены.');
         } catch (e) { notify(e.message); }
       });
 
-      async function loadAppData() {
+      // silent=true — обновление после покупки (без повторной предзагрузки и тостов об ошибках)
+      async function loadAppData(silent = false) {
         if (!initData) {
-          notify('Открой приложение кнопкой в Telegram-боте.');
+          if (!silent) notify('Открой приложение кнопкой в Telegram-боте.');
           return;
         }
         try {
@@ -1108,17 +1159,19 @@
           state.isVip = !!data.is_vip;
           state.vipExpires = Number(data.vip_expires) || 0;
           state.theme = data.theme || 'default';
-          
-          range.value = String(state.searchLimit);
-          applyTheme(state.theme);
+
+          // ВАЖНО: сначала VIP-UI (он выставляет max у ползунка), потом value — иначе 50 обрежется до 25
           updateVipUI();
+          range.value = String(Math.min(Number(range.max), state.searchLimit));
+          updateSlider();
+          applyTheme(state.isVip ? state.theme : 'default');
           renderCollection('favorites');
           renderCollection('history');
           renderPlaylists();
-          if (state.favorites.length > 0) {
+          if (!silent && state.favorites.length > 0) {
             state.favorites.slice(0, 5).forEach(preloadAudio);
           }
-        } catch (e) { notify(e.message); }
+        } catch (e) { if (!silent) notify(e.message); }
       }
       loadAppData();
     })();
