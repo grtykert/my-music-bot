@@ -778,14 +778,13 @@ def send_welcome(message):
 
     text = (
         "👋 Привет! Напиши название песни, и я попробую её найти. 🎵\n\n"
-        "💡 Для точного поиска пиши так: `исполнитель название` (например, `Dree Low Ha Ha`).\n\n"
         "💬 Наша группа: https://t.me/+8JYfdTy2YhE0NDJi\n\n"
         "👑 VIP подписка: /vip\n"
         "💖 Поддержка разработчика: /donate"
     )
     if message.chat.type == "private" and not WEB_APP_URL:
         text += "\n\n⚠️ Mini App пока не настроен. Проверь WEB_APP_URL в переменных Render."
-    bot.send_message(chat_id, text, disable_web_page_preview=True, parse_mode="Markdown")
+    bot.send_message(chat_id, text, disable_web_page_preview=True)
 
     if message.chat.type == "private" and WEB_APP_URL:
         bot.send_message(chat_id, "Музыкальное приложение:", reply_markup=open_app_markup())
@@ -1053,26 +1052,84 @@ def handle_chat_member(message):
 BAD_WORDS = ("slowed", "sped up", "speed up", "speedup", "nightcore", "remix",
              "reverb", "cover", "mashup", "bass boosted", "8d", "karaoke", "instrumental")
 
+NOISE_TOKENS = {"official", "audio", "video", "lyrics", "lyric", "feat", "ft", "prod",
+                "music", "new", "hd", "hq", "free", "download", "full"}
+WEAK_SCORE = 11  # если лучший результат слабее — пробуем варианты запроса
+
+_LAYOUT_EN = "qwertyuiop[]asdfghjkl;'zxcvbnm,./"
+_LAYOUT_RU = "йцукенгшщзхъфывапролджэячсмитьбю."
+EN2RU = str.maketrans(_LAYOUT_EN, _LAYOUT_RU)
+_TRANSLIT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e", "ж": "zh",
+    "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "о": "o",
+    "п": "p", "р": "r", "с": "s", "т": "t", "у": "u", "ф": "f", "х": "h", "ц": "ts",
+    "ч": "ch", "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+}
+
 
 def entry_url(item):
-    """Всегда берём нормальную страницу трека, а не api-ссылку."""
+    # Всегда берём нормальную страницу трека, а не api-ссылку.
     return item.get("webpage_url") or item.get("original_url") or item.get("url")
 
 
-def rank_tracks(entries, query):
-    """Переранжирует выдачу: ремиксы/slowed/короткие и слишком длинные — вниз."""
-    q = (query or "").casefold()
-    q_tokens = set(re.findall(r"\w+", q))
+def norm_text(s):
+    s = (s or "").casefold().replace("ё", "е")
+    s = re.sub(r"[^\w\s]", " ", s)
+    return " ".join(s.split())
+
+
+def _query_tokens(q):
+    tokens = [t for t in norm_text(q).split() if t not in NOISE_TOKENS]
+    return tokens or norm_text(q).split()
+
+
+def _match_one(track, q_norm, q_tokens):
+    from difflib import SequenceMatcher
+    title_n = norm_text(track.get("title"))
+    up_n = norm_text(track.get("uploader"))
+    text = (up_n + " " + title_n).strip()
+    hay = set(text.split())
+    matched = 0
+    for tok in q_tokens:
+        if tok in hay or (len(tok) >= 3 and any(h.startswith(tok) for h in hay)):
+            matched += 1
+    coverage = matched / max(1, len(q_tokens))
+    score = coverage * 10
+    if q_norm and q_norm in title_n:
+        score += 5
+    elif q_norm and q_norm in text:
+        score += 4
+    if q_norm and title_n == q_norm:
+        score += 4
+    elif q_norm and title_n.startswith(q_norm):
+        score += 2
+    score += SequenceMatcher(None, q_norm, title_n).ratio() * 3
+    score += SequenceMatcher(None, q_norm, text).ratio() * 2
+    if coverage < 0.5:
+        score -= 5
+    return score
+
+
+def score_tracks(entries, queries):
+    # Возвращает [(score, track)] по убыванию. queries — строка или список (первый — оригинал).
+    if isinstance(queries, str):
+        queries = [queries]
+    prepared = []
+    for i, qs in enumerate(queries):
+        qn = norm_text(qs)
+        if qn:
+            prepared.append((qn, _query_tokens(qs), 1.0 if i == 0 else 0.8))
+    if not prepared:
+        return [(0, t) for t in (entries or []) if t]
+    all_q = " ".join(p[0] for p in prepared)
     scored = []
     for pos, t in enumerate(entries or []):
         if not t:
             continue
+        score = max(_match_one(t, qn, toks) * w for qn, toks, w in prepared)
         title = (t.get("title") or "").casefold()
-        uploader = (t.get("uploader") or "").casefold()
-        hay = set(re.findall(r"\w+", title + " " + uploader))
-        score = len(q_tokens & hay) / max(1, len(q_tokens)) * 10
         for w in BAD_WORDS:
-            if w in title and w not in q:
+            if w in title and w not in all_q:
                 score -= 6
         dur = t.get("duration")
         if dur and (dur < 60 or dur > 900):
@@ -1080,6 +1137,113 @@ def rank_tracks(entries, query):
         score -= pos * 0.05
         scored.append((score, t))
     scored.sort(key=lambda x: x[0], reverse=True)
+    return scored
+
+
+def rank_tracks(entries, query):
+    return [t for _, t in score_tracks(entries, query)]
+
+
+def dedupe_tracks(tracks):
+    seen = set()
+    out = []
+    for t in tracks:
+        k1 = t["url"].split("?")[0].rstrip("/")
+        k2 = (norm_text(t.get("title")), norm_text(t.get("uploader")))
+        if k1 in seen or k2 in seen:
+            continue
+        seen.add(k1)
+        seen.add(k2)
+        out.append(t)
+    return out
+
+
+def _looks_like_wrong_layout(q):
+    words = [w for w in re.findall(r"[a-z\[\];',.]+", q.lower()) if len(w) >= 3]
+    return bool(words) and all(not re.search(r"[aeiouy]", w) for w in words)
+
+
+def query_variants(query):
+    # Запасные формулировки запроса, если обычный поиск дал слабый результат.
+    q = query.strip()
+    out = []
+
+    def add(v):
+        v = " ".join((v or "").split())
+        if v and v.casefold() != q.casefold() and v.casefold() not in [x.casefold() for x in out]:
+            out.append(v)
+
+    if re.search(r"[а-яА-ЯёЁ]", q):
+        add("".join(_TRANSLIT.get(ch, ch) for ch in q.lower()))
+    elif re.search(r"[a-zA-Z]", q) and _looks_like_wrong_layout(q):
+        add(q.lower().translate(EN2RU))
+
+    cleaned = re.sub(r"[\(\[][^\)\]]*[\)\]]", " ", q)
+    cleaned = " ".join(w for w in cleaned.split() if w.casefold().strip(".,") not in NOISE_TOKENS)
+    add(cleaned)
+
+    if " - " in q:
+        left, right = q.split(" - ", 1)
+        add(f"{left} {right}")
+        add(f"{right} {left}")
+    return out[:3]
+
+
+def _sc_flat_search(query, count):
+    ydl_opts = {
+        "extract_flat": True, "quiet": True, "no_warnings": True,
+        "socket_timeout": 10, "retries": 1, "extractor_retries": 1,
+        "ignoreerrors": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        result = ydl.extract_info(f"scsearch{count}:{query}", download=False)
+    tracks = []
+    for item in ((result or {}).get("entries") or []):
+        if not item:
+            continue
+        url = entry_url(item)
+        if not url:
+            continue
+        normalized = normalize_miniapp_track({
+            "url": url,
+            "title": item.get("title"),
+            "uploader": item.get("uploader") or item.get("artist"),
+            "thumbnail": best_soundcloud_thumbnail(item),
+            "duration": item.get("duration"),
+        })
+        if normalized:
+            tracks.append(normalized)
+    return tracks
+
+
+def soundcloud_search(query, count=30):
+    # Умный поиск: основной запрос, при слабом результате — варианты запроса, затем ранжирование.
+    query = " ".join((query or "").split())
+    if not query:
+        return []
+    first_error = None
+    tracks = []
+    try:
+        tracks = _sc_flat_search(query, count)
+    except Exception as e:
+        first_error = e
+        print(f"Основной поиск не удался: {e!r}")
+
+    scored = score_tracks(dedupe_tracks(tracks), [query])
+    if not scored or scored[0][0] < WEAK_SCORE:
+        variants = query_variants(query)
+        if variants:
+            with ThreadPoolExecutor(max_workers=len(variants)) as pool:
+                futures = [pool.submit(_sc_flat_search, v, count) for v in variants]
+                for f in futures:
+                    try:
+                        tracks.extend(f.result())
+                    except Exception as e:
+                        print(f"Поиск по варианту запроса не удался: {e!r}")
+            scored = score_tracks(dedupe_tracks(tracks), [query] + variants)
+
+    if not scored and first_error:
+        raise first_error
     return [t for _, t in scored]
 
 
@@ -1118,20 +1282,7 @@ def inline_query(query):
 
     def worker():
         try:
-            ydl_opts = {"extract_flat": True, "quiet": True, "no_warnings": True, "ignoreerrors": True}
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                result = ydl.extract_info(f"scsearch20:{search_text}", download=False)
-            tracks = []
-            for item in ((result or {}).get("entries") or []):
-                if not item:
-                    continue
-                normalized = normalize_miniapp_track({
-                    "url": entry_url(item), "title": item.get("title"),
-                    "uploader": item.get("uploader"), "duration": item.get("duration")
-                })
-                if normalized:
-                    tracks.append(normalized)
-            tracks = rank_tracks(tracks, search_text)[:10]
+            tracks = soundcloud_search(search_text, 20)[:10]
 
             inline_tracks_cache[query.from_user.id] = tracks
             if len(inline_tracks_cache) > 500:
@@ -1490,32 +1641,7 @@ def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filt
                     all_tracks = None
 
             if all_tracks is None:
-                ydl_opts = {
-                    "extract_flat": True,
-                    "quiet": True,
-                    "no_warnings": True,
-                    "socket_timeout": 10,
-                    "retries": 1,
-                    "extractor_retries": 1,
-                    "ignoreerrors": True,
-                }
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    result = ydl.extract_info(f"scsearch{limit_ydl}:{query}", download=False)
-                entries = (result or {}).get("entries", []) or []
-
-                normalized = []
-                for item in entries:
-                    if not item:
-                        continue
-                    track = normalize_miniapp_track({
-                        "url": entry_url(item),
-                        "title": item.get("title"),
-                        "uploader": item.get("uploader"),
-                        "duration": item.get("duration"),
-                    })
-                    if track:
-                        normalized.append(track)
-                all_tracks = rank_tracks(normalized, query)
+                all_tracks = soundcloud_search(query, max(30, limit_ydl))
 
                 with search_cache_lock:
                     search_results_cache[cache_key] = (time.time(), all_tracks)
@@ -1988,40 +2114,16 @@ def handle_miniapp_search(handler, query_params):
     limit = max(5, min(max_possible, int(settings.get("search_limit", 10))))
 
     try:
-        ydl_opts = {
-            "extract_flat": True, "quiet": True, "no_warnings": True,
-            "socket_timeout": 12, "retries": 1, "extractor_retries": 1,
-            "ignoreerrors": True
-        }
-        fetch_count = min(100, max(30, limit * 3) if search_type == 'author' else max(20, limit * 2))
-        search_query = f"scsearch{fetch_count}:{query}"
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            result = ydl.extract_info(search_query, download=False)
-        entries = (result or {}).get("entries", []) or []
-        tracks = []
-        for item in entries:
-            if not item:
-                continue
-            track_url = entry_url(item)
-            if not track_url:
-                continue
-            normalized = normalize_miniapp_track({
-                "url": track_url,
-                "title": item.get("title"),
-                "uploader": item.get("uploader") or item.get("artist"),
-                "thumbnail": best_soundcloud_thumbnail(item),
-                "duration": item.get("duration")
-            })
-            if normalized:
-                tracks.append(normalized)
+        fetch_count = min(100, max(30, limit * 3) if search_type == 'author' else max(30, limit * 2))
+        tracks = soundcloud_search(query, fetch_count)
 
         if search_type == "author":
             q_low = query.lower()
             exact_author = [t for t in tracks if q_low in (t.get("uploader") or "").lower()]
             other_author = [t for t in tracks if q_low not in (t.get("uploader") or "").lower()]
-            tracks = (rank_tracks(exact_author, query) + rank_tracks(other_author, query))[:limit]
+            tracks = (exact_author + other_author)[:limit]
         else:
-            tracks = rank_tracks(tracks, query)[:limit]
+            tracks = tracks[:limit]
 
         missing = [i for i, track in enumerate(tracks) if not track.get("thumbnail")][:min(8, len(tracks))]
         if missing:
