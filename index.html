@@ -256,6 +256,35 @@
 
     @media (min-width:560px) { .app { padding-top:25px; } .hero { padding:25px; } .genre-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
     @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; transition:none !important; } }
+
+    /* FIX: нижняя навигация всегда привязана к экрану, а не к ширине прокручиваемой страницы */
+    html, body { width:100%; max-width:100%; overflow-x:hidden; }
+    .app { min-width:0; max-width:620px; }
+    .bottom-nav {
+      position:fixed !important;
+      left:0 !important; right:0 !important; bottom:0 !important;
+      width:100% !important; max-width:none !important;
+      margin:0 !important; transform:none !important;
+      padding-left:max(10px, env(safe-area-inset-left));
+      padding-right:max(10px, env(safe-area-inset-right));
+      padding-bottom:calc(9px + env(safe-area-inset-bottom));
+    }
+    .nav-inner { width:min(100%,620px) !important; min-width:0; }
+    .nav-item { min-width:0; white-space:nowrap; }
+    /* VIP: собственный акцентный цвет */
+    .custom-color-row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:14px; }
+    .custom-color-control { display:flex; align-items:center; gap:10px; }
+    .custom-color-control input[type="color"] {
+      width:48px; height:42px; padding:3px; border:1px solid var(--line);
+      border-radius:12px; background:var(--panel-2); cursor:pointer;
+    }
+    .custom-color-reset {
+      min-height:38px; padding:8px 12px; border:1px solid var(--line);
+      border-radius:11px; background:var(--panel-2); color:var(--text);
+      font-size:12px; font-weight:700; cursor:pointer;
+    }
+    .vip-color-locked { opacity:.55; }
+
   </style>
 </head>
 <body>
@@ -378,6 +407,16 @@
           <button class="theme-btn" data-theme="glass" type="button">🪞 Glass (VIP)</button>
           <button class="theme-btn" data-theme="oled" type="button">🖤 OLED Black (VIP)</button>
         </div>
+        <div class="custom-color-row" id="customColorSection">
+          <div>
+            <div class="setting-title">🌈 Свой цвет приложения (VIP)</div>
+            <div class="setting-description" id="customColorNote">Выбери акцентный цвет кнопок и элементов интерфейса.</div>
+          </div>
+          <div class="custom-color-control">
+            <input type="color" id="customAccentColor" value="#8b5cf6" aria-label="Выбрать цвет приложения">
+            <button class="custom-color-reset" id="resetAccentColor" type="button">Сбросить</button>
+          </div>
+        </div>
       </div>
 
       <div class="save-area"><button class="primary-btn" id="saveSettings">Сохранить настройки</button></div>
@@ -475,7 +514,7 @@
       const state = {
         favorites: [], history: [], playlists: [], searchLimit: 10,
         nowPlaying: null, queueSource: null, lastSearchResults: [],
-        isVip: false, vipExpires: 0, theme: 'default'
+        isVip: false, vipExpires: 0, theme: 'default', customAccent: ''
       };
       const playerDock = $('playerDock');
       const audioPlayer = $('audioPlayer');
@@ -746,6 +785,55 @@
         state.theme = theme;
       }
 
+      function applyCustomAccent(color) {
+        const valid = /^#[0-9a-fA-F]{6}$/.test(String(color || ''));
+        const value = valid ? color : '';
+        const root = document.body;
+        if (value) {
+          root.style.setProperty('--accent', value);
+          root.style.setProperty('--accent-grad', `linear-gradient(110deg, ${value}, ${value}cc)`);
+          root.style.setProperty('--glow', `${value}40`);
+        } else {
+          root.style.removeProperty('--accent');
+          root.style.removeProperty('--accent-grad');
+          root.style.removeProperty('--glow');
+        }
+        state.customAccent = value;
+        $('customAccentColor').value = value || '#8b5cf6';
+      }
+
+      function accentStorageKey() {
+        const userId = tg && tg.initDataUnsafe && tg.initDataUnsafe.user
+          ? tg.initDataUnsafe.user.id : 'guest';
+        return `music_app_accent_${userId}`;
+      }
+
+      function loadCustomAccent() {
+        try {
+          const saved = localStorage.getItem(accentStorageKey()) || '';
+          applyCustomAccent(state.isVip ? saved : '');
+        } catch (_) { applyCustomAccent(''); }
+      }
+
+      $('customAccentColor').addEventListener('input', () => {
+        if (!state.isVip) {
+          notify('🌈 Свой цвет доступен только с VIP.');
+          return;
+        }
+        applyCustomAccent($('customAccentColor').value);
+        try { localStorage.setItem(accentStorageKey(), state.customAccent); } catch (_) {}
+      });
+
+      $('resetAccentColor').addEventListener('click', () => {
+        if (!state.isVip) {
+          notify('🌈 Свой цвет доступен только с VIP.');
+          return;
+        }
+        applyCustomAccent('');
+        try { localStorage.removeItem(accentStorageKey()); } catch (_) {}
+        notify('Возвращён стандартный цвет.');
+      });
+
       document.querySelectorAll('.theme-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
           const t = btn.dataset.theme;
@@ -770,6 +858,12 @@
         document.querySelectorAll('.theme-btn').forEach(btn => {
           btn.classList.toggle('locked', btn.dataset.theme !== 'default' && !state.isVip);
         });
+        $('customColorSection').classList.toggle('vip-color-locked', !state.isVip);
+        $('customAccentColor').disabled = !state.isVip;
+        $('resetAccentColor').disabled = !state.isVip;
+        $('customColorNote').textContent = state.isVip
+          ? 'Выбери любой цвет для кнопок и акцентных элементов интерфейса.'
+          : 'Доступно только с VIP-подпиской.';
         if (state.isVip) {
           pill.className = 'vip-pill';
           pill.textContent = '👑 VIP';
@@ -1140,6 +1234,12 @@
         try {
           const result = await api('/api/settings', { method: 'POST', body: JSON.stringify({ count, theme: state.theme }) });
           state.searchLimit = result.search_limit;
+          if (state.isVip) {
+            try {
+              if (state.customAccent) localStorage.setItem(accentStorageKey(), state.customAccent);
+              else localStorage.removeItem(accentStorageKey());
+            } catch (_) {}
+          }
           notify('Настройки и тема сохранены.');
         } catch (e) { notify(e.message); }
       });
@@ -1165,6 +1265,7 @@
           range.value = String(Math.min(Number(range.max), state.searchLimit));
           updateSlider();
           applyTheme(state.isVip ? state.theme : 'default');
+          loadCustomAccent();
           renderCollection('favorites');
           renderCollection('history');
           renderPlaylists();
