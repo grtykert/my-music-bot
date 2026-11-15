@@ -1,6 +1,8 @@
 import os
 import re
 import sys
+import shutil
+import tempfile
 import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, InputMediaAudio
 from telebot.apihelper import ApiTelegramException
@@ -153,7 +155,12 @@ ADMIN_ID = int(os.environ.get("ADMIN_ID", 5378591975))
 REQUIRED_CHANNEL = "-1004362385382"
 
 bot = telebot.TeleBot(API_TOKEN)
-tracks_cache = {}
+
+# --- КЭШИ ---
+tracks_cache = {}           # sid -> список треков конкретной выдачи
+tracks_cache_lock = threading.Lock()
+query_store = {}            # qid -> (query, base_query)
+query_store_lock = threading.Lock()
 search_results_cache = {}
 search_cache_lock = threading.Lock()
 SEARCH_CACHE_TTL = 180
@@ -166,14 +173,18 @@ waiting_for_custom_stars = set()
 sub_check_cache = {}  # кэш успешной проверки подписки на группу (user_id -> время)
 SUB_CACHE_TTL = 120
 
-# Переменные хранения данных и мьютекс для потокобезопасности
+# Переменные хранения данных и мьютексы для потокобезопасности
 active_users = {}
 stats_data = {"total_downloads": 0}
 audio_cache = {}
 user_settings = {}  # Хранение настроек пользователей
 backup_msg_id = None
 data_lock = threading.Lock()
+stats_lock = threading.Lock()
 users_offset = 0  # Поправка для ручной корректировки цифры в статистике
+
+# Не больше 2 одновременных загрузок (экономим память на Render)
+download_slots = threading.Semaphore(2)
 
 # ============================================================
 #                        VIP СИСТЕМА
@@ -244,7 +255,7 @@ def set_vip_status(user_id, duration_days=None, remove=False):
     elif duration_days:
         base = max(time.time(), get_vip_expires(uid))
         settings["vip_expires"] = base + duration_days * 24 * 60 * 60
-    save_all_data()
+    save_all_data()  # VIP сохраняем сразу, а не отложенно
     return settings.get("vip_expires", 0)
 
 
@@ -284,6 +295,42 @@ def send_subscription_prompt(chat_id):
         reply_markup=markup,
         parse_mode="Markdown"
     )
+
+
+# ============================================================
+#              ОШИБКИ: ЛОГ + СООБЩЕНИЕ АДМИНУ
+# ============================================================
+_last_admin_report = 0
+_report_lock = threading.Lock()
+
+
+def report_error(context, error):
+    """Печатает полную причину в лог и (не чаще раза в 10 сек) шлёт админу."""
+    global _last_admin_report
+    print(f"❌ {context}: {error!r}")
+    with _report_lock:
+        now = time.time()
+        if now - _last_admin_report < 10:
+            return
+        _last_admin_report = now
+    try:
+        bot.send_message(ADMIN_ID, f"⚠️ {context}\n{repr(error)[:600]}")
+    except Exception:
+        pass
+
+
+def explain_error(error):
+    """Короткая понятная причина для пользователя."""
+    text = str(error).lower()
+    if "429" in text or "403" in text or "sign in" in text or "confirm you" in text:
+        return "Источник временно блокирует запросы. Попробуй позже."
+    if "geo" in text or "not available" in text or "blocked" in text or "private" in text or "premium" in text:
+        return "Трек недоступен (закрыт, платный или ограничен по региону)."
+    if "client id" in text or "client_id" in text:
+        return "Сервис обновляется, попробуй позже."
+    if "no space" in text or "too large" in text:
+        return "Файл слишком большой."
+    return ""
 
 
 # --- ПОДГОТОВКА ОБЛОЖКИ ДЛЯ TELEGRAM ---
@@ -422,6 +469,28 @@ def compress_audio_if_needed(input_filename, thumbnail_filename=None, max_size_m
     return input_filename
 
 
+def ensure_telegram_audio(input_filename):
+    """Telegram нормально показывает как аудио только mp3/m4a. Остальное (opus/ogg/webm) конвертируем."""
+    if not input_filename or not os.path.exists(input_filename):
+        return input_filename
+    if input_filename.lower().endswith((".mp3", ".m4a")):
+        return input_filename
+    output_filename = os.path.splitext(input_filename)[0] + "_conv.mp3"
+    cmd = [
+        "ffmpeg", "-y", "-i", input_filename,
+        "-vn", "-c:a", "libmp3lame", "-b:a", "160k",
+        "-id3v2_version", "3", output_filename
+    ]
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=300)
+    if os.path.exists(output_filename) and os.path.getsize(output_filename) > 0:
+        try:
+            os.remove(input_filename)
+        except OSError:
+            pass
+        return output_filename
+    raise RuntimeError("ffmpeg не создал mp3")
+
+
 # --- АУДИОЭФФЕКТЫ (VIP) ---
 def apply_audio_effect(input_filename, effect):
     """Применяет эффект через ffmpeg. Возвращает путь к новому mp3 (старый файл удаляется)."""
@@ -444,6 +513,66 @@ def apply_audio_effect(input_filename, effect):
             pass
         return output_filename
     raise RuntimeError("ffmpeg не создал файл с эффектом")
+
+
+# ============================================================
+#              ЕДИНАЯ ЗАГРУЗКА АУДИО (с запасными вариантами)
+# ============================================================
+def ydl_download_audio(track_url, outtmpl):
+    """Пробует несколько конфигураций yt-dlp. Возвращает (info, путь к файлу)."""
+    base = {
+        "format": "bestaudio[protocol^=http]/bestaudio/best",  # сначала прямой mp3, потом HLS
+        "outtmpl": outtmpl,
+        "writethumbnail": True,
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "noplaylist": True,
+        "socket_timeout": 15,
+        "retries": 2,
+        "extractor_retries": 2,
+    }
+    attempts = [
+        {**base, "postprocessors": [
+            {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
+            {"key": "EmbedThumbnail"},
+        ]},
+        {**base, "postprocessors": [
+            {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
+        ]},
+        {**base, "writethumbnail": False, "format": "bestaudio/best"},
+    ]
+    last_error = None
+    for opts in attempts:
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(track_url, download=True)
+                filename = ydl.prepare_filename(info)
+                if filename and os.path.exists(filename):
+                    return info, filename
+                raise RuntimeError("Файл после загрузки не найден")
+        except Exception as e:
+            last_error = e
+            print(f"Попытка загрузки не удалась ({track_url}): {e!r}")
+    raise last_error
+
+
+def prepare_track_file(track_url, workdir, effect="none"):
+    """Скачивает, применяет эффект, приводит к mp3/m4a, сжимает. Возвращает (info, audio, thumb)."""
+    info, audio_filename = ydl_download_audio(track_url, os.path.join(workdir, "track_%(id)s.%(ext)s"))
+    _original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
+    if effect != "none":
+        audio_filename = apply_audio_effect(audio_filename, effect)
+    else:
+        audio_filename = ensure_telegram_audio(audio_filename)
+    audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
+    return info, audio_filename, thumbnail_filename
+
+
+def count_download():
+    with stats_lock:
+        stats_data["total_downloads"] += 1
+    request_save()
 
 
 # --- ТЕКСТЫ ПЕСЕН (VIP) через бесплатный LRCLIB ---
@@ -487,7 +616,9 @@ def fetch_lyrics(title, uploader=""):
     return None
 
 
-# --- СИСТЕМА ЕДИНОГО БЭКАПА ЧЕРЕЗ ЗАКРЕП ---
+# ============================================================
+#              СИСТЕМА ЕДИНОГО БЭКАПА ЧЕРЕЗ ЗАКРЕП
+# ============================================================
 def restore_all_data():
     global active_users, stats_data, audio_cache, user_settings, backup_msg_id, users_offset
     try:
@@ -523,20 +654,33 @@ def restore_all_data():
         active_users[str(ADMIN_ID)] = time.time()
 
 
-def save_all_data():
-    global backup_msg_id
-    with data_lock:
+def _serialize_state():
+    """Сериализация с повтором: другие потоки могут менять словари прямо во время дампа."""
+    for _ in range(5):
         try:
             active_users[str(ADMIN_ID)] = time.time()
-            data = {
+            return json.dumps({
                 "users": active_users,
                 "stats": stats_data,
                 "cache": audio_cache,
                 "settings": user_settings,
                 "users_offset": users_offset
-            }
+            }, ensure_ascii=False)
+        except RuntimeError:
+            time.sleep(0.05)
+    return None
+
+
+def save_all_data():
+    global backup_msg_id
+    with data_lock:
+        try:
+            payload = _serialize_state()
+            if payload is None:
+                print("Не удалось сериализовать данные для бэкапа")
+                return
             with open("data.json", "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
+                f.write(payload)
 
             with open("data.json", "rb") as f:
                 if backup_msg_id:
@@ -562,14 +706,36 @@ def save_all_data():
             print(f"Ошибка сохранения бэкапа: {e}")
 
 
+# --- ОТЛОЖЕННОЕ СОХРАНЕНИЕ: не чаще раза в SAVE_DELAY секунд ---
+SAVE_DELAY = 20
+_save_dirty = threading.Event()
+
+
+def request_save():
+    _save_dirty.set()
+
+
+def _saver_loop():
+    while True:
+        _save_dirty.wait()
+        time.sleep(SAVE_DELAY)
+        _save_dirty.clear()
+        save_all_data()
+
+
 restore_all_data()
 bot_start_time = time.time()
+threading.Thread(target=_saver_loop, daemon=True).start()
 
 
 def register_user(chat_id):
-    global active_users
-    active_users[str(chat_id)] = time.time()
-    save_all_data()
+    key = str(chat_id)
+    now = time.time()
+    prev = active_users.get(key)
+    active_users[key] = now
+    # сохраняем только для новых пользователей или если не заходил 10+ минут
+    if prev is None or now - prev > 600:
+        request_save()
 
 
 def open_app_markup():
@@ -612,13 +778,14 @@ def send_welcome(message):
 
     text = (
         "👋 Привет! Напиши название песни, и я попробую её найти. 🎵\n\n"
+        "💡 Для точного поиска пиши так: `исполнитель название` (например, `Dree Low Ha Ha`).\n\n"
         "💬 Наша группа: https://t.me/+8JYfdTy2YhE0NDJi\n\n"
         "👑 VIP подписка: /vip\n"
         "💖 Поддержка разработчика: /donate"
     )
     if message.chat.type == "private" and not WEB_APP_URL:
         text += "\n\n⚠️ Mini App пока не настроен. Проверь WEB_APP_URL в переменных Render."
-    bot.send_message(chat_id, text, disable_web_page_preview=True)
+    bot.send_message(chat_id, text, disable_web_page_preview=True, parse_mode="Markdown")
 
     if message.chat.type == "private" and WEB_APP_URL:
         bot.send_message(chat_id, "Музыкальное приложение:", reply_markup=open_app_markup())
@@ -658,7 +825,7 @@ def callback_check_sub(call):
         bot.answer_callback_query(call.id, "✅ Спасибо за подписку!", show_alert=True)
         try:
             bot.delete_message(chat_id, call.message.message_id)
-        except:
+        except Exception:
             pass
         register_user(chat_id)
         bot.send_message(
@@ -790,14 +957,14 @@ def lyrics_command(message):
     threading.Thread(target=worker, daemon=True).start()
 
 
-# --- НАСТРОЙКИ И ПОЛЗУНОК ---
-def get_settings_keyboard(chat_id):
-    chat_id_str = str(chat_id)
-    if chat_id_str not in user_settings:
-        user_settings[chat_id_str] = {"search_limit": 10}
+# --- НАСТРОЙКИ И ПОЛЗУНОК (по user_id, а не chat_id) ---
+def get_settings_keyboard(user_id):
+    user_key = str(user_id)
+    if user_key not in user_settings or not isinstance(user_settings[user_key], dict):
+        user_settings[user_key] = {"search_limit": 10}
 
-    max_limit = max_search_limit(chat_id)
-    limit = min(max_limit, int(user_settings[chat_id_str].get("search_limit", 10)))
+    max_limit = max_search_limit(user_id)
+    limit = min(max_limit, int(user_settings[user_key].get("search_limit", 10)))
     markup = InlineKeyboardMarkup()
 
     total_blocks = max_limit // 5
@@ -814,25 +981,26 @@ def get_settings_keyboard(chat_id):
 
 @bot.message_handler(commands=['settings'])
 def settings_command(message):
-    chat_id = message.chat.id
-    register_user(chat_id)
-    note = "до 50 треков (VIP)" if is_user_vip(chat_id) else "до 25 треков (с VIP — до 50)"
+    register_user(message.chat.id)
+    user_id = message.from_user.id
+    note = "до 50 треков (VIP)" if is_user_vip(user_id) else "до 25 треков (с VIP — до 50)"
     bot.reply_to(
         message,
         f"⚙️ **Настройки поиска**\n\nС помощью ползунка ниже выбери количество треков на одной странице: {note}",
         parse_mode="Markdown",
-        reply_markup=get_settings_keyboard(chat_id)
+        reply_markup=get_settings_keyboard(user_id)
     )
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("setslider_"))
 def handle_slider_callback(call):
-    chat_id_str = str(call.message.chat.id)
-    if chat_id_str not in user_settings:
-        user_settings[chat_id_str] = {"search_limit": 10}
+    user_id = call.from_user.id
+    user_key = str(user_id)
+    if user_key not in user_settings or not isinstance(user_settings[user_key], dict):
+        user_settings[user_key] = {"search_limit": 10}
 
-    max_limit = max_search_limit(call.from_user.id)
-    current_limit = min(max_limit, int(user_settings[chat_id_str].get("search_limit", 10)))
+    max_limit = max_search_limit(user_id)
+    current_limit = min(max_limit, int(user_settings[user_key].get("search_limit", 10)))
     action = call.data.split("_")[1]
 
     if action == "minus":
@@ -840,14 +1008,14 @@ def handle_slider_callback(call):
     else:
         new_limit = min(max_limit, current_limit + 5)
 
-    if new_limit != user_settings[chat_id_str].get("search_limit"):
-        user_settings[chat_id_str]["search_limit"] = new_limit
-        save_all_data()
+    if new_limit != user_settings[user_key].get("search_limit"):
+        user_settings[user_key]["search_limit"] = new_limit
+        request_save()
         try:
             bot.edit_message_reply_markup(
                 chat_id=call.message.chat.id,
                 message_id=call.message.message_id,
-                reply_markup=get_settings_keyboard(call.message.chat.id)
+                reply_markup=get_settings_keyboard(user_id)
             )
         except Exception:
             pass
@@ -862,7 +1030,6 @@ def handle_ignore(call):
 @bot.message_handler(commands=['clearcache'])
 def clear_bot_cache(message):
     if is_admin(message):
-        global audio_cache
         audio_cache.clear()
         save_all_data()
         bot.reply_to(message, "✅ Кэш треков успешно очищен!")
@@ -880,36 +1047,105 @@ def handle_chat_member(message):
         register_user(chat_id)
 
 
+# ============================================================
+#                 ПОИСК: НОРМАЛИЗАЦИЯ И РАНЖИРОВАНИЕ
+# ============================================================
+BAD_WORDS = ("slowed", "sped up", "speed up", "speedup", "nightcore", "remix",
+             "reverb", "cover", "mashup", "bass boosted", "8d", "karaoke", "instrumental")
+
+
+def entry_url(item):
+    """Всегда берём нормальную страницу трека, а не api-ссылку."""
+    return item.get("webpage_url") or item.get("original_url") or item.get("url")
+
+
+def rank_tracks(entries, query):
+    """Переранжирует выдачу: ремиксы/slowed/короткие и слишком длинные — вниз."""
+    q = (query or "").casefold()
+    q_tokens = set(re.findall(r"\w+", q))
+    scored = []
+    for pos, t in enumerate(entries or []):
+        if not t:
+            continue
+        title = (t.get("title") or "").casefold()
+        uploader = (t.get("uploader") or "").casefold()
+        hay = set(re.findall(r"\w+", title + " " + uploader))
+        score = len(q_tokens & hay) / max(1, len(q_tokens)) * 10
+        for w in BAD_WORDS:
+            if w in title and w not in q:
+                score -= 6
+        dur = t.get("duration")
+        if dur and (dur < 60 or dur > 900):
+            score -= 8
+        score -= pos * 0.05
+        scored.append((score, t))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [t for _, t in scored]
+
+
+def store_tracks(tracks):
+    """Сохраняет конкретную выдачу под коротким id, чтобы старые кнопки не качали чужие треки."""
+    sid = os.urandom(4).hex()
+    with tracks_cache_lock:
+        tracks_cache[sid] = tracks
+        while len(tracks_cache) > 300:
+            tracks_cache.pop(next(iter(tracks_cache)))
+    return sid
+
+
+def qid(query, base=None):
+    """Запрос не лезет в callback_data (лимит 64 байта) — храним на сервере, в кнопке только id."""
+    base = base or query
+    key = hashlib.md5(f"{query}\n{base}".encode("utf-8")).hexdigest()[:10]
+    with query_store_lock:
+        query_store[key] = (query, base)
+        while len(query_store) > 3000:
+            query_store.pop(next(iter(query_store)))
+    return key
+
+
+def get_query(key):
+    with query_store_lock:
+        return query_store.get(key)
+
+
 # --- ИНЛАЙН-РЕЖИМ ---
 @bot.inline_handler(func=lambda query: True)
 def inline_query(query):
-    user_id = query.from_user.id
     search_text = query.query.strip()
     if not search_text:
         return
 
     def worker():
         try:
-            ydl_opts = {"extract_flat": True, "quiet": True}
-            search_query = f"scsearch10:{search_text}"
+            ydl_opts = {"extract_flat": True, "quiet": True, "no_warnings": True, "ignoreerrors": True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                result = ydl.extract_info(search_query, download=False)
-                tracks = result.get("entries", [])
+                result = ydl.extract_info(f"scsearch20:{search_text}", download=False)
+            tracks = []
+            for item in ((result or {}).get("entries") or []):
+                if not item:
+                    continue
+                normalized = normalize_miniapp_track({
+                    "url": entry_url(item), "title": item.get("title"),
+                    "uploader": item.get("uploader"), "duration": item.get("duration")
+                })
+                if normalized:
+                    tracks.append(normalized)
+            tracks = rank_tracks(tracks, search_text)[:10]
+
+            inline_tracks_cache[query.from_user.id] = tracks
+            if len(inline_tracks_cache) > 500:
+                inline_tracks_cache.pop(next(iter(inline_tracks_cache)))
 
             results = []
-            inline_tracks_cache[query.from_user.id] = tracks
-
             for i, track in enumerate(tracks):
-                title = track.get("title", "Без названия")
-                uploader = track.get("uploader", "Неизвестен")
-
                 results.append(
                     telebot.types.InlineQueryResultArticle(
                         id=str(i),
-                        title=title[:50],
-                        description=f"Автор: {uploader} | Нажми для отправки",
+                        title=track["title"][:50],
+                        description=f"Автор: {track['uploader']} | Нажми для отправки",
                         input_message_content=telebot.types.InputTextMessageContent(
-                            message_text=f"⏳ Загружаю трек: {title[:40]}..."
+                            message_text=f"⏳ Загружаю трек: {track['title'][:40]}..."
                         )
                     )
                 )
@@ -926,72 +1162,52 @@ def handle_chosen_inline(chosen):
     register_user(user_id)
 
     def worker():
-        result_id = int(chosen.result_id)
+        try:
+            result_id = int(chosen.result_id)
+        except ValueError:
+            return
         user_tracks = inline_tracks_cache.get(user_id, [])
-
         if result_id >= len(user_tracks):
             return
 
         track = user_tracks[result_id]
-        track_url = track['url']
-        title = track.get('title', 'Трек')
-        uploader = track.get('uploader', 'Музыка')
+        track_url = track["url"]
+        title = track["title"]
+        uploader = track["uploader"]
         inline_msg_id = chosen.inline_message_id
 
-        if track_url in audio_cache and not audio_cache[track_url].startswith("http"):
+        cached = audio_cache.get(track_url)
+        if cached and not str(cached).startswith("http"):
             try:
                 bot.edit_message_media(
-                    media=InputMediaAudio(
-                        media=audio_cache[track_url],
-                        title=title,
-                        performer=uploader
-                    ),
+                    media=InputMediaAudio(media=cached, title=title, performer=uploader),
                     inline_message_id=inline_msg_id
                 )
-                stats_data["total_downloads"] += 1
-                save_all_data()
+                count_download()
                 return
             except Exception as e:
                 print(f"Ошибка отправки из кэша (инлайн): {e}")
 
-        audio_filename = None
-        thumbnail_filename = None
-        original_thumb = None
-
+        workdir = tempfile.mkdtemp(prefix="inl_")
         try:
-            ydl_opts = {
-                "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
-                "outtmpl": f"song_inline_{user_id}_%(id)s.%(ext)s",
-                "writethumbnail": True,
-                "quiet": True,
-                "noprogress": True,
-                "socket_timeout": 15,
-                "postprocessors": [
-                    {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
-                    {"key": "EmbedThumbnail"}
-                ]
-            }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(track_url, download=True)
-                audio_filename = ydl.prepare_filename(info)
-                original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
-
-            audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
+            with download_slots:
+                info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir)
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
-
-                backup_msg = bot.send_audio(
-                    chat_id=BACKUP_CHANNEL_ID,
-                    audio=audio,
-                    title=info.get('title', title),
-                    performer=info.get('uploader', uploader),
-                    thumbnail=thumb_file
-                )
-                if thumb_file:
-                    thumb_file.close()
-                file_id = backup_msg.audio.file_id
-                audio_cache[track_url] = file_id
+                try:
+                    backup_msg = bot.send_audio(
+                        chat_id=BACKUP_CHANNEL_ID,
+                        audio=audio,
+                        title=info.get('title', title),
+                        performer=info.get('uploader', uploader),
+                        thumbnail=thumb_file
+                    )
+                finally:
+                    if thumb_file:
+                        thumb_file.close()
+            file_id = backup_msg.audio.file_id
+            audio_cache[track_url] = file_id
 
             bot.edit_message_media(
                 media=InputMediaAudio(
@@ -1001,20 +1217,15 @@ def handle_chosen_inline(chosen):
                 ),
                 inline_message_id=inline_msg_id
             )
-
-            stats_data["total_downloads"] += 1
-            save_all_data()
+            count_download()
         except Exception as e:
-            print(f"Ошибка скачивания (инлайн): {e}")
+            report_error(f"Ошибка скачивания (инлайн) {track_url}", e)
             try:
                 bot.edit_message_text("❌ Не удалось скачать трек.", inline_message_id=inline_msg_id)
-            except:
+            except Exception:
                 pass
         finally:
-            for file_p in [audio_filename, thumbnail_filename, original_thumb]:
-                if file_p and os.path.exists(file_p):
-                    try: os.remove(file_p)
-                    except: pass
+            shutil.rmtree(workdir, ignore_errors=True)
 
     threading.Thread(target=worker, daemon=True).start()
 
@@ -1030,7 +1241,7 @@ def stats_command(message):
 
     now = time.time()
     month_ago = now - (28 * 24 * 60 * 60)
-    real_users_count = sum(1 for uid, last_seen in active_users.items() if last_seen >= month_ago)
+    real_users_count = sum(1 for uid, last_seen in list(active_users.items()) if last_seen >= month_ago)
     recent_users_count = max(0, real_users_count + users_offset)
 
     uptime_seconds = int(time.time() - bot_start_time)
@@ -1088,7 +1299,10 @@ def handle_donate_callback(call):
             return bot.answer_callback_query(call.id, "Тариф не найден.")
         send_invoice_stars(chat_id, plan["stars"], plan["title"], f"vip_{days}")
     else:
-        stars_count = int(action.replace("donate_", ""))
+        try:
+            stars_count = int(action.replace("donate_", ""))
+        except ValueError:
+            return bot.answer_callback_query(call.id)
         send_invoice_stars(chat_id, stars_count, "Поддержка проекта", "donate")
 
     bot.answer_callback_query(call.id)
@@ -1144,9 +1358,7 @@ def handle_group_music(message):
         bot.reply_to(message, "❗️ Напиши название трека после команды.\nПример: `/m terranova`", parse_mode="Markdown")
         return
 
-    query = args[1]
-    original_queries[chat_id] = query
-    search_music_by_query(message, query=query, page=1, is_new=True, is_random=False)
+    search_music_by_query(message, query=args[1], user_id=message.from_user.id, page=1, is_new=True)
 
 
 @bot.message_handler(commands=['author', 'artist', 'a'])
@@ -1162,9 +1374,7 @@ def handle_author_music(message):
         bot.reply_to(message, "❗️ Напиши имя исполнителя после команды.\nПример: `/author Miyagi`", parse_mode="Markdown")
         return
 
-    author_name = args[1]
-    original_queries[chat_id] = author_name
-    search_music_by_query(message, query=author_name, page=1, is_new=True, is_random=False)
+    search_music_by_query(message, query=args[1], user_id=message.from_user.id, page=1, is_new=True)
 
 
 @bot.message_handler(commands=['discover', 'genres', 'd'])
@@ -1199,6 +1409,14 @@ def handle_discover(message):
     bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
 
 
+RANDOM_MODIFIERS = ["mix", "2024", "2025", "2026", "playlist", "hits", "top", "remix", "vibes",
+                    "chill", "night", "club", "party", "bass", "popular", "edit"]
+
+
+def random_query(base):
+    return f"{base} {random.choice(RANDOM_MODIFIERS)} {random.choice(RANDOM_MODIFIERS)}".strip()
+
+
 @bot.callback_query_handler(func=lambda call: call.data.startswith("genre_"))
 def handle_genre_selection(call):
     chat_id = call.message.chat.id
@@ -1209,12 +1427,11 @@ def handle_genre_selection(call):
     register_user(chat_id)
 
     genre_base = call.data.replace("genre_", "")
-    modifiers = ["mix", "2024", "2025", "2026", "playlist", "hits", "top", "remix", "vibes", "chill", "night", "club", "party", "bass", "popular", "edit"]
-    genre_query = f"{genre_base} {random.choice(modifiers)} {random.choice(modifiers)}".strip()
-
-    original_queries[chat_id] = genre_base
     bot.answer_callback_query(call.id, "🎲 Собираю случайные треки...")
-    search_music_by_query(call.message, query=genre_query, page=1, is_new=True, is_filter=False, is_random=True)
+    search_music_by_query(
+        call.message, query=random_query(genre_base), user_id=call.from_user.id,
+        page=1, is_new=True, is_random=True, base_query=genre_base
+    )
 
 
 # --- ОБРАБОТЧИК ТЕКСТОВОГО ПОИСКА С ПРОВЕРКОЙ ПОДПИСКИ ---
@@ -1225,11 +1442,10 @@ def text_handler(message):
     register_user(chat_id)
 
     if chat_id in waiting_for_custom_stars:
-        waiting_for_custom_stars.remove(chat_id)
+        waiting_for_custom_stars.discard(chat_id)
         text = message.text.strip()
         if text.isdigit() and 0 < int(text) <= 10000:
-            stars_count = int(text)
-            send_invoice_stars(chat_id, stars_count, "Поддержка проекта", "donate")
+            send_invoice_stars(chat_id, int(text), "Поддержка проекта", "donate")
         else:
             bot.reply_to(message, "❌ Пожалуйста, введи корректное число. Попробуй снова через /donate")
         return
@@ -1238,12 +1454,15 @@ def text_handler(message):
         send_subscription_prompt(chat_id)
         return
 
-    original_queries[chat_id] = message.text
-    search_music_by_query(message, query=message.text, page=1, is_new=True, is_random=False)
+    search_music_by_query(message, query=message.text, user_id=message.from_user.id, page=1, is_new=True)
 
 
-def search_music_by_query(message, query, page=1, is_new=False, is_filter=False, is_random=False):
+def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filter=False,
+                          is_random=False, base_query=None):
     chat_id = message.chat.id
+    base_query = base_query or query
+    original_queries[chat_id] = base_query
+
     if is_new:
         msg = bot.reply_to(message, "🔍 Ищу варианты...")
     else:
@@ -1251,9 +1470,9 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
 
     def worker():
         try:
-            # ЛИМИТЫ: VIP до 50, обычный до 25 (в приватном чате chat_id == user_id)
-            max_possible = max_search_limit(chat_id)
-            user_limit = int(user_settings.get(str(chat_id), {}).get("search_limit", 10))
+            # ЛИМИТЫ: VIP до 50, обычный до 25 — по user_id, не по chat_id
+            max_possible = max_search_limit(user_id)
+            user_limit = int((user_settings.get(str(user_id)) or {}).get("search_limit", 10))
             effective_limit = max(5, min(max_possible, user_limit))
 
             limit_ydl = 50 if is_random else max(20, effective_limit * page)
@@ -1280,10 +1499,24 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
                     "extractor_retries": 1,
                     "ignoreerrors": True,
                 }
-                search_query = f"scsearch{limit_ydl}:{query}"
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    result = ydl.extract_info(search_query, download=False)
-                    all_tracks = result.get("entries", []) or []
+                    result = ydl.extract_info(f"scsearch{limit_ydl}:{query}", download=False)
+                entries = (result or {}).get("entries", []) or []
+
+                normalized = []
+                for item in entries:
+                    if not item:
+                        continue
+                    track = normalize_miniapp_track({
+                        "url": entry_url(item),
+                        "title": item.get("title"),
+                        "uploader": item.get("uploader"),
+                        "duration": item.get("duration"),
+                    })
+                    if track:
+                        normalized.append(track)
+                all_tracks = rank_tracks(normalized, query)
+
                 with search_cache_lock:
                     search_results_cache[cache_key] = (time.time(), all_tracks)
                     if len(search_results_cache) > 100:
@@ -1304,108 +1537,191 @@ def search_music_by_query(message, query, page=1, is_new=False, is_filter=False,
                 bot.edit_message_text("❌ Больше ничего не найдено.", chat_id, msg.message_id, reply_markup=None)
                 return
 
-            tracks_cache[chat_id] = tracks
+            sid = store_tracks(tracks)
             markup = InlineKeyboardMarkup(row_width=1)
 
             for i, track in enumerate(tracks):
-                title = track.get("title", "Без названия")[:35]
-                markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"dl_{i}"))
+                title = track["title"][:35]
+                markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"dl_{sid}_{i}"))
 
             nav_buttons = []
             if is_random:
-                base_q = original_queries.get(chat_id, query)
-                nav_buttons.append(InlineKeyboardButton(text="🎲 Ещё случайных", callback_data=f"randpage_{page+1}_{base_q}"))
+                nav_buttons.append(InlineKeyboardButton(
+                    text="🎲 Ещё случайных", callback_data=f"randpage_{page+1}_{qid(base_query)}"))
             else:
                 if page > 1:
-                    nav_buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}_{query}"))
-                nav_buttons.append(InlineKeyboardButton(text="🔄 Ещё", callback_data=f"page_{page+1}_{query}"))
+                    nav_buttons.append(InlineKeyboardButton(
+                        text="⬅️ Назад", callback_data=f"page_{page-1}_{qid(query, base_query)}"))
+                nav_buttons.append(InlineKeyboardButton(
+                    text="🔄 Ещё", callback_data=f"page_{page+1}_{qid(query, base_query)}"))
 
             markup.row(*nav_buttons)
 
-            orig_q = original_queries.get(chat_id, query)
             if is_filter:
-                markup.row(InlineKeyboardButton(text="🔙 Назад к обычному", callback_data=f"back_{orig_q}"))
+                markup.row(InlineKeyboardButton(text="🔙 Назад к обычному", callback_data=f"back_{qid(base_query)}"))
             else:
+                base_id = qid(base_query)
                 markup.row(
-                    InlineKeyboardButton(text="⚡ Speed Up", callback_data=f"filter_{orig_q}_speedup"),
-                    InlineKeyboardButton(text="🐢 Slowed", callback_data=f"filter_{orig_q}_slowed")
+                    InlineKeyboardButton(text="⚡ Speed Up", callback_data=f"filter_{base_id}_speedup"),
+                    InlineKeyboardButton(text="🐢 Slowed", callback_data=f"filter_{base_id}_slowed")
                 )
 
             prefix = "🎲 Случайная подборка." if is_random else f"🎧 Страница {page}."
-            text_content = f"{prefix} Запрос: {query}"
-            bot.edit_message_text(text_content, chat_id, msg.message_id, reply_markup=markup)
+            bot.edit_message_text(f"{prefix} Запрос: {query}", chat_id, msg.message_id, reply_markup=markup)
 
         except Exception as e:
-            print(f"Ошибка поиска: {e}")
+            report_error(f"Ошибка поиска «{query}»", e)
             try:
                 bot.edit_message_text("❌ Ошибка поиска.", chat_id, msg.message_id)
-            except:
+            except Exception:
                 pass
 
     threading.Thread(target=worker, daemon=True).start()
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "randpage_", "filter_", "back_")))
-def handle_navigation(call):
-    bot.answer_callback_query(call.id)
-    data = call.data.split("_")
-
-    if data[0] == "page":
-        page = int(data[1])
-        query = "_".join(data[2:])
-        is_filt = "speedup" in query or "slowed" in query
-        search_music_by_query(call.message, query=query, page=page, is_new=False, is_filter=is_filt, is_random=False)
-
-    elif data[0] == "randpage":
-        page = int(data[1])
-        base_query = "_".join(data[2:])
-        modifiers = ["mix", "2024", "2025", "2026", "playlist", "hits", "top", "remix", "vibes", "chill", "night", "club", "party", "bass", "popular", "edit"]
-        new_rand_query = f"{base_query} {random.choice(modifiers)} {random.choice(modifiers)}".strip()
-        search_music_by_query(call.message, query=new_rand_query, page=page, is_new=False, is_filter=False, is_random=True)
-
-    elif data[0] == "filter":
-        filter_type = data[-1]
-        query = "_".join(data[1:-1])
-        new_query = f"{query} {filter_type}"
-        search_music_by_query(call.message, query=new_query, page=1, is_new=False, is_filter=True, is_random=False)
-
-    elif data[0] == "back":
-        query = "_".join(data[1:])
-        search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False, is_random=False)
-
-
-@bot.callback_query_handler(func=lambda call: call.data == "back_to_search")
+# --- КНОПКА «К ПОИСКУ» (отдельный callback, не пересекается с back_) ---
+@bot.callback_query_handler(func=lambda call: call.data in ("tosearch", "back_to_search"))
 def handle_back_to_search(call):
     bot.answer_callback_query(call.id)
     chat_id = call.message.chat.id
     query = original_queries.get(chat_id, "музыка")
-    search_music_by_query(call.message, query=query, page=1, is_new=False, is_filter=False, is_random=False)
+    search_music_by_query(call.message, query=query, user_id=call.from_user.id, page=1, is_new=True)
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(("page_", "randpage_", "filter_", "back_")))
+def handle_navigation(call):
+    data = call.data.split("_")
+    user_id = call.from_user.id
+    kind = data[0]
+
+    key = data[2] if kind in ("page", "randpage") and len(data) >= 3 else (data[1] if len(data) >= 2 else "")
+    stored = get_query(key)
+    if not stored:
+        return bot.answer_callback_query(call.id, "⌛ Поиск устарел. Отправь запрос заново.", show_alert=True)
+    bot.answer_callback_query(call.id)
+    query, base = stored
+
+    try:
+        if kind == "page":
+            page = int(data[1])
+            search_music_by_query(call.message, query=query, user_id=user_id, page=page,
+                                  is_filter=(query != base), base_query=base)
+        elif kind == "randpage":
+            page = int(data[1])
+            search_music_by_query(call.message, query=random_query(base), user_id=user_id, page=page,
+                                  is_random=True, base_query=base)
+        elif kind == "filter":
+            filter_type = data[2] if len(data) >= 3 else "slowed"
+            if filter_type not in ("speedup", "slowed"):
+                return
+            search_music_by_query(call.message, query=f"{query} {filter_type}", user_id=user_id, page=1,
+                                  is_filter=True, base_query=query)
+        elif kind == "back":
+            search_music_by_query(call.message, query=query, user_id=user_id, page=1)
+    except (ValueError, IndexError):
+        pass
+
+
+# --- ОТПРАВКА ТРЕКА В ЧАТ (общая для бота и Mini App) ---
+def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
+    """Скачивает трек и отправляет в Telegram. Для VIP может применить аудиоэффект."""
+    user_id = user_id or chat_id
+    if effect not in VIP_EFFECTS:
+        effect = "none"
+    if effect != "none" and not is_user_vip(user_id):
+        effect = "none"
+
+    track_url = track["url"]
+    title = track["title"]
+    uploader = track["uploader"]
+    workdir = None
+
+    def finish_ok(shown_title, shown_uploader):
+        if status_msg_id:
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="tosearch"))
+            try:
+                bot.edit_message_text(
+                    text=f"▶️ **Плеер:**\n🎵 {shown_title}\n🧑‍🎤 {shown_uploader}",
+                    chat_id=chat_id, message_id=status_msg_id,
+                    parse_mode="Markdown", reply_markup=markup
+                )
+            except Exception:
+                pass
+        count_download()
+
+    try:
+        # Кэш используем только для обычного звука
+        cached_file_id = audio_cache.get(track_url)
+        if effect == "none" and cached_file_id and not str(cached_file_id).startswith("http"):
+            try:
+                bot.send_audio(chat_id, cached_file_id, title=title, performer=uploader)
+                finish_ok(title, uploader)
+                return
+            except Exception as e:
+                print(f"file_id из кэша не сработал, качаем заново: {e}")
+                audio_cache.pop(track_url, None)
+
+        with download_slots:
+            workdir = tempfile.mkdtemp(prefix="trk_")
+            info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir, effect)
+
+            out_title = info.get("title", title)
+            if effect != "none":
+                out_title = f"{out_title} ({EFFECT_NAMES[effect]})"
+            out_uploader = info.get("uploader", uploader)
+
+            with open(audio_filename, "rb") as audio:
+                thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
+                try:
+                    sent = bot.send_audio(chat_id, audio, title=out_title,
+                                          performer=out_uploader, thumbnail=thumb_file)
+                finally:
+                    if thumb_file:
+                        thumb_file.close()
+
+        if effect == "none":
+            audio_cache[track_url] = sent.audio.file_id
+        finish_ok(out_title, out_uploader)
+    except Exception as e:
+        report_error(f"Ошибка загрузки трека {track_url}", e)
+        reason = explain_error(e)
+        text = f"❌ Не удалось скачать «{title[:80]}». Попробуй выбрать другой результат."
+        if reason:
+            text += f"\n{reason}"
+        try:
+            if status_msg_id:
+                bot.edit_message_text(text, chat_id, status_msg_id)
+            else:
+                bot.send_message(chat_id, text)
+        except Exception as send_error:
+            print(f"Не удалось сообщить об ошибке: {send_error}")
+    finally:
+        if workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
 
 
 # --- VIP: ВЫБОР ЭФФЕКТА ПРИ СКАЧИВАНИИ В БОТЕ ---
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dlfx_"))
 def handle_download_effect_callback(call):
     chat_id = call.message.chat.id
-    parts = call.data.split("_")  # dlfx_<index>_<effect>
-    if len(parts) != 3 or not parts[1].isdigit():
+    parts = call.data.split("_")  # dlfx_<sid>_<index>_<effect>
+    if len(parts) != 4 or not parts[2].isdigit():
         return bot.answer_callback_query(call.id)
-    index, effect = int(parts[1]), parts[2]
+    sid, index, effect = parts[1], int(parts[2]), parts[3]
+
+    if not check_user_subscription(call.from_user.id):
+        return bot.answer_callback_query(call.id, "❌ Сначала подпишись на группу", show_alert=True)
     if effect != "none" and effect not in VIP_EFFECTS:
         return bot.answer_callback_query(call.id)
     if effect != "none" and not is_user_vip(call.from_user.id):
         return bot.answer_callback_query(call.id, "👑 Эффекты доступны только с VIP (/vip)", show_alert=True)
 
-    user_tracks = tracks_cache.get(chat_id, [])
+    user_tracks = tracks_cache.get(sid, [])
     if index >= len(user_tracks):
         return bot.answer_callback_query(call.id, "❌ Трек не найден в кэше. Повтори поиск.", show_alert=True)
 
-    raw = user_tracks[index]
-    track = normalize_miniapp_track({
-        "url": raw.get("url"), "title": raw.get("title"), "uploader": raw.get("uploader"),
-    })
-    if not track:
-        return bot.answer_callback_query(call.id, "❌ Некорректный трек.")
-
+    track = user_tracks[index]
     bot.answer_callback_query(call.id, "⏳ Обрабатываю трек...")
     try:
         bot.edit_message_text(
@@ -1414,7 +1730,11 @@ def handle_download_effect_callback(call):
         )
     except Exception:
         pass
-    threading.Thread(target=download_track_for_miniapp, args=(chat_id, track, effect), daemon=True).start()
+    threading.Thread(
+        target=send_track,
+        args=(chat_id, track, effect, call.message.message_id, call.from_user.id),
+        daemon=True
+    ).start()
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("dl_"))
@@ -1422,30 +1742,38 @@ def handle_download_callback(call):
     chat_id = call.message.chat.id
     register_user(chat_id)
 
-    index = int(call.data.replace("dl_", ""))
-    user_tracks = tracks_cache.get(chat_id, [])
+    # Проверка подписки (раньше её здесь не было)
+    if not check_user_subscription(call.from_user.id):
+        bot.answer_callback_query(call.id, "❌ Сначала подпишись на группу", show_alert=True)
+        send_subscription_prompt(chat_id)
+        return
+
+    parts = call.data.split("_")  # dl_<sid>_<index>
+    if len(parts) != 3 or not parts[2].isdigit():
+        return bot.answer_callback_query(call.id, "⌛ Кнопка устарела. Повтори поиск.", show_alert=True)
+    sid, index = parts[1], int(parts[2])
+    user_tracks = tracks_cache.get(sid, [])
 
     if index >= len(user_tracks):
-        bot.answer_callback_query(call.id, "❌ Трек не найден в кэше.")
+        bot.answer_callback_query(call.id, "❌ Трек не найден в кэше. Повтори поиск.", show_alert=True)
         return
 
     track = user_tracks[index]
-    track_url = track['url']
-    title = track.get('title', 'Трек')
-    uploader = track.get('uploader', 'Музыка')
+    title = track["title"]
+    uploader = track["uploader"]
 
     # VIP: предлагаем выбрать эффект перед скачиванием
     if is_user_vip(call.from_user.id):
         bot.answer_callback_query(call.id)
         markup = InlineKeyboardMarkup(row_width=2)
         markup.add(
-            InlineKeyboardButton("🔊 Обычный", callback_data=f"dlfx_{index}_none"),
-            InlineKeyboardButton("🔉 Bass Boost", callback_data=f"dlfx_{index}_bassboost"),
-            InlineKeyboardButton("🎧 8D", callback_data=f"dlfx_{index}_8d"),
-            InlineKeyboardButton("🐢 Slowed", callback_data=f"dlfx_{index}_slowed"),
-            InlineKeyboardButton("⚡ Nightcore", callback_data=f"dlfx_{index}_nightcore"),
+            InlineKeyboardButton("🔊 Обычный", callback_data=f"dlfx_{sid}_{index}_none"),
+            InlineKeyboardButton("🔉 Bass Boost", callback_data=f"dlfx_{sid}_{index}_bassboost"),
+            InlineKeyboardButton("🎧 8D", callback_data=f"dlfx_{sid}_{index}_8d"),
+            InlineKeyboardButton("🐢 Slowed", callback_data=f"dlfx_{sid}_{index}_slowed"),
+            InlineKeyboardButton("⚡ Nightcore", callback_data=f"dlfx_{sid}_{index}_nightcore"),
         )
-        markup.row(InlineKeyboardButton("🔙 К поиску", callback_data="back_to_search"))
+        markup.row(InlineKeyboardButton("🔙 К поиску", callback_data="tosearch"))
         bot.send_message(chat_id, f"🎚 **Выбери звук для:**\n🎵 {title}", parse_mode="Markdown", reply_markup=markup)
         return
 
@@ -1456,92 +1784,11 @@ def handle_download_callback(call):
         f"⏳ **Скачиваю трек:**\n🎵 {title}\n🧑‍🎤 {uploader}\n\n*Подожди пару секунд...*",
         parse_mode="Markdown"
     )
-
-    def worker():
-        audio_filename = None
-        thumbnail_filename = None
-        original_thumb = None
-
-        try:
-            if track_url in audio_cache and not audio_cache[track_url].startswith("http"):
-                file_id = audio_cache[track_url]
-                bot.send_audio(chat_id, file_id, title=title, performer=uploader)
-
-                markup = InlineKeyboardMarkup()
-                markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
-
-                bot.edit_message_text(
-                    text=f"▶️ **Плеер:**\n🎵 {title}\n🧑‍🎤 {uploader}",
-                    chat_id=chat_id,
-                    message_id=status_msg.message_id,
-                    parse_mode="Markdown",
-                    reply_markup=markup
-                )
-                stats_data["total_downloads"] += 1
-                save_all_data()
-                return
-
-            ydl_opts = {
-                "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
-                "outtmpl": f"song_{chat_id}_%(id)s.%(ext)s",
-                "writethumbnail": True,
-                "quiet": True,
-                "noprogress": True,
-                "socket_timeout": 15,
-                "postprocessors": [
-                    {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
-                    {"key": "EmbedThumbnail"}
-                ]
-            }
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(track_url, download=True)
-                audio_filename = ydl.prepare_filename(info)
-                original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
-
-            audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
-
-            with open(audio_filename, "rb") as audio:
-                thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
-
-                sent_msg = bot.send_audio(
-                    chat_id,
-                    audio,
-                    title=info.get('title', title),
-                    performer=info.get('uploader', uploader),
-                    thumbnail=thumb_file
-                )
-                if thumb_file:
-                    thumb_file.close()
-                file_id = sent_msg.audio.file_id
-                audio_cache[track_url] = file_id
-
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="back_to_search"))
-
-            bot.edit_message_text(
-                text=f"▶️ **Плеер:**\n🎵 {info.get('title', title)}\n🧑‍🎤 {info.get('uploader', uploader)}",
-                chat_id=chat_id,
-                message_id=status_msg.message_id,
-                parse_mode="Markdown",
-                reply_markup=markup
-            )
-
-            stats_data["total_downloads"] += 1
-            save_all_data()
-        except Exception as e:
-            print(f"Ошибка при скачивании трека: {e}")
-            try:
-                bot.edit_message_text("❌ Не удалось скачать выбранный трек.", chat_id, status_msg.message_id)
-            except:
-                pass
-        finally:
-            for file_p in [audio_filename, thumbnail_filename, original_thumb]:
-                if file_p and os.path.exists(file_p):
-                    try: os.remove(file_p)
-                    except: pass
-
-    threading.Thread(target=worker, daemon=True).start()
+    threading.Thread(
+        target=send_track,
+        args=(chat_id, track, "none", status_msg.message_id, call.from_user.id),
+        daemon=True
+    ).start()
 
 
 # --- API MINI APP: AUTH, SEARCH, FAVORITES, HISTORY, PLAYLISTS, STREAM ---
@@ -1703,7 +1950,7 @@ def handle_miniapp_get_data(handler):
             settings["search_limit"] = 25
             changed = True
     if changed:
-        save_all_data()
+        request_save()
 
     api_json(handler, 200, {
         "user": {"id": uid, "first_name": user.get("first_name", "Музыка")},
@@ -1755,7 +2002,7 @@ def handle_miniapp_search(handler, query_params):
         for item in entries:
             if not item:
                 continue
-            track_url = item.get("webpage_url") or item.get("original_url") or item.get("url")
+            track_url = entry_url(item)
             if not track_url:
                 continue
             normalized = normalize_miniapp_track({
@@ -1772,9 +2019,9 @@ def handle_miniapp_search(handler, query_params):
             q_low = query.lower()
             exact_author = [t for t in tracks if q_low in (t.get("uploader") or "").lower()]
             other_author = [t for t in tracks if q_low not in (t.get("uploader") or "").lower()]
-            tracks = (exact_author + other_author)[:limit]
+            tracks = (rank_tracks(exact_author, query) + rank_tracks(other_author, query))[:limit]
         else:
-            tracks = tracks[:limit]
+            tracks = rank_tracks(tracks, query)[:limit]
 
         missing = [i for i, track in enumerate(tracks) if not track.get("thumbnail")][:min(8, len(tracks))]
         if missing:
@@ -1795,7 +2042,7 @@ def handle_miniapp_search(handler, query_params):
             threading.Thread(target=prewarm_tracks_stream_urls, args=(tracks[:2],), daemon=True).start()
         api_json(handler, 200, {"tracks": tracks, "query": query})
     except Exception as e:
-        print(f"Ошибка поиска Mini App: {e}")
+        report_error(f"Ошибка поиска Mini App «{query}»", e)
         api_json(handler, 500, {"error": "Не удалось выполнить поиск. Попробуй ещё раз."})
 
 
@@ -1826,6 +2073,8 @@ def get_soundcloud_stream_url(track_url):
 
     with stream_cache_lock:
         stream_url_cache[track_url] = (direct_url, now)
+        if len(stream_url_cache) > 1000:
+            stream_url_cache.pop(next(iter(stream_url_cache)))
     return direct_url
 
 
@@ -1864,7 +2113,7 @@ def handle_miniapp_stream(handler, query_params):
         handler.send_header("Content-Length", "0")
         handler.end_headers()
     except Exception as e:
-        print(f"Ошибка получения аудиопотока: {e}")
+        print(f"Ошибка получения аудиопотока: {e!r}")
         api_json(handler, 502, {"error": "Не удалось получить аудио для этого трека."})
 
 
@@ -1883,83 +2132,8 @@ def handle_miniapp_lyrics(handler, query_params):
 
 
 def download_track_for_miniapp(user_id, track, effect="none"):
-    """Скачивает трек и отправляет в Telegram. Для VIP может применить аудиоэффект."""
-    if effect not in VIP_EFFECTS:
-        effect = "none"
-    if effect != "none" and not is_user_vip(user_id):
-        effect = "none"
-
-    track_url = track["url"]
-    title = track["title"]
-    uploader = track["uploader"]
-    audio_filename = thumbnail_filename = original_thumb = None
-    try:
-        # Кэш используем только для обычного звука
-        cached_file_id = audio_cache.get(track_url)
-        if effect == "none" and cached_file_id and not str(cached_file_id).startswith("http"):
-            bot.send_audio(user_id, cached_file_id, title=title, performer=uploader)
-            stats_data["total_downloads"] += 1
-            save_all_data()
-            return
-        ydl_opts = {
-            "format": "ba[abr<=128]/ba[ext=m4a]/ba/best",
-            "outtmpl": f"song_mini_{user_id}_%(id)s.%(ext)s",
-            "writethumbnail": True, "quiet": True, "noprogress": True,
-            "socket_timeout": 15,
-            "postprocessors": [
-                {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
-                {"key": "EmbedThumbnail"}
-            ]
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(track_url, download=True)
-            audio_filename = ydl.prepare_filename(info)
-            original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
-
-        out_title = info.get("title", title)
-        if effect != "none":
-            audio_filename = apply_audio_effect(audio_filename, effect)
-            out_title = f"{out_title} ({EFFECT_NAMES[effect]})"
-
-        audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
-        with open(audio_filename, "rb") as audio:
-            thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
-            try:
-                sent = bot.send_audio(
-                    user_id, audio,
-                    title=out_title,
-                    performer=info.get("uploader", uploader),
-                    thumbnail=thumb_file
-                )
-            finally:
-                if thumb_file:
-                    thumb_file.close()
-        if effect == "none":
-            audio_cache[track_url] = sent.audio.file_id
-        stats_data["total_downloads"] += 1
-        save_all_data()
-    except Exception as e:
-        print(f"Ошибка загрузки трека из Mini App: {e}")
-        try:
-            bot.send_message(user_id, f"❌ Не удалось скачать «{title[:80]}». Попробуй выбрать другой результат.")
-        except Exception as send_error:
-            print(f"Не удалось отправить сообщение об ошибке Mini App: {send_error}")
-    finally:
-        # Чистим все временные файлы этого трека (включая версии с эффектом)
-        base = None
-        if audio_filename:
-            base = os.path.splitext(audio_filename)[0]
-        candidates = [audio_filename, thumbnail_filename, original_thumb]
-        if base:
-            root = base.split("_fx_")[0].split("_compressed")[0]
-            for ext in (".m4a", ".mp3", ".opus", ".webm", ".ogg", ".jpg", ".png", ".webp"):
-                candidates.append(root + ext)
-        for file_path in set(candidates):
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                except OSError:
-                    pass
+    """Совместимость: Mini App шлёт трек в личку пользователя."""
+    send_track(user_id, track, effect, status_msg_id=None, user_id=user_id)
 
 
 def handle_miniapp_post(handler, path, payload):
@@ -1988,7 +2162,7 @@ def handle_miniapp_post(handler, path, payload):
 
         settings["search_limit"] = count
         settings["theme"] = theme
-        save_all_data()
+        request_save()
         return api_json(handler, 200, {"ok": True, "search_limit": count, "theme": theme})
 
     if path == "/api/invoice":
@@ -2026,7 +2200,7 @@ def handle_miniapp_post(handler, path, payload):
             del favorites[100:]
             saved = True
             threading.Thread(target=prewarm_tracks_stream_urls, args=([track],), daemon=True).start()
-        save_all_data()
+        request_save()
         return api_json(handler, 200, {"ok": True, "saved": saved, "favorites": favorites})
 
     if path == "/api/history":
@@ -2037,7 +2211,7 @@ def handle_miniapp_post(handler, path, payload):
             track = normalize_miniapp_track(raw)
             if track:
                 add_to_user_history(settings, track)
-        save_all_data()
+        request_save()
         return api_json(handler, 200, {"ok": True, "history": settings["history"]})
 
     if path == "/api/playlist":
@@ -2069,7 +2243,7 @@ def handle_miniapp_post(handler, path, payload):
         else:
             return api_json(handler, 400, {"error": "Неизвестное действие с плейлистом."})
         del settings["playlists"][100:]
-        save_all_data()
+        request_save()
         return api_json(handler, 200, {"ok": True, "playlists": settings["playlists"]})
 
     if path == "/api/download":
@@ -2090,7 +2264,7 @@ def handle_miniapp_post(handler, path, payload):
             return api_json(handler, 403, {"error": "👑 Аудио-эффекты доступны только с VIP подпиской!"})
 
         add_to_user_history(settings, track)
-        save_all_data()
+        request_save()
         threading.Thread(target=download_track_for_miniapp, args=(user_id, track, effect), daemon=True).start()
         return api_json(handler, 202, {
             "ok": True,
@@ -2113,7 +2287,7 @@ def handle_web_app_data(message):
                 user_settings[user_id_str] = {}
 
             user_settings[user_id_str]["search_limit"] = max(5, min(max_search_limit(message.from_user.id), count))
-            save_all_data()
+            request_save()
 
             bot.send_message(message.chat.id, f"✅ Настройки успешно сохранены!\nВыдача: {user_settings[user_id_str]['search_limit']} треков на страницу.")
     except Exception as e:
