@@ -251,7 +251,6 @@ def set_vip_status(user_id, duration_days=None, remove=False):
     if remove:
         settings["vip_expires"] = 0
         settings["theme"] = "default"
-        settings["accent"] = ""
         settings["search_limit"] = min(int(settings.get("search_limit", 10)), 25)
     elif duration_days:
         base = max(time.time(), get_vip_expires(uid))
@@ -519,7 +518,7 @@ def apply_audio_effect(input_filename, effect):
 # ============================================================
 #              ЕДИНАЯ ЗАГРУЗКА АУДИО (с запасными вариантами)
 # ============================================================
-def ydl_download_audio(track_url, outtmpl, extra=None):
+def ydl_download_audio(track_url, outtmpl):
     """Пробует несколько конфигураций yt-dlp. Возвращает (info, путь к файлу)."""
     base = {
         "format": "bestaudio[protocol^=http]/bestaudio/best",  # сначала прямой mp3, потом HLS
@@ -533,8 +532,6 @@ def ydl_download_audio(track_url, outtmpl, extra=None):
         "retries": 2,
         "extractor_retries": 2,
     }
-    if extra:
-        base.update(extra)
     attempts = [
         {**base, "postprocessors": [
             {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
@@ -560,179 +557,9 @@ def ydl_download_audio(track_url, outtmpl, extra=None):
     raise last_error
 
 
-# ============================================================
-#        ЗАПАСНЫЕ ИСТОЧНИКИ, ЕСЛИ SOUNDCLOUD НЕ ОТДАЁТ АУДИО
-# ============================================================
-YT_COOKIES_PATH = None
-_cookies_env = os.environ.get("YOUTUBE_COOKIES", "").strip()
-_cookies_file = os.environ.get("YOUTUBE_COOKIES_FILE", "").strip()
-try:
-    if _cookies_env:
-        YT_COOKIES_PATH = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
-        with open(YT_COOKIES_PATH, "w", encoding="utf-8") as _f:
-            _f.write(_cookies_env + "\n")
-    elif _cookies_file and os.path.exists(_cookies_file):
-        YT_COOKIES_PATH = os.path.join(tempfile.gettempdir(), "yt_cookies.txt")
-        shutil.copy(_cookies_file, YT_COOKIES_PATH)
-except Exception as _e:
-    print(f"Не удалось подготовить cookies для YouTube: {_e}")
-    YT_COOKIES_PATH = None
-print("✅ YouTube cookies подключены" if YT_COOKIES_PATH else "ℹ️ YouTube cookies не заданы (YOUTUBE_COOKIES)")
-
-
-def youtube_ydl_extra():
-    # cookies + JS-движок (deno/node), который yt-dlp нужен для YouTube
-    extra = {}
-    if YT_COOKIES_PATH:
-        extra["cookiefile"] = YT_COOKIES_PATH
-    for runtime in ("deno", "node"):
-        path = shutil.which(runtime)
-        if path:
-            extra["js_runtimes"] = {runtime: {"path": path}}
-            break
-    return extra
-
-
-def _duration_ok(candidate, target):
-    if not candidate or not target:
-        return True
-    return abs(candidate - target) <= max(8, target * 0.12)
-
-
-def _clean_title(title):
-    t = re.sub(r"[\(\[][^\)\]]*[\)\]]", " ", title or "")
-    return " ".join(t.split()) or (title or "")
-
-
-def youtube_fallback(track, workdir):
-    # Ищет тот же трек на YouTube (по названию и длительности) и скачивает его.
-    title = _clean_title(track.get("title"))
-    uploader = track.get("uploader") or ""
-    target = track.get("duration")
-    queries = [f"{uploader} {title}".strip(), title]
-    search_opts = {"extract_flat": True, "quiet": True, "no_warnings": True,
-                   "socket_timeout": 12, "ignoreerrors": True}
-    if YT_COOKIES_PATH:
-        search_opts["cookiefile"] = YT_COOKIES_PATH
-
-    candidates = []
-    for q in dict.fromkeys(queries):
-        try:
-            with yt_dlp.YoutubeDL(search_opts) as ydl:
-                result = ydl.extract_info(f"ytsearch8:{q}", download=False)
-        except Exception as e:
-            print(f"YouTube-поиск не удался ({q}): {e!r}")
-            continue
-        for e in ((result or {}).get("entries") or []):
-            if e and e.get("id"):
-                candidates.append({
-                    "url": f"https://www.youtube.com/watch?v={e['id']}",
-                    "title": e.get("title") or "",
-                    "uploader": e.get("channel") or e.get("uploader") or "",
-                    "duration": e.get("duration"),
-                })
-    candidates = dedupe_tracks(candidates)
-    scored = score_tracks(candidates, [title, f"{uploader} {title}".strip()])
-    good = [t for sc, t in scored if sc >= 10 and _duration_ok(t.get("duration"), target)]
-    if not good:
-        return None
-
-    last_error = None
-    for cand in good[:2]:
-        try:
-            info, filename = ydl_download_audio(
-                cand["url"], os.path.join(workdir, "yt_%(id)s.%(ext)s"),
-                extra=youtube_ydl_extra())
-            return info, filename
-        except Exception as e:
-            last_error = e
-            print(f"YouTube-загрузка не удалась ({cand['url']}): {e!r}")
-    if last_error:
-        raise last_error
-    return None
-
-
-def audius_fallback(track, workdir):
-    # Audius: открытый API, отдаёт mp3-поток публичных треков.
-    title = _clean_title(track.get("title"))
-    uploader = track.get("uploader") or ""
-    target = track.get("duration")
-    hosts = (_http_json("https://api.audius.co", timeout=10) or {}).get("data") or []
-    if not hosts:
-        return None
-    host = hosts[0].rstrip("/")
-    data = _http_json(f"{host}/v1/tracks/search?" + urlencode(
-        {"query": f"{uploader} {title}".strip(), "app_name": "TelegramMusicBot", "limit": 10}), timeout=12)
-    items = (data or {}).get("data") or []
-    candidates = []
-    for it in items:
-        if not it.get("id") or it.get("is_streamable") is False:
-            continue
-        candidates.append({
-            "url": f"https://audius.co/{it['id']}", "title": it.get("title") or "",
-            "uploader": (it.get("user") or {}).get("name") or "",
-            "duration": it.get("duration"), "_item": it,
-        })
-    scored = score_tracks(candidates, [title, f"{uploader} {title}".strip()])
-    good = [t for sc, t in scored if sc >= 10 and _duration_ok(t.get("duration"), target)]
-    if not good:
-        return None
-    item = good[0]["_item"]
-    out_path = os.path.join(workdir, f"audius_{item['id']}.mp3")
-    stream_url = f"{host}/v1/tracks/{item['id']}/stream?app_name=TelegramMusicBot"
-    request = urllib.request.Request(stream_url, headers={"User-Agent": "TelegramMusicBot/1.0"})
-    with urllib.request.urlopen(request, timeout=30) as resp, open(out_path, "wb") as f:
-        total = 0
-        while True:
-            chunk = resp.read(256 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > 80 * 1024 * 1024:
-                raise RuntimeError("Audius: файл слишком большой")
-            f.write(chunk)
-    if os.path.getsize(out_path) < 50 * 1024:
-        raise RuntimeError("Audius вернул пустой файл")
-    artwork = ((item.get("artwork") or {}).get("480x480")) or ""
-    return {"title": item.get("title") or title,
-            "uploader": (item.get("user") or {}).get("name") or uploader,
-            "thumbnail": artwork}, out_path
-
-
-def download_with_fallbacks(track, workdir):
-    # SoundCloud -> YouTube -> Audius. Возвращает (info, файл, источник).
-    track_url = track["url"]
-    errors = []
-    try:
-        info, filename = ydl_download_audio(track_url, os.path.join(workdir, "track_%(id)s.%(ext)s"))
-        sc_dur, want = info.get("duration"), track.get("duration")
-        # SoundCloud иногда отдаёт только 30-секундный превью платного трека
-        if sc_dur and want and want > 60 and sc_dur <= 45:
-            raise RuntimeError(f"SoundCloud отдал только превью ({int(sc_dur)} с)")
-        return info, filename, "SoundCloud"
-    except Exception as e:
-        errors.append(f"SoundCloud: {e!r}")
-        print(f"SoundCloud не отдал аудио, пробуем другие источники: {e!r}")
-
-    for name, func in (("YouTube", youtube_fallback), ("Audius", audius_fallback)):
-        try:
-            result = func(track, workdir)
-            if result:
-                info, filename = result
-                return info, filename, name
-            errors.append(f"{name}: не нашёл подходящий трек")
-        except Exception as e:
-            errors.append(f"{name}: {e!r}")
-            print(f"{name}: {e!r}")
-    raise RuntimeError(" | ".join(errors))
-
-
-def prepare_track_file(track_url, workdir, effect="none", track=None):
-    """Скачивает (с запасными источниками), применяет эффект, приводит к mp3/m4a, сжимает."""
-    if track is None:
-        track = {"url": track_url, "title": "", "uploader": "", "duration": None}
-    info, audio_filename, source = download_with_fallbacks(track, workdir)
-    info["_source"] = source
+def prepare_track_file(track_url, workdir, effect="none"):
+    """Скачивает, применяет эффект, приводит к mp3/m4a, сжимает. Возвращает (info, audio, thumb)."""
+    info, audio_filename = ydl_download_audio(track_url, os.path.join(workdir, "track_%(id)s.%(ext)s"))
     _original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
     if effect != "none":
         audio_filename = apply_audio_effect(audio_filename, effect)
@@ -1515,7 +1342,7 @@ def handle_chosen_inline(chosen):
         workdir = tempfile.mkdtemp(prefix="inl_")
         try:
             with download_slots:
-                info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir, track=track)
+                info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir)
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
@@ -1963,25 +1790,18 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
 
         with download_slots:
             workdir = tempfile.mkdtemp(prefix="trk_")
-            info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir, effect, track=track)
+            info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir, effect)
 
-            source = info.get("_source", "SoundCloud")
-            if source == "SoundCloud":
-                out_title = info.get("title", title)
-                out_uploader = info.get("uploader", uploader)
-            else:
-                # у запасного источника названия бывают «грязные» — оставляем данные из поиска
-                out_title, out_uploader = title, uploader
+            out_title = info.get("title", title)
             if effect != "none":
                 out_title = f"{out_title} ({EFFECT_NAMES[effect]})"
-            caption = f"ℹ️ Источник: {source}" if source != "SoundCloud" else None
+            out_uploader = info.get("uploader", uploader)
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
                 try:
                     sent = bot.send_audio(chat_id, audio, title=out_title,
-                                          performer=out_uploader, thumbnail=thumb_file,
-                                          caption=caption)
+                                          performer=out_uploader, thumbnail=thumb_file)
                 finally:
                     if thumb_file:
                         thumb_file.close()
@@ -2140,7 +1960,6 @@ def get_user_settings(user_id):
     settings.setdefault("history", [])
     settings.setdefault("playlists", [])
     settings.setdefault("theme", "default")
-    settings.setdefault("accent", "")
     return settings
 
 
@@ -2256,9 +2075,6 @@ def handle_miniapp_get_data(handler):
         if int(settings.get("search_limit", 10)) > 25:
             settings["search_limit"] = 25
             changed = True
-        if settings.get("accent"):
-            settings["accent"] = ""
-            changed = True
     if changed:
         request_save()
 
@@ -2270,8 +2086,7 @@ def handle_miniapp_get_data(handler):
         "playlists": settings.get("playlists", []),
         "is_vip": vip,
         "vip_expires": get_vip_expires(uid),
-        "theme": settings.get("theme", "default"),
-        "accent": settings.get("accent", "")
+        "theme": settings.get("theme", "default")
     })
     favs = settings.get("favorites", [])
     if favs:
@@ -2447,20 +2262,10 @@ def handle_miniapp_post(handler, path, payload):
         if theme != "default" and not is_user_vip(user_id):
             return api_json(handler, 403, {"error": "👑 Эта тема доступна только с VIP."})
 
-        accent = settings.get("accent", "")
-        if "accent" in payload:
-            raw_accent = str(payload.get("accent") or "").strip()
-            if raw_accent and not re.fullmatch(r"#[0-9a-fA-F]{6}", raw_accent):
-                return api_json(handler, 400, {"error": "Некорректный цвет."})
-            if raw_accent and not is_user_vip(user_id):
-                return api_json(handler, 403, {"error": "👑 Свой цвет доступен только с VIP."})
-            accent = raw_accent.lower()
-
         settings["search_limit"] = count
         settings["theme"] = theme
-        settings["accent"] = accent
         request_save()
-        return api_json(handler, 200, {"ok": True, "search_limit": count, "theme": theme, "accent": accent})
+        return api_json(handler, 200, {"ok": True, "search_limit": count, "theme": theme})
 
     if path == "/api/invoice":
         # Создаёт ссылку на оплату Stars, которую Mini App открывает через tg.openInvoice
