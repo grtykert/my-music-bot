@@ -558,7 +558,7 @@ def ydl_download_audio(track_url, outtmpl):
 
 
 def prepare_track_file(track_url, workdir, effect="none"):
-    """Скачивает трек SoundCloud, готовит аудио и обложку."""
+    """Скачивает, применяет эффект, приводит к mp3/m4a, сжимает. Возвращает (info, audio, thumb)."""
     info, audio_filename = ydl_download_audio(track_url, os.path.join(workdir, "track_%(id)s.%(ext)s"))
     _original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
     if effect != "none":
@@ -566,63 +566,7 @@ def prepare_track_file(track_url, workdir, effect="none"):
     else:
         audio_filename = ensure_telegram_audio(audio_filename)
     audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
-    info.setdefault("source", "soundcloud")
     return info, audio_filename, thumbnail_filename
-
-
-def prepare_track_with_fallback(track, workdir, effect="none"):
-    """Сначала пробует SoundCloud; при ошибке ищет разрешённую для скачивания версию в Audius."""
-    source = str(track.get("source") or "soundcloud").lower()
-    if source == "audius":
-        info, audio_filename = download_audius_track(track, workdir)
-        _original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
-        if effect != "none":
-            audio_filename = apply_audio_effect(audio_filename, effect)
-        else:
-            audio_filename = ensure_telegram_audio(audio_filename)
-        audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
-        return info, audio_filename, thumbnail_filename
-
-    try:
-        return prepare_track_file(track["url"], workdir, effect)
-    except Exception as soundcloud_error:
-        print(
-            f"SoundCloud не смог скачать «{track.get('title', '')}». "
-            f"Запускаю резервный поиск Audius: {soundcloud_error!r}"
-        )
-        candidate = find_audius_match(track, require_download=True)
-        if not candidate:
-            raise RuntimeError(
-                "SoundCloud не отдал аудио; Audius не нашёл точный трек "
-                "с открытым скачиванием и подходящими условиями."
-            ) from soundcloud_error
-
-        info, audio_filename = download_audius_track(candidate, workdir)
-        _original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
-        if effect != "none":
-            audio_filename = apply_audio_effect(audio_filename, effect)
-        else:
-            audio_filename = ensure_telegram_audio(audio_filename)
-        audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
-        info["source"] = "audius"
-        return info, audio_filename, thumbnail_filename
-
-
-def audius_attribution_caption(info, max_length=950):
-    """Атрибуция для треков Audius согласно Open Music License."""
-    if not isinstance(info, dict) or str(info.get("source", "")).lower() != "audius":
-        return None
-    artist = str(info.get("uploader") or "Неизвестный автор").strip()
-    copyright_line = str(info.get("copyright_line") or f"Copyright: {artist}").strip()
-    license_name = str(info.get("license_label") or "Audius Open Music License (OML)").strip()
-    permalink = str(info.get("webpage_url") or info.get("permalink") or "https://audius.co").strip()
-    caption = (
-        f"Источник: Audius\nИсполнитель: {artist}\n{copyright_line}\n"
-        f"Лицензия: {license_name}\n"
-        f"Текст лицензии: https://openaudiofoundation.org/open-music-license.pdf\n"
-        f"Оригинал: {permalink}"
-    )
-    return caption[:max_length]
 
 
 def count_download():
@@ -1303,337 +1247,6 @@ def soundcloud_search(query, count=30):
     return [t for _, t in scored]
 
 
-# --- РЕЗЕРВНЫЙ ИСТОЧНИК: AUDIUS OFFICIAL API ---
-# Публичные read-only методы доступны без Client ID; API key нужен только для повышенных лимитов.
-AUDIUS_API_BASE = "https://api.audius.co/v1"
-AUDIUS_TIMEOUT = 20
-AUDIUS_MAX_FILE_BYTES = 100 * 1024 * 1024
-
-
-def audius_api_json(path, params=None):
-    query = urlencode(params or {})
-    url = f"{AUDIUS_API_BASE}/{str(path).lstrip('/')}"
-    if query:
-        url += "?" + query
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "SoundMusicTelegramBot/1.0",
-            "Accept": "application/json",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=AUDIUS_TIMEOUT) as response:
-        raw = response.read(4 * 1024 * 1024 + 1)
-    if len(raw) > 4 * 1024 * 1024:
-        raise RuntimeError("Audius вернул слишком большой ответ API")
-    payload = json.loads(raw.decode("utf-8"))
-    if not isinstance(payload, dict):
-        raise RuntimeError("Некорректный ответ Audius API")
-    if payload.get("status") not in (None, "success"):
-        raise RuntimeError(f"Audius API: {payload.get('status')}")
-    return payload
-
-
-def audius_artist_name(item):
-    user = item.get("user") if isinstance(item.get("user"), dict) else {}
-    names = []
-    for artist in item.get("artists") or []:
-        if isinstance(artist, dict):
-            name = artist.get("name") or artist.get("handle")
-            if name and str(name).strip():
-                names.append(str(name).strip())
-    if names:
-        return ", ".join(dict.fromkeys(names))[:120]
-    return str(user.get("name") or user.get("handle") or item.get("artist_name") or "Неизвестен")[:120]
-
-
-def audius_artwork_url(item):
-    artwork = item.get("artwork") or item.get("cover_art") or ""
-    if isinstance(artwork, dict):
-        artwork = (
-            artwork.get("_480x480") or artwork.get("480x480") or
-            artwork.get("_1000x1000") or artwork.get("1000x1000") or
-            artwork.get("_150x150") or artwork.get("150x150") or ""
-        )
-    url = str(artwork or "").strip()
-    parsed = urlparse(url)
-    return url[:1000] if parsed.scheme == "https" and parsed.hostname else ""
-
-
-def audius_license_info(item):
-    """Возвращает (можно_использовать, подпись_лицензии).
-
-    Если отдельная лицензия не указана, для API-доступного материала действует OML.
-    Для явно указанных лицензий пропускаем только варианты, совместимые с коммерческим
-    использованием и распространением с атрибуцией.
-    """
-    value = (item.get("license") or item.get("license_url") or item.get("licenseUrl")
-             or item.get("alternative_license") or item.get("alternativeLicense"))
-    if isinstance(value, dict):
-        value = value.get("url") or value.get("name") or value.get("license")
-    raw = str(value or "").strip()
-    if not raw:
-        return True, "Audius Open Music License (OML)"
-
-    low = raw.casefold().replace("_", "-").replace(" ", "-")
-    if any(token in low for token in ("noncommercial", "non-commercial", "by-nc", "no-derivatives", "by-nd", "-nc-", "-nd-")):
-        return False, ""
-    if low in ("oml", "open-music-license") or "openmusiclicense" in low:
-        return True, "Audius Open Music License (OML)"
-    if "cc0" in low or "public-domain" in low or "public domain" in low:
-        return True, "CC0 / Public Domain"
-    if ("creativecommons.org/licenses/by/" in low or "creativecommons.org/licenses/by-sa/" in low
-            or "cc-by" in low or "cc-by-sa" in low or "attribution-4.0" in low):
-        return True, raw[:100]
-    # Неизвестную или явно ограничительную отдельную лицензию не считаем разрешением на пересылку.
-    return False, ""
-
-
-def _audius_field(item, *names, default=None):
-    """Читает поле Audius API в snake_case или camelCase."""
-    for name in names:
-        if name in item:
-            return item.get(name)
-    return default
-
-
-def audius_track_allowed(item, require_download=True):
-    if not isinstance(item, dict):
-        return False
-    if (_audius_field(item, "is_available", "isAvailable") is False
-            or _audius_field(item, "is_delete", "isDelete") is True
-            or _audius_field(item, "is_unlisted", "isUnlisted") is True):
-        return False
-    if require_download:
-        downloadable = _audius_field(item, "is_downloadable", "isDownloadable", "downloadable")
-        if downloadable is not True:
-            return False
-        if _audius_field(item, "is_download_gated", "isDownloadGated") is True:
-            return False
-        conditions = _audius_field(item, "download_conditions", "downloadConditions")
-        if conditions not in (None, {}, [], ""):
-            return False
-    else:
-        if (_audius_field(item, "is_streamable", "isStreamable") is False
-                or _audius_field(item, "is_stream_gated", "isStreamGated") is True):
-            return False
-        conditions = _audius_field(item, "stream_conditions", "streamConditions")
-        if conditions not in (None, {}, [], ""):
-            return False
-    # Если автор ограничил доступ конкретными API keys, не пробуем обходить ограничение.
-    if _audius_field(item, "allowed_api_keys", "allowedApiKeys"):
-        return False
-    allowed, _license_label = audius_license_info(item)
-    return allowed
-
-
-def _audius_normalized_candidate(item):
-    if not isinstance(item, dict):
-        return None
-    track_id = str(item.get("id") or "").strip()
-    title = str(item.get("title") or "").strip()
-    permalink = str(item.get("permalink") or "").strip()
-    parsed = urlparse(permalink)
-    if not track_id or not title or parsed.scheme != "https" or not (parsed.hostname == "audius.co" or (parsed.hostname or "").endswith(".audius.co")):
-        return None
-    try:
-        duration = int(float(item.get("duration"))) if item.get("duration") is not None else None
-    except (TypeError, ValueError):
-        duration = None
-    _ok, license_label = audius_license_info(item)
-    artist = audius_artist_name(item)
-    return {
-        "url": permalink,
-        "title": title[:180],
-        "uploader": artist,
-        "thumbnail": audius_artwork_url(item),
-        "duration": duration,
-        "source": "audius",
-        "audius_id": track_id,
-        "audius_raw": item,
-        "license_label": license_label,
-        "copyright_line": str(item.get("copyright_line") or "").strip()[:250],
-    }
-
-
-def _clean_match_value(value):
-    tokens = [token for token in norm_text(value).split() if token not in NOISE_TOKENS]
-    return " ".join(tokens)
-
-
-def find_audius_match(track, require_download=True):
-    """Ищет Audius-кандидата и строго сверяет название, исполнителя и длительность."""
-    from difflib import SequenceMatcher
-
-    if not isinstance(track, dict):
-        return None
-    original_title = str(track.get("title") or "").strip()
-    original_uploader = str(track.get("uploader") or "").strip()
-    if not original_title:
-        return None
-
-    parsed_artist, clean_title = split_artist_title(original_title, original_uploader)
-    wanted_title = clean_title or original_title
-    wanted_artist = parsed_artist or original_uploader
-    queries = []
-    for query in (f"{wanted_artist} {wanted_title}".strip(), wanted_title):
-        if query and query.casefold() not in [q.casefold() for q in queries]:
-            queries.append(query)
-
-    raw_items = []
-    seen_ids = set()
-    for query in queries:
-        try:
-            result = audius_api_json("/tracks/search", {"query": query, "limit": 30})
-            entries = result.get("data") or []
-            if isinstance(entries, dict):
-                entries = entries.get("tracks") or []
-            for item in entries if isinstance(entries, list) else []:
-                if not isinstance(item, dict):
-                    continue
-                track_id = str(item.get("id") or "")
-                if track_id and track_id not in seen_ids:
-                    seen_ids.add(track_id)
-                    raw_items.append(item)
-        except Exception as e:
-            print(f"Ошибка резервного поиска Audius по запросу «{query}»: {e!r}")
-
-    if not raw_items:
-        return None
-
-    target_title = _clean_match_value(wanted_title)
-    target_artist = _clean_match_value(wanted_artist)
-    try:
-        target_duration = int(float(track.get("duration"))) if track.get("duration") is not None else None
-    except (TypeError, ValueError):
-        target_duration = None
-
-    ranked = []
-    for item in raw_items:
-        if not audius_track_allowed(item, require_download=require_download):
-            continue
-        candidate = _audius_normalized_candidate(item)
-        if not candidate:
-            continue
-        candidate_title = _clean_match_value(candidate["title"])
-        candidate_artist = _clean_match_value(candidate["uploader"])
-        title_ratio = SequenceMatcher(None, target_title, candidate_title).ratio()
-        artist_ratio = SequenceMatcher(None, target_artist, candidate_artist).ratio() if target_artist else 0.0
-
-        # Требуем очень близкое название; одного похожего исполнителя недостаточно.
-        if title_ratio < 0.78:
-            continue
-        if target_artist and artist_ratio < 0.42 and title_ratio < 0.94:
-            continue
-
-        duration_penalty = 0.0
-        candidate_duration = candidate.get("duration")
-        if target_duration and candidate_duration:
-            difference = abs(target_duration - candidate_duration)
-            allowed_difference = max(18, int(target_duration * 0.15))
-            if difference > allowed_difference:
-                continue
-            duration_penalty = (difference / max(1, target_duration)) * 20
-
-        score = title_ratio * 100 + artist_ratio * 25 - duration_penalty
-        ranked.append((score, candidate))
-
-    if not ranked:
-        return None
-    ranked.sort(key=lambda entry: entry[0], reverse=True)
-    best_score, best = ranked[0]
-    if best_score < 78:
-        return None
-    return best
-
-
-def download_audius_track(track, workdir):
-    """Получает файл только через официальный Audius download endpoint и при is_downloadable=true."""
-    raw = track.get("audius_raw") if isinstance(track, dict) else None
-    track_id = str((raw or {}).get("id") or (track or {}).get("audius_id") or "").strip()
-    if not track_id:
-        raise RuntimeError("Не удалось определить ID трека Audius")
-    if not isinstance(raw, dict):
-        details = audius_api_json(f"/tracks/{track_id}")
-        raw = details.get("data")
-        if isinstance(raw, list):
-            raw = raw[0] if raw else None
-        if isinstance(raw, dict) and isinstance(raw.get("track"), dict):
-            raw = raw["track"]
-    if not isinstance(raw, dict) or not audius_track_allowed(raw, require_download=True):
-        raise RuntimeError("Audius не разрешает скачивание этого трека или он защищён доступом")
-
-    url = f"{AUDIUS_API_BASE}/tracks/{track_id}/download"
-    request = urllib.request.Request(
-        url,
-        headers={"User-Agent": "SoundMusicTelegramBot/1.0", "Accept": "audio/*,application/octet-stream;q=0.9,*/*;q=0.5"},
-    )
-    filename = os.path.join(workdir, f"audius_{re.sub(r'[^a-zA-Z0-9_-]+', '_', track_id)[:60]}.mp3")
-    written = 0
-    with urllib.request.urlopen(request, timeout=60) as response:
-        content_type = (response.headers.get("Content-Type") or "").lower()
-        content_length = response.headers.get("Content-Length")
-        if content_length and content_length.isdigit() and int(content_length) > AUDIUS_MAX_FILE_BYTES:
-            raise RuntimeError("Файл Audius слишком большой для Telegram")
-        first_chunk = response.read(2048)
-        if "json" in content_type or first_chunk.lstrip().startswith((b"{", b"[")):
-            try:
-                detail = json.loads(first_chunk.decode("utf-8", errors="replace"))
-            except Exception:
-                detail = ""
-            raise RuntimeError(f"Audius не выдал аудиофайл: {str(detail)[:250]}")
-
-        extension = ".mp3"
-        disposition = response.headers.get("Content-Disposition") or ""
-        match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', disposition, re.I)
-        if match:
-            ext = os.path.splitext(match.group(1).strip())[1].lower()
-            if re.fullmatch(r"\.[a-z0-9]{1,6}", ext):
-                extension = ext
-        if extension == ".mp3":
-            if "audio/mp4" in content_type:
-                extension = ".m4a"
-            elif "audio/ogg" in content_type:
-                extension = ".ogg"
-            elif "audio/flac" in content_type:
-                extension = ".flac"
-            elif "audio/wav" in content_type or "audio/x-wav" in content_type:
-                extension = ".wav"
-        filename = os.path.splitext(filename)[0] + extension
-
-        with open(filename, "wb") as output:
-            if first_chunk:
-                output.write(first_chunk)
-                written += len(first_chunk)
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                written += len(chunk)
-                if written > AUDIUS_MAX_FILE_BYTES:
-                    raise RuntimeError("Файл Audius превысил допустимый размер")
-                output.write(chunk)
-
-    if not os.path.exists(filename) or os.path.getsize(filename) < 1024:
-        raise RuntimeError("Audius вернул пустой или неполный аудиофайл")
-
-    raw_user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
-    info = {
-        "id": track_id,
-        "title": str(raw.get("title") or track.get("title") or "Без названия")[:180],
-        "uploader": audius_artist_name(raw),
-        "duration": raw.get("duration"),
-        "thumbnail": audius_artwork_url(raw),
-        "webpage_url": str(raw.get("permalink") or track.get("url") or "https://audius.co"),
-        "source": "audius",
-        "license_label": audius_license_info(raw)[1],
-        "copyright_line": str(raw.get("copyright_line") or raw.get("copyrightLine")
-                               or f"Copyright: {audius_artist_name(raw)}")[:250],
-        "artist_handle": str(raw_user.get("handle") or "")[:100],
-    }
-    return info, filename
-
-
 def store_tracks(tracks):
     """Сохраняет конкретную выдачу под коротким id, чтобы старые кнопки не качали чужие треки."""
     sid = os.urandom(4).hex()
@@ -1729,7 +1342,7 @@ def handle_chosen_inline(chosen):
         workdir = tempfile.mkdtemp(prefix="inl_")
         try:
             with download_slots:
-                info, audio_filename, thumbnail_filename = prepare_track_with_fallback(track, workdir)
+                info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir)
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
@@ -1739,22 +1352,19 @@ def handle_chosen_inline(chosen):
                         audio=audio,
                         title=info.get('title', title),
                         performer=info.get('uploader', uploader),
-                        thumbnail=thumb_file,
-                        caption=audius_attribution_caption(info)
+                        thumbnail=thumb_file
                     )
                 finally:
                     if thumb_file:
                         thumb_file.close()
             file_id = backup_msg.audio.file_id
-            if info.get("source") != "audius":
-                audio_cache[track_url] = file_id
+            audio_cache[track_url] = file_id
 
             bot.edit_message_media(
                 media=InputMediaAudio(
                     media=file_id,
                     title=info.get('title', title),
-                    performer=info.get('uploader', uploader),
-                    caption=audius_attribution_caption(info)
+                    performer=info.get('uploader', uploader)
                 ),
                 inline_message_id=inline_msg_id
             )
@@ -2152,19 +1762,15 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
     uploader = track["uploader"]
     workdir = None
 
-    def finish_ok(shown_title, shown_uploader, info=None):
+    def finish_ok(shown_title, shown_uploader):
         if status_msg_id:
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="tosearch"))
             try:
-                text = f"▶️ **Плеер:**\n🎵 {shown_title}\n🧑‍🎤 {shown_uploader}"
-                attribution = audius_attribution_caption(info)
-                if attribution:
-                    text += "\n\n" + attribution
                 bot.edit_message_text(
-                    text=text,
+                    text=f"▶️ **Плеер:**\n🎵 {shown_title}\n🧑‍🎤 {shown_uploader}",
                     chat_id=chat_id, message_id=status_msg_id,
-                    parse_mode=None if attribution else "Markdown", reply_markup=markup
+                    parse_mode="Markdown", reply_markup=markup
                 )
             except Exception:
                 pass
@@ -2184,7 +1790,7 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
 
         with download_slots:
             workdir = tempfile.mkdtemp(prefix="trk_")
-            info, audio_filename, thumbnail_filename = prepare_track_with_fallback(track, workdir, effect)
+            info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir, effect)
 
             out_title = info.get("title", title)
             if effect != "none":
@@ -2194,29 +1800,19 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
                 try:
-                    sent = bot.send_audio(
-                        chat_id, audio, title=out_title,
-                        performer=out_uploader, thumbnail=thumb_file,
-                        caption=audius_attribution_caption(info)
-                    )
+                    sent = bot.send_audio(chat_id, audio, title=out_title,
+                                          performer=out_uploader, thumbnail=thumb_file)
                 finally:
                     if thumb_file:
                         thumb_file.close()
 
-        if effect == "none" and info.get("source") != "audius":
+        if effect == "none":
             audio_cache[track_url] = sent.audio.file_id
-        finish_ok(out_title, out_uploader, info)
+        finish_ok(out_title, out_uploader)
     except Exception as e:
         report_error(f"Ошибка загрузки трека {track_url}", e)
         reason = explain_error(e)
-        if "Audius не нашёл точный трек" in str(e):
-            text = (
-                f"❌ Не удалось скачать «{title[:80]}».\n"
-                "SoundCloud не отдал аудио, а Audius не нашёл точную версию "
-                "с открытым скачиванием."
-            )
-        else:
-            text = f"❌ Не удалось скачать «{title[:80]}». Попробуй выбрать другой результат."
+        text = f"❌ Не удалось скачать «{title[:80]}». Попробуй выбрать другой результат."
         if reason:
             text += f"\n{reason}"
         try:
@@ -2392,8 +1988,7 @@ def normalize_miniapp_track(raw):
     track_url = str(raw.get("url", "")).strip()
     parsed = urlparse(track_url)
     host = (parsed.hostname or "").lower()
-    is_soundcloud = host == "soundcloud.com" or host.endswith(".soundcloud.com")
-    if parsed.scheme != "https" or not is_soundcloud:
+    if parsed.scheme != "https" or not (host == "soundcloud.com" or host.endswith(".soundcloud.com")):
         return None
     thumbnail = str(raw.get("thumbnail") or "").strip()[:1000]
     thumb_parsed = urlparse(thumbnail)
@@ -2403,15 +1998,13 @@ def normalize_miniapp_track(raw):
         duration = int(raw.get("duration")) if raw.get("duration") is not None else None
     except (TypeError, ValueError):
         duration = None
-    normalized = {
+    return {
         "url": track_url,
         "title": str(raw.get("title") or "Без названия")[:180],
         "uploader": str(raw.get("uploader") or "Неизвестен")[:120],
         "thumbnail": thumbnail,
-        "duration": duration,
-        "source": "soundcloud",
+        "duration": duration
     }
-    return normalized
 
 
 def resolve_soundcloud_metadata(track_url):
