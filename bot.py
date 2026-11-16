@@ -150,6 +150,11 @@ else:
 
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", -1004445455425))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 5378591975))
+JAMENDO_CLIENT_ID = os.environ.get("JAMENDO_CLIENT_ID", "").strip()
+if JAMENDO_CLIENT_ID:
+    print("✅ Резервный поиск Jamendo включён")
+else:
+    print("⚠️ Резервный поиск Jamendo выключен: не задан JAMENDO_CLIENT_ID")
 
 # ОБЯЗАТЕЛЬНЫЙ КАНАЛ/ГРУППА ДЛЯ ПОДПИСКИ
 REQUIRED_CHANNEL = "-1004362385382"
@@ -330,6 +335,10 @@ def explain_error(error):
         return "Сервис обновляется, попробуй позже."
     if "no space" in text or "too large" in text:
         return "Файл слишком большой."
+    if "jamendo_client_id" in text or "резервный поиск не настроен" in text:
+        return "Резервный поиск не настроен: администратору нужно добавить JAMENDO_CLIENT_ID в Render."
+    if "drm" in text or "jamendo" in text or "точное совпадение" in text:
+        return "Трек защищён DRM. Не удалось найти точную версию, которую разрешено скачивать."
     return ""
 
 
@@ -557,9 +566,154 @@ def ydl_download_audio(track_url, outtmpl):
     raise last_error
 
 
-def prepare_track_file(track_url, workdir, effect="none"):
-    """Скачивает, применяет эффект, приводит к mp3/m4a, сжимает. Возвращает (info, audio, thumb)."""
-    info, audio_filename = ydl_download_audio(track_url, os.path.join(workdir, "track_%(id)s.%(ext)s"))
+def is_drm_error(error):
+    """Распознаёт именно DRM-ошибки; для остальных сбоев поведение не меняем."""
+    message = str(error).casefold()
+    return "drm" in message or "digital rights management" in message
+
+
+def _text_similarity(left, right):
+    from difflib import SequenceMatcher
+    left = norm_text(left)
+    right = norm_text(right)
+    if not left or not right:
+        return 0.0
+    if left in right or right in left:
+        return 1.0
+    return SequenceMatcher(None, left, right).ratio()
+
+
+def download_jamendo_fallback(title, uploader, workdir):
+    """Ищет точное совпадение в Jamendo и скачивает только треки с audiodownload_allowed=true."""
+    if not JAMENDO_CLIENT_ID:
+        raise RuntimeError("Резервный поиск не настроен: отсутствует JAMENDO_CLIENT_ID")
+
+    query = " ".join(part for part in (uploader, title) if part).strip()
+    params = {
+        "client_id": JAMENDO_CLIENT_ID,
+        "format": "json",
+        "limit": 20,
+        "search": query,
+        "type": "single albumtrack",
+        "audiodlformat": "mp32",
+        "include": "licenses",
+    }
+    api_url = "https://api.jamendo.com/v3.0/tracks/?" + urlencode(params)
+    data = _http_json(api_url, timeout=15)
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+        raise RuntimeError("Jamendo не вернул результаты резервного поиска")
+
+    candidates = []
+    original_artist = norm_text(uploader)
+    for item in data["results"]:
+        if not isinstance(item, dict):
+            continue
+        allowed = item.get("audiodownload_allowed")
+        if not (allowed is True or str(allowed).casefold() in ("1", "true", "yes")):
+            continue
+        download_url = str(item.get("audiodownload") or "").strip()
+        parsed_download_url = urlparse(download_url)
+        if parsed_download_url.scheme != "https" or not parsed_download_url.hostname:
+            continue
+
+        candidate_title = str(item.get("name") or "").strip()
+        candidate_artist = str(item.get("artist_name") or "").strip()
+        title_score = _text_similarity(title, candidate_title)
+        artist_score = _text_similarity(uploader, candidate_artist) if uploader and candidate_artist else 0.0
+
+        # Не отправляем просто похожую композицию: название и, когда оно известно,
+        # исполнитель должны совпасть достаточно точно.
+        if title_score < 0.72:
+            continue
+        if original_artist and candidate_artist and artist_score < 0.58:
+            continue
+        if original_artist and not candidate_artist:
+            continue
+
+        total_score = title_score * 0.75 + artist_score * 0.25
+        candidates.append((total_score, item))
+
+    if not candidates:
+        raise RuntimeError("Jamendo не нашёл точное совпадение с разрешённым скачиванием")
+
+    candidates.sort(key=lambda entry: entry[0], reverse=True)
+    item = candidates[0][1]
+    download_url = str(item.get("audiodownload") or "").strip()
+    track_id = str(item.get("id") or "jamendo")
+    safe_id = re.sub(r"[^a-zA-Z0-9_-]", "", track_id)[:40] or "track"
+    audio_filename = os.path.join(workdir, f"jamendo_{safe_id}.mp3")
+
+    request = urllib.request.Request(
+        download_url,
+        headers={"User-Agent": "TelegramMusicBot/1.0", "Accept": "audio/mpeg,*/*"}
+    )
+    total_bytes = 0
+    max_bytes = 100 * 1024 * 1024
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response, open(audio_filename, "wb") as output:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                if total_bytes > max_bytes:
+                    raise RuntimeError("Резервный аудиофайл слишком большой")
+                output.write(chunk)
+        if total_bytes <= 0:
+            raise RuntimeError("Jamendo вернул пустой аудиофайл")
+    except Exception:
+        try:
+            if os.path.exists(audio_filename):
+                os.remove(audio_filename)
+        except OSError:
+            pass
+        raise
+
+    artist = str(item.get("artist_name") or uploader or "Неизвестен")[:120]
+    track_title = str(item.get("name") or title or "Без названия")[:180]
+    source_page = str(item.get("shareurl") or f"https://www.jamendo.com/track/{safe_id}")[:500]
+    license_url = str(item.get("license_ccurl") or "").strip()[:500]
+    info = {
+        "id": f"jamendo_{safe_id}",
+        "title": track_title,
+        "uploader": artist,
+        "thumbnail": str(item.get("image") or ""),
+        "duration": item.get("duration"),
+        "webpage_url": source_page,
+        "source": "Jamendo",
+        "license": license_url,
+        "attribution_caption": (
+            f"Источник: Jamendo\nИсполнитель: {artist}\nСсылка: {source_page}"
+            + (f"\nЛицензия: {license_url}" if license_url else "")
+        )[:1000],
+    }
+    print(f"✅ DRM fallback: найден разрешённый трек Jamendo: {artist} — {track_title}")
+    return info, audio_filename
+
+
+def prepare_track_file(track_url, workdir, effect="none", fallback_title=None, fallback_uploader=None):
+    """Скачивает трек; при DRM пробует найти разрешённую версию в Jamendo."""
+    try:
+        info, audio_filename = ydl_download_audio(
+            track_url, os.path.join(workdir, "track_%(id)s.%(ext)s")
+        )
+    except Exception as original_error:
+        if not is_drm_error(original_error):
+            raise
+        print(f"⚠️ SoundCloud DRM: запускаю резервный поиск для защищённого трека: {original_error!r}")
+        try:
+            original_title = str(fallback_title or "").strip()
+            original_uploader = str(fallback_uploader or "").strip()
+            if not original_title:
+                raise RuntimeError("В карточке SoundCloud нет названия исходного трека")
+            info, audio_filename = download_jamendo_fallback(
+                original_title, original_uploader, workdir
+            )
+        except Exception as fallback_error:
+            raise RuntimeError(
+                f"SoundCloud DRM; резервный поиск не дал результата: {fallback_error}"
+            ) from fallback_error
+
     _original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
     if effect != "none":
         audio_filename = apply_audio_effect(audio_filename, effect)
@@ -1342,7 +1496,9 @@ def handle_chosen_inline(chosen):
         workdir = tempfile.mkdtemp(prefix="inl_")
         try:
             with download_slots:
-                info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir)
+                info, audio_filename, thumbnail_filename = prepare_track_file(
+                    track_url, workdir, fallback_title=title, fallback_uploader=uploader
+                )
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
@@ -1352,7 +1508,8 @@ def handle_chosen_inline(chosen):
                         audio=audio,
                         title=info.get('title', title),
                         performer=info.get('uploader', uploader),
-                        thumbnail=thumb_file
+                        thumbnail=thumb_file,
+                        caption=info.get("attribution_caption")
                     )
                 finally:
                     if thumb_file:
@@ -1364,7 +1521,8 @@ def handle_chosen_inline(chosen):
                 media=InputMediaAudio(
                     media=file_id,
                     title=info.get('title', title),
-                    performer=info.get('uploader', uploader)
+                    performer=info.get('uploader', uploader),
+                    caption=info.get("attribution_caption")
                 ),
                 inline_message_id=inline_msg_id
             )
@@ -1790,7 +1948,10 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
 
         with download_slots:
             workdir = tempfile.mkdtemp(prefix="trk_")
-            info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir, effect)
+            info, audio_filename, thumbnail_filename = prepare_track_file(
+                track_url, workdir, effect,
+                fallback_title=title, fallback_uploader=uploader
+            )
 
             out_title = info.get("title", title)
             if effect != "none":
@@ -1801,7 +1962,8 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
                 try:
                     sent = bot.send_audio(chat_id, audio, title=out_title,
-                                          performer=out_uploader, thumbnail=thumb_file)
+                                          performer=out_uploader, thumbnail=thumb_file,
+                                          caption=info.get("attribution_caption"))
                 finally:
                     if thumb_file:
                         thumb_file.close()
