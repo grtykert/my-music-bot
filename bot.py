@@ -168,6 +168,10 @@ SEARCH_CACHE_TTL = 180
 stream_url_cache = {}
 stream_cache_lock = threading.Lock()
 STREAM_CACHE_TTL = 1800
+# Метаданные последних треков Mini App нужны, чтобы при DRM найти точное название/исполнителя.
+miniapp_track_cache = {}
+miniapp_track_cache_lock = threading.Lock()
+MINIAPP_TRACK_CACHE_LIMIT = 1500
 inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
@@ -2540,6 +2544,13 @@ def handle_miniapp_get_data(handler):
         "theme": settings.get("theme", "default")
     })
     favs = settings.get("favorites", [])
+    history = settings.get("history", [])
+    with miniapp_track_cache_lock:
+        for saved_track in (favs + history):
+            if isinstance(saved_track, dict) and saved_track.get("url"):
+                miniapp_track_cache[saved_track["url"]] = dict(saved_track)
+        while len(miniapp_track_cache) > MINIAPP_TRACK_CACHE_LIMIT:
+            miniapp_track_cache.pop(next(iter(miniapp_track_cache)))
     if favs:
         threading.Thread(target=prewarm_tracks_stream_urls, args=(favs[:20],), daemon=True).start()
 
@@ -2592,6 +2603,14 @@ def handle_miniapp_search(handler, query_params):
                     except Exception as e:
                         print(f"Не удалось получить метаданные трека: {e}")
         if tracks:
+            with miniapp_track_cache_lock:
+                for found_track in tracks:
+                    if isinstance(found_track, dict) and found_track.get("url"):
+                        miniapp_track_cache[found_track["url"]] = dict(found_track)
+                while len(miniapp_track_cache) > MINIAPP_TRACK_CACHE_LIMIT:
+                    miniapp_track_cache.pop(next(iter(miniapp_track_cache)))
+            # Прогрев теперь тоже использует резервный поиск при DRM,
+            # поэтому ошибка обнаруживается ещё до нажатия Play.
             threading.Thread(target=prewarm_tracks_stream_urls, args=(tracks[:2],), daemon=True).start()
         api_json(handler, 200, {"tracks": tracks, "query": query})
     except Exception as e:
@@ -2599,13 +2618,8 @@ def handle_miniapp_search(handler, query_params):
         api_json(handler, 500, {"error": "Не удалось выполнить поиск. Попробуй ещё раз."})
 
 
-def get_soundcloud_stream_url(track_url):
-    now = time.time()
-    with stream_cache_lock:
-        cached = stream_url_cache.get(track_url)
-        if cached and (now - cached[1] < STREAM_CACHE_TTL):
-            return cached[0]
-
+def _extract_direct_audio_url(source_url):
+    """Получает прямой URL аудио с SoundCloud или проверенной резервной площадки."""
     options = {
         "format": "bestaudio[protocol^=http]/bestaudio/best",
         "quiet": True, "no_warnings": True, "noplaylist": True,
@@ -2613,7 +2627,7 @@ def get_soundcloud_stream_url(track_url):
         "retries": 1, "extractor_retries": 1
     }
     with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(track_url, download=False)
+        info = ydl.extract_info(source_url, download=False)
     direct_url = info.get("url")
     if not direct_url:
         formats = info.get("requested_formats") or info.get("formats") or []
@@ -2622,10 +2636,65 @@ def get_soundcloud_stream_url(track_url):
             audio_formats.sort(key=lambda f: (f.get("vcodec") == "none", f.get("abr") or 0), reverse=True)
             direct_url = audio_formats[0]["url"]
     if not direct_url or urlparse(direct_url).scheme not in ("http", "https"):
-        raise RuntimeError("SoundCloud не вернул прямую ссылку на аудио")
+        raise RuntimeError("Источник не вернул прямую ссылку на аудио")
+    return direct_url
+
+
+def _get_cached_miniapp_track(track_url):
+    with miniapp_track_cache_lock:
+        item = miniapp_track_cache.get(track_url)
+        return dict(item) if isinstance(item, dict) else None
+
+
+def get_soundcloud_stream_url(track_url, track_info=None):
+    now = time.time()
+    with stream_cache_lock:
+        cached = stream_url_cache.get(track_url)
+        if cached and (now - cached[1] < STREAM_CACHE_TTL):
+            return cached[0]
+
+    try:
+        direct_url = _extract_direct_audio_url(track_url)
+    except Exception as primary_error:
+        if not _should_try_fallback(primary_error):
+            raise
+
+        track_info = track_info or _get_cached_miniapp_track(track_url)
+        if not track_info or not track_info.get("title") or track_info.get("title") == "Без названия":
+            print("⚠️ DRM SoundCloud, но метаданные трека не найдены — резервный поиск пропущен")
+            raise
+
+        print(
+            f"🔎 Mini App: SoundCloud не отдаёт аудио (DRM). "
+            f"Запускаю резерв для {track_info.get('uploader', '')} — {track_info.get('title', '')}"
+        )
+        candidates = search_licensed_fallback_tracks(
+            track_info.get("title", ""),
+            track_info.get("uploader", ""),
+            track_info.get("duration"),
+            limit=FALLBACK_DOWNLOAD_ATTEMPTS,
+        )
+        direct_url = None
+        for candidate in candidates[:FALLBACK_DOWNLOAD_ATTEMPTS]:
+            if not candidate.get("_fallback_verified") or not candidate.get("_fallback_license"):
+                continue
+            try:
+                direct_url = _extract_direct_audio_url(candidate["url"])
+                print(
+                    f"✅ Mini App: резерв найден: {candidate.get('_fallback_page')} "
+                    f"| лицензия: {candidate.get('_fallback_license')}"
+                )
+                break
+            except Exception as fallback_error:
+                print(f"Резервный поток не открылся ({candidate.get('_fallback_page')}): {fallback_error!r}")
+        if not direct_url:
+            print("❌ Mini App: резервный поиск не нашёл подходящий источник с подтверждённой лицензией")
+            raise RuntimeError(
+                "SoundCloud защищён DRM; резервный источник с точным совпадением и разрешающей лицензией не найден"
+            ) from primary_error
 
     with stream_cache_lock:
-        stream_url_cache[track_url] = (direct_url, now)
+        stream_url_cache[track_url] = (direct_url, time.time())
         if len(stream_url_cache) > 1000:
             stream_url_cache.pop(next(iter(stream_url_cache)))
     return direct_url
@@ -2633,12 +2702,14 @@ def get_soundcloud_stream_url(track_url):
 
 def prewarm_tracks_stream_urls(tracks, max_count=20):
     def _warm_one(item):
-        url = item.get("url") if isinstance(item, dict) else None
+        if not isinstance(item, dict):
+            return
+        url = item.get("url")
         if url:
             try:
-                get_soundcloud_stream_url(url)
-            except Exception:
-                pass
+                get_soundcloud_stream_url(url, item)
+            except Exception as e:
+                print(f"Предварительная проверка аудио не прошла для {item.get('title', url)}: {e!r}")
 
     items = tracks[:max_count] if tracks else []
     if not items:
@@ -2658,8 +2729,9 @@ def handle_miniapp_stream(handler, query_params):
     normalized = normalize_miniapp_track({"url": track_url})
     if not normalized:
         return api_json(handler, 400, {"error": "Некорректная ссылка на трек."})
+    track_info = _get_cached_miniapp_track(track_url) or normalized
     try:
-        direct_url = get_soundcloud_stream_url(track_url)
+        direct_url = get_soundcloud_stream_url(track_url, track_info)
         handler.send_response(302)
         handler.send_header("Location", direct_url)
         handler.send_header("Cache-Control", "public, max-age=1800")
@@ -2667,7 +2739,7 @@ def handle_miniapp_stream(handler, query_params):
         handler.end_headers()
     except Exception as e:
         print(f"Ошибка получения аудиопотока: {e!r}")
-        api_json(handler, 502, {"error": "Не удалось получить аудио для этого трека."})
+        api_json(handler, 502, {"error": "Не удалось получить аудио. SoundCloud может защищать трек DRM, а разрешённая резервная версия не найдена."})
 
 
 def handle_miniapp_lyrics(handler, query_params):
