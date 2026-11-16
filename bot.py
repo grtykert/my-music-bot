@@ -9,8 +9,7 @@ from telebot.apihelper import ApiTelegramException
 import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode, urljoin, quote, unquote
-from html.parser import HTMLParser
+from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode
 import hmac
 import hashlib
 import time
@@ -168,10 +167,6 @@ SEARCH_CACHE_TTL = 180
 stream_url_cache = {}
 stream_cache_lock = threading.Lock()
 STREAM_CACHE_TTL = 1800
-# Метаданные последних треков Mini App нужны, чтобы при DRM найти точное название/исполнителя.
-miniapp_track_cache = {}
-miniapp_track_cache_lock = threading.Lock()
-MINIAPP_TRACK_CACHE_LIMIT = 1500
 inline_tracks_cache = {}
 original_queries = {}
 waiting_for_custom_stars = set()
@@ -563,7 +558,7 @@ def ydl_download_audio(track_url, outtmpl):
 
 
 def prepare_track_file(track_url, workdir, effect="none"):
-    """Скачивает, применяет эффект, приводит к mp3/m4a, сжимает. Возвращает (info, audio, thumb)."""
+    """Скачивает трек SoundCloud, готовит аудио и обложку."""
     info, audio_filename = ydl_download_audio(track_url, os.path.join(workdir, "track_%(id)s.%(ext)s"))
     _original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
     if effect != "none":
@@ -571,7 +566,63 @@ def prepare_track_file(track_url, workdir, effect="none"):
     else:
         audio_filename = ensure_telegram_audio(audio_filename)
     audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
+    info.setdefault("source", "soundcloud")
     return info, audio_filename, thumbnail_filename
+
+
+def prepare_track_with_fallback(track, workdir, effect="none"):
+    """Сначала пробует SoundCloud; при ошибке ищет разрешённую для скачивания версию в Audius."""
+    source = str(track.get("source") or "soundcloud").lower()
+    if source == "audius":
+        info, audio_filename = download_audius_track(track, workdir)
+        _original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
+        if effect != "none":
+            audio_filename = apply_audio_effect(audio_filename, effect)
+        else:
+            audio_filename = ensure_telegram_audio(audio_filename)
+        audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
+        return info, audio_filename, thumbnail_filename
+
+    try:
+        return prepare_track_file(track["url"], workdir, effect)
+    except Exception as soundcloud_error:
+        print(
+            f"SoundCloud не смог скачать «{track.get('title', '')}». "
+            f"Запускаю резервный поиск Audius: {soundcloud_error!r}"
+        )
+        candidate = find_audius_match(track, require_download=True)
+        if not candidate:
+            raise RuntimeError(
+                "SoundCloud не отдал аудио; Audius не нашёл точный трек "
+                "с открытым скачиванием и подходящими условиями."
+            ) from soundcloud_error
+
+        info, audio_filename = download_audius_track(candidate, workdir)
+        _original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
+        if effect != "none":
+            audio_filename = apply_audio_effect(audio_filename, effect)
+        else:
+            audio_filename = ensure_telegram_audio(audio_filename)
+        audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
+        info["source"] = "audius"
+        return info, audio_filename, thumbnail_filename
+
+
+def audius_attribution_caption(info, max_length=950):
+    """Атрибуция для треков Audius согласно Open Music License."""
+    if not isinstance(info, dict) or str(info.get("source", "")).lower() != "audius":
+        return None
+    artist = str(info.get("uploader") or "Неизвестный автор").strip()
+    copyright_line = str(info.get("copyright_line") or f"Copyright: {artist}").strip()
+    license_name = str(info.get("license_label") or "Audius Open Music License (OML)").strip()
+    permalink = str(info.get("webpage_url") or info.get("permalink") or "https://audius.co").strip()
+    caption = (
+        f"Источник: Audius\nИсполнитель: {artist}\n{copyright_line}\n"
+        f"Лицензия: {license_name}\n"
+        f"Текст лицензии: https://openaudiofoundation.org/open-music-license.pdf\n"
+        f"Оригинал: {permalink}"
+    )
+    return caption[:max_length]
 
 
 def count_download():
@@ -1252,372 +1303,336 @@ def soundcloud_search(query, count=30):
     return [t for _, t in scored]
 
 
-
-# ============================================================
-#       РЕЗЕРВНЫЙ ПОИСК ПО МУЗЫКАЛЬНЫМ САЙТАМ (ЛИЦЕНЗИОННЫЙ)
-# ============================================================
-# Резервный поиск не обходит DRM и не скачивает треки, если право на
-# распространение/скачивание нельзя подтвердить лицензией источника.
-FALLBACK_SEARCH_ENABLED = os.environ.get("FALLBACK_SEARCH_ENABLED", "1").strip().lower() not in ("0", "false", "no")
-FALLBACK_SEARCH_LIMIT = 12
-FALLBACK_DOWNLOAD_ATTEMPTS = 3
-FALLBACK_ALLOWED_HOSTS = (
-    "archive.org",
-    "bandcamp.com",
-    "jamendo.com",
-    "freemusicarchive.org",
-    "ccmixter.org",
-    "musopen.org",
-    "commons.wikimedia.org",
-)
+# --- РЕЗЕРВНЫЙ ИСТОЧНИК: AUDIUS OFFICIAL API ---
+# Публичные read-only методы доступны без Client ID; API key нужен только для повышенных лимитов.
+AUDIUS_API_BASE = "https://api.audius.co/v1"
+AUDIUS_TIMEOUT = 20
+AUDIUS_MAX_FILE_BYTES = 100 * 1024 * 1024
 
 
-class _DuckDuckGoResultParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.links = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag.lower() != "a":
-            return
-        data = dict(attrs)
-        classes = (data.get("class") or "").split()
-        href = data.get("href")
-        if href and "result__a" in classes:
-            self.links.append(href)
-
-
-def _safe_http_json(url, timeout=10, max_bytes=2 * 1024 * 1024):
+def audius_api_json(path, params=None):
+    query = urlencode(params or {})
+    url = f"{AUDIUS_API_BASE}/{str(path).lstrip('/')}"
+    if query:
+        url += "?" + query
     request = urllib.request.Request(
         url,
-        headers={"User-Agent": "Mozilla/5.0 (compatible; SoundMusicBot/1.0)"}
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read(max_bytes + 1)
-    if len(raw) > max_bytes:
-        raise ValueError("Ответ поискового сервиса слишком большой")
-    return json.loads(raw.decode("utf-8", errors="replace"))
-
-
-def _is_fallback_host(url):
-    try:
-        host = (urlparse(url).hostname or "").lower().rstrip(".")
-    except Exception:
-        return False
-    return any(host == domain or host.endswith("." + domain) for domain in FALLBACK_ALLOWED_HOSTS)
-
-
-def _duckduckgo_music_urls(query, limit=FALLBACK_SEARCH_LIMIT):
-    """Получает ссылки из HTML-выдачи поисковика DuckDuckGo."""
-    if not FALLBACK_SEARCH_ENABLED or not query:
-        return []
-    search_url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query, "kl": "wt-wt"})
-    request = urllib.request.Request(
-        search_url,
         headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9,ru;q=0.8"
-        }
+            "User-Agent": "SoundMusicTelegramBot/1.0",
+            "Accept": "application/json",
+        },
     )
-    with urllib.request.urlopen(request, timeout=12) as response:
-        html = response.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
-    parser = _DuckDuckGoResultParser()
-    parser.feed(html)
-    found = []
-    seen = set()
-    for raw_url in parser.links:
-        url = raw_url
-        parsed = urlparse(url)
-        if "duckduckgo.com" in (parsed.hostname or ""):
-            wrapped = parse_qs(parsed.query).get("uddg")
-            if wrapped:
-                url = unquote(wrapped[0])
-        url = urljoin("https://duckduckgo.com", url)
-        parsed = urlparse(url)
-        if parsed.scheme != "https" or not parsed.hostname or not _is_fallback_host(url):
-            continue
-        # Оставляем только страницы; прямые рекламные/трекерные URL исключены.
-        clean_url = parsed._replace(fragment="").geturl()
-        if clean_url not in seen:
-            seen.add(clean_url)
-            found.append(clean_url)
-        if len(found) >= limit:
-            break
-    return found
+    with urllib.request.urlopen(request, timeout=AUDIUS_TIMEOUT) as response:
+        raw = response.read(4 * 1024 * 1024 + 1)
+    if len(raw) > 4 * 1024 * 1024:
+        raise RuntimeError("Audius вернул слишком большой ответ API")
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("Некорректный ответ Audius API")
+    if payload.get("status") not in (None, "success"):
+        raise RuntimeError(f"Audius API: {payload.get('status')}")
+    return payload
 
 
-def _license_is_redistributable(*values):
-    """Разрешаем только явно указанную CC0/Public Domain/CC BY/CC BY-SA.
-
-    Лицензии NonCommercial и NoDerivatives не принимаем: бот может
-    преобразовывать аудио и распространять его пользователям.
-    """
-    text = " ".join(str(v or "") for v in values).casefold().replace("_", "-")
-    text = re.sub(r"\s+", " ", text)
-    if not text.strip():
-        return False
-    denied = ("noncommercial", "non-commercial", "by-nc", "no derivatives", "no-derivatives", "by-nd")
-    if any(marker in text for marker in denied):
-        return False
-    allowed = (
-        "public domain", "public-domain", "creativecommons.org/publicdomain/zero",
-        "creativecommons.org/licenses/by/",
-        "cc0", "cc by", "cc-by",
-    )
-    return any(marker in text for marker in allowed)
+def audius_artist_name(item):
+    user = item.get("user") if isinstance(item.get("user"), dict) else {}
+    names = []
+    for artist in item.get("artists") or []:
+        if isinstance(artist, dict):
+            name = artist.get("name") or artist.get("handle")
+            if name and str(name).strip():
+                names.append(str(name).strip())
+    if names:
+        return ", ".join(dict.fromkeys(names))[:120]
+    return str(user.get("name") or user.get("handle") or item.get("artist_name") or "Неизвестен")[:120]
 
 
-def _permission_from_extractor(info):
-    if not isinstance(info, dict):
-        return None
-    license_values = [
-        info.get("license"), info.get("license_url"), info.get("licenseurl"),
-        info.get("license_name"), info.get("license_text")
-    ]
-    if _license_is_redistributable(*license_values):
-        return " / ".join(str(x) for x in license_values if x)
-    return None
-
-
-def _extractor_has_audio_download(info):
-    if not isinstance(info, dict):
-        return False
-    direct = info.get("url") and info.get("acodec") not in (None, "none")
-    if direct:
-        return True
-    for fmt in info.get("formats") or []:
-        if fmt.get("url") and fmt.get("acodec") not in (None, "none"):
-            return True
-    return False
-
-
-def _token_coverage(expected, actual):
-    expected_tokens = [t for t in _query_tokens(expected) if len(t) > 1]
-    actual_tokens = set(norm_text(actual).split())
-    if not expected_tokens:
-        return 0.0
-    matched = sum(1 for token in expected_tokens if token in actual_tokens or any(x.startswith(token) for x in actual_tokens))
-    return matched / len(expected_tokens)
-
-
-def _fallback_candidate_matches(info, expected_title, expected_artist, expected_duration=None):
-    """Строго сверяет название и исполнителя; сомнительные совпадения отбрасывает."""
-    if not isinstance(info, dict):
-        return False
-    candidate_title = info.get("track") or info.get("title") or ""
-    candidate_artist = (
-        info.get("artist") or info.get("artists") or info.get("creator")
-        or info.get("creators") or info.get("album_artist") or info.get("uploader") or ""
-    )
-    if isinstance(candidate_artist, (list, tuple)):
-        candidate_artist = " ".join(str(x) for x in candidate_artist)
-    title_coverage = _token_coverage(expected_title, candidate_title)
-    if title_coverage < 0.65:
-        return False
-    if expected_artist:
-        artist_coverage = _token_coverage(expected_artist, candidate_artist)
-        combined_coverage = _token_coverage(expected_artist, candidate_title)
-        if max(artist_coverage, combined_coverage) < 0.50:
-            return False
-    candidate_duration = info.get("duration")
-    try:
-        if expected_duration and candidate_duration:
-            if abs(float(expected_duration) - float(candidate_duration)) > max(25, float(expected_duration) * 0.18):
-                return False
-    except (TypeError, ValueError):
-        pass
-    query = f"{expected_artist} {expected_title}".strip()
-    candidate = {
-        "title": candidate_title,
-        "uploader": candidate_artist,
-        "duration": candidate_duration,
-    }
-    return bool(score_tracks([candidate], query) and score_tracks([candidate], query)[0][0] >= 9.5)
-
-
-def _archive_license_search(title, artist, duration=None, limit=5):
-    """Ищет аудио в Internet Archive и принимает только разрешающие лицензии."""
-    if not FALLBACK_SEARCH_ENABLED or not title:
-        return []
-    safe_title = re.sub(r'["\\]+', " ", title).strip()[:100]
-    safe_artist = re.sub(r'["\\]+', " ", artist or "").strip()[:80]
-    q = f'title:("{safe_title}") AND mediatype:audio'
-    if safe_artist:
-        q += f' AND creator:("{safe_artist}")'
-    params = urlencode({
-        "q": q,
-        "fl[]": ["identifier", "title", "creator", "licenseurl"],
-        "rows": min(10, max(1, limit)),
-        "page": 1,
-        "output": "json",
-    }, doseq=True)
-    try:
-        search_data = _safe_http_json("https://archive.org/advancedsearch.php?" + params, timeout=12)
-    except Exception as e:
-        print(f"Резервный поиск Internet Archive недоступен: {e!r}")
-        return []
-
-    docs = ((search_data or {}).get("response") or {}).get("docs") or []
-    results = []
-    for doc in docs[:limit]:
-        identifier = str(doc.get("identifier") or "").strip()
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", identifier):
-            continue
-        try:
-            metadata_data = _safe_http_json(f"https://archive.org/metadata/{identifier}", timeout=12)
-            metadata = metadata_data.get("metadata") or {}
-            license_url = metadata.get("licenseurl") or doc.get("licenseurl") or ""
-            license_name = metadata.get("license") or ""
-            if not _license_is_redistributable(license_url, license_name):
-                continue
-            item_title = metadata.get("title") or doc.get("title") or ""
-            creator = metadata.get("creator") or doc.get("creator") or ""
-            if isinstance(creator, (list, tuple)):
-                creator = " ".join(str(x) for x in creator)
-            # Для альбомов заголовок записи может не совпадать с названием композиции,
-            # поэтому окончательное совпадение проверяем также по имени аудиофайла.
-            if artist and creator and _token_coverage(artist, creator) < 0.50:
-                continue
-            item_title_coverage = _token_coverage(title, item_title)
-
-            audio_files = []
-            for file_info in metadata_data.get("files") or []:
-                name = str(file_info.get("name") or "")
-                ext = os.path.splitext(name.lower())[1]
-                if ext not in (".mp3", ".m4a", ".ogg", ".opus", ".flac", ".wav"):
-                    continue
-                try:
-                    size = int(file_info.get("size") or 0)
-                except (TypeError, ValueError):
-                    size = 0
-                if size and size > 120 * 1024 * 1024:
-                    continue
-                file_title = os.path.splitext(os.path.basename(name))[0].replace("_", " ")
-                coverage = _token_coverage(title, file_title)
-                audio_files.append((coverage, name, file_info))
-            if not audio_files:
-                continue
-            audio_files.sort(key=lambda item: item[0], reverse=True)
-            best_coverage, filename, file_info = audio_files[0]
-            if best_coverage < 0.65 and not (len(audio_files) == 1 and item_title_coverage >= 0.65):
-                continue
-            file_url = f"https://archive.org/download/{identifier}/{quote(filename, safe='/')}"
-            results.append({
-                "url": file_url,
-                "title": title if best_coverage >= 0.65 else str(item_title)[:180],
-                "uploader": str(creator or artist or "Internet Archive")[:120],
-                "duration": duration,
-                "thumbnail": "",
-                "_fallback_verified": True,
-                "_fallback_source": "Internet Archive",
-                "_fallback_page": f"https://archive.org/details/{identifier}",
-                "_fallback_license": str(license_url or license_name)[:300],
-            })
-        except Exception as e:
-            print(f"Пропуск результата Internet Archive {identifier}: {e!r}")
-    return results
-
-
-def _web_music_site_search(title, artist, duration=None, limit=8):
-    """Ищет страницы на нескольких музыкальных площадках через поисковик."""
-    if not FALLBACK_SEARCH_ENABLED:
-        return []
-    query_text = f'"{artist}" "{title}"' if artist else f'"{title}"'
-    sites = " OR ".join(
-        f"site:{domain}" for domain in (
-            "bandcamp.com", "jamendo.com", "freemusicarchive.org",
-            "ccmixter.org", "musopen.org", "commons.wikimedia.org"
+def audius_artwork_url(item):
+    artwork = item.get("artwork") or item.get("cover_art") or ""
+    if isinstance(artwork, dict):
+        artwork = (
+            artwork.get("_480x480") or artwork.get("480x480") or
+            artwork.get("_1000x1000") or artwork.get("1000x1000") or
+            artwork.get("_150x150") or artwork.get("150x150") or ""
         )
-    )
-    search_queries = [f"{query_text} ({sites})", f'{query_text} "Creative Commons" download']
-    page_urls = []
-    seen_urls = set()
-    for search_query in search_queries:
+    url = str(artwork or "").strip()
+    parsed = urlparse(url)
+    return url[:1000] if parsed.scheme == "https" and parsed.hostname else ""
+
+
+def audius_license_info(item):
+    """Возвращает (можно_использовать, подпись_лицензии).
+
+    Если отдельная лицензия не указана, для API-доступного материала действует OML.
+    Для явно указанных лицензий пропускаем только варианты, совместимые с коммерческим
+    использованием и распространением с атрибуцией.
+    """
+    value = (item.get("license") or item.get("license_url") or item.get("licenseUrl")
+             or item.get("alternative_license") or item.get("alternativeLicense"))
+    if isinstance(value, dict):
+        value = value.get("url") or value.get("name") or value.get("license")
+    raw = str(value or "").strip()
+    if not raw:
+        return True, "Audius Open Music License (OML)"
+
+    low = raw.casefold().replace("_", "-").replace(" ", "-")
+    if any(token in low for token in ("noncommercial", "non-commercial", "by-nc", "no-derivatives", "by-nd", "-nc-", "-nd-")):
+        return False, ""
+    if low in ("oml", "open-music-license") or "openmusiclicense" in low:
+        return True, "Audius Open Music License (OML)"
+    if "cc0" in low or "public-domain" in low or "public domain" in low:
+        return True, "CC0 / Public Domain"
+    if ("creativecommons.org/licenses/by/" in low or "creativecommons.org/licenses/by-sa/" in low
+            or "cc-by" in low or "cc-by-sa" in low or "attribution-4.0" in low):
+        return True, raw[:100]
+    # Неизвестную или явно ограничительную отдельную лицензию не считаем разрешением на пересылку.
+    return False, ""
+
+
+def _audius_field(item, *names, default=None):
+    """Читает поле Audius API в snake_case или camelCase."""
+    for name in names:
+        if name in item:
+            return item.get(name)
+    return default
+
+
+def audius_track_allowed(item, require_download=True):
+    if not isinstance(item, dict):
+        return False
+    if (_audius_field(item, "is_available", "isAvailable") is False
+            or _audius_field(item, "is_delete", "isDelete") is True
+            or _audius_field(item, "is_unlisted", "isUnlisted") is True):
+        return False
+    if require_download:
+        downloadable = _audius_field(item, "is_downloadable", "isDownloadable", "downloadable")
+        if downloadable is not True:
+            return False
+        if _audius_field(item, "is_download_gated", "isDownloadGated") is True:
+            return False
+        conditions = _audius_field(item, "download_conditions", "downloadConditions")
+        if conditions not in (None, {}, [], ""):
+            return False
+    else:
+        if (_audius_field(item, "is_streamable", "isStreamable") is False
+                or _audius_field(item, "is_stream_gated", "isStreamGated") is True):
+            return False
+        conditions = _audius_field(item, "stream_conditions", "streamConditions")
+        if conditions not in (None, {}, [], ""):
+            return False
+    # Если автор ограничил доступ конкретными API keys, не пробуем обходить ограничение.
+    if _audius_field(item, "allowed_api_keys", "allowedApiKeys"):
+        return False
+    allowed, _license_label = audius_license_info(item)
+    return allowed
+
+
+def _audius_normalized_candidate(item):
+    if not isinstance(item, dict):
+        return None
+    track_id = str(item.get("id") or "").strip()
+    title = str(item.get("title") or "").strip()
+    permalink = str(item.get("permalink") or "").strip()
+    parsed = urlparse(permalink)
+    if not track_id or not title or parsed.scheme != "https" or not (parsed.hostname == "audius.co" or (parsed.hostname or "").endswith(".audius.co")):
+        return None
+    try:
+        duration = int(float(item.get("duration"))) if item.get("duration") is not None else None
+    except (TypeError, ValueError):
+        duration = None
+    _ok, license_label = audius_license_info(item)
+    artist = audius_artist_name(item)
+    return {
+        "url": permalink,
+        "title": title[:180],
+        "uploader": artist,
+        "thumbnail": audius_artwork_url(item),
+        "duration": duration,
+        "source": "audius",
+        "audius_id": track_id,
+        "audius_raw": item,
+        "license_label": license_label,
+        "copyright_line": str(item.get("copyright_line") or "").strip()[:250],
+    }
+
+
+def _clean_match_value(value):
+    tokens = [token for token in norm_text(value).split() if token not in NOISE_TOKENS]
+    return " ".join(tokens)
+
+
+def find_audius_match(track, require_download=True):
+    """Ищет Audius-кандидата и строго сверяет название, исполнителя и длительность."""
+    from difflib import SequenceMatcher
+
+    if not isinstance(track, dict):
+        return None
+    original_title = str(track.get("title") or "").strip()
+    original_uploader = str(track.get("uploader") or "").strip()
+    if not original_title:
+        return None
+
+    parsed_artist, clean_title = split_artist_title(original_title, original_uploader)
+    wanted_title = clean_title or original_title
+    wanted_artist = parsed_artist or original_uploader
+    queries = []
+    for query in (f"{wanted_artist} {wanted_title}".strip(), wanted_title):
+        if query and query.casefold() not in [q.casefold() for q in queries]:
+            queries.append(query)
+
+    raw_items = []
+    seen_ids = set()
+    for query in queries:
         try:
-            for url in _duckduckgo_music_urls(search_query, limit=limit):
-                if url not in seen_urls:
-                    seen_urls.add(url)
-                    page_urls.append(url)
+            result = audius_api_json("/tracks/search", {"query": query, "limit": 30})
+            entries = result.get("data") or []
+            if isinstance(entries, dict):
+                entries = entries.get("tracks") or []
+            for item in entries if isinstance(entries, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                track_id = str(item.get("id") or "")
+                if track_id and track_id not in seen_ids:
+                    seen_ids.add(track_id)
+                    raw_items.append(item)
         except Exception as e:
-            print(f"Поисковик не ответил на резервный запрос: {e!r}")
-    if not page_urls:
-        return []
+            print(f"Ошибка резервного поиска Audius по запросу «{query}»: {e!r}")
 
-    def inspect_page(page_url):
-        options = {
-            "quiet": True, "no_warnings": True, "skip_download": True,
-            "noplaylist": True, "socket_timeout": 10,
-            "retries": 1, "extractor_retries": 1,
-        }
-        try:
-            with yt_dlp.YoutubeDL(options) as ydl:
-                info = ydl.extract_info(page_url, download=False)
-            if not isinstance(info, dict) or info.get("availability") not in (None, "public"):
-                return None
-            if not _extractor_has_audio_download(info):
-                return None
-            license_value = _permission_from_extractor(info)
-            if not license_value:
-                return None
-            candidate_url = info.get("webpage_url") or page_url
-            if not _is_fallback_host(candidate_url):
-                return None
-            artist_value = info.get("artist") or info.get("creator") or info.get("uploader") or artist
-            if isinstance(artist_value, (list, tuple)):
-                artist_value = " ".join(str(x) for x in artist_value)
-            if not _fallback_candidate_matches(info, title, artist, duration):
-                return None
-            return {
-                "url": candidate_url,
-                "title": str(info.get("track") or info.get("title") or title)[:180],
-                "uploader": str(artist_value or artist or "Неизвестен")[:120],
-                "thumbnail": str(info.get("thumbnail") or "")[:1000],
-                "duration": info.get("duration") or duration,
-                "_fallback_verified": True,
-                "_fallback_source": info.get("extractor") or (urlparse(candidate_url).hostname or "Музыкальный сайт"),
-                "_fallback_page": candidate_url,
-                "_fallback_license": license_value[:300],
-            }
-        except Exception as e:
-            print(f"Не удалось проверить музыкальную страницу {page_url}: {e!r}")
-            return None
+    if not raw_items:
+        return None
 
-    results = []
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        for item in pool.map(inspect_page, page_urls[:limit]):
-            if item:
-                results.append(item)
-    return results
+    target_title = _clean_match_value(wanted_title)
+    target_artist = _clean_match_value(wanted_artist)
+    try:
+        target_duration = int(float(track.get("duration"))) if track.get("duration") is not None else None
+    except (TypeError, ValueError):
+        target_duration = None
 
+    ranked = []
+    for item in raw_items:
+        if not audius_track_allowed(item, require_download=require_download):
+            continue
+        candidate = _audius_normalized_candidate(item)
+        if not candidate:
+            continue
+        candidate_title = _clean_match_value(candidate["title"])
+        candidate_artist = _clean_match_value(candidate["uploader"])
+        title_ratio = SequenceMatcher(None, target_title, candidate_title).ratio()
+        artist_ratio = SequenceMatcher(None, target_artist, candidate_artist).ratio() if target_artist else 0.0
 
-def search_licensed_fallback_tracks(title, uploader="", duration=None, limit=5):
-    """Единая резервная выдача: поисковик + Internet Archive + строгая проверка лицензии."""
-    if not FALLBACK_SEARCH_ENABLED:
-        return []
-    expected_artist, expected_title = split_artist_title(title or "", uploader or "")
-    expected_title = expected_title or (title or "").strip()
-    expected_artist = expected_artist or (uploader or "").strip()
-    if not expected_title:
-        return []
-    print(f"🔎 Резервный поиск: artist={expected_artist!r}, title={expected_title!r}")
-    found = []
-    found.extend(_archive_license_search(expected_title, expected_artist, duration, limit=limit))
-    found.extend(_web_music_site_search(expected_title, expected_artist, duration, limit=limit))
-    found = dedupe_tracks([x for x in found if x.get("_fallback_verified")])
-    ranked = score_tracks(found, f"{expected_artist} {expected_title}".strip())
-    return [track for score, track in ranked if score >= 9.5][:limit]
+        # Требуем очень близкое название; одного похожего исполнителя недостаточно.
+        if title_ratio < 0.78:
+            continue
+        if target_artist and artist_ratio < 0.42 and title_ratio < 0.94:
+            continue
+
+        duration_penalty = 0.0
+        candidate_duration = candidate.get("duration")
+        if target_duration and candidate_duration:
+            difference = abs(target_duration - candidate_duration)
+            allowed_difference = max(18, int(target_duration * 0.15))
+            if difference > allowed_difference:
+                continue
+            duration_penalty = (difference / max(1, target_duration)) * 20
+
+        score = title_ratio * 100 + artist_ratio * 25 - duration_penalty
+        ranked.append((score, candidate))
+
+    if not ranked:
+        return None
+    ranked.sort(key=lambda entry: entry[0], reverse=True)
+    best_score, best = ranked[0]
+    if best_score < 78:
+        return None
+    return best
 
 
-def _should_try_fallback(error):
-    text = str(error).casefold()
-    markers = (
-        "drm", "protected", "no video formats", "requested format is not available",
-        "no suitable formats", "unable to download", "http error 403", "http error 401",
-        "403 client error", "401 client error", "unsupported url", "not available",
-        "forbidden", "signature extraction failed", "no formats found",
-        "encrypted", "widevine", "decryption", "drm protected"
+def download_audius_track(track, workdir):
+    """Получает файл только через официальный Audius download endpoint и при is_downloadable=true."""
+    raw = track.get("audius_raw") if isinstance(track, dict) else None
+    track_id = str((raw or {}).get("id") or (track or {}).get("audius_id") or "").strip()
+    if not track_id:
+        raise RuntimeError("Не удалось определить ID трека Audius")
+    if not isinstance(raw, dict):
+        details = audius_api_json(f"/tracks/{track_id}")
+        raw = details.get("data")
+        if isinstance(raw, list):
+            raw = raw[0] if raw else None
+        if isinstance(raw, dict) and isinstance(raw.get("track"), dict):
+            raw = raw["track"]
+    if not isinstance(raw, dict) or not audius_track_allowed(raw, require_download=True):
+        raise RuntimeError("Audius не разрешает скачивание этого трека или он защищён доступом")
+
+    url = f"{AUDIUS_API_BASE}/tracks/{track_id}/download"
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "SoundMusicTelegramBot/1.0", "Accept": "audio/*,application/octet-stream;q=0.9,*/*;q=0.5"},
     )
-    return any(marker in text for marker in markers)
+    filename = os.path.join(workdir, f"audius_{re.sub(r'[^a-zA-Z0-9_-]+', '_', track_id)[:60]}.mp3")
+    written = 0
+    with urllib.request.urlopen(request, timeout=60) as response:
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        content_length = response.headers.get("Content-Length")
+        if content_length and content_length.isdigit() and int(content_length) > AUDIUS_MAX_FILE_BYTES:
+            raise RuntimeError("Файл Audius слишком большой для Telegram")
+        first_chunk = response.read(2048)
+        if "json" in content_type or first_chunk.lstrip().startswith((b"{", b"[")):
+            try:
+                detail = json.loads(first_chunk.decode("utf-8", errors="replace"))
+            except Exception:
+                detail = ""
+            raise RuntimeError(f"Audius не выдал аудиофайл: {str(detail)[:250]}")
+
+        extension = ".mp3"
+        disposition = response.headers.get("Content-Disposition") or ""
+        match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)', disposition, re.I)
+        if match:
+            ext = os.path.splitext(match.group(1).strip())[1].lower()
+            if re.fullmatch(r"\.[a-z0-9]{1,6}", ext):
+                extension = ext
+        if extension == ".mp3":
+            if "audio/mp4" in content_type:
+                extension = ".m4a"
+            elif "audio/ogg" in content_type:
+                extension = ".ogg"
+            elif "audio/flac" in content_type:
+                extension = ".flac"
+            elif "audio/wav" in content_type or "audio/x-wav" in content_type:
+                extension = ".wav"
+        filename = os.path.splitext(filename)[0] + extension
+
+        with open(filename, "wb") as output:
+            if first_chunk:
+                output.write(first_chunk)
+                written += len(first_chunk)
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > AUDIUS_MAX_FILE_BYTES:
+                    raise RuntimeError("Файл Audius превысил допустимый размер")
+                output.write(chunk)
+
+    if not os.path.exists(filename) or os.path.getsize(filename) < 1024:
+        raise RuntimeError("Audius вернул пустой или неполный аудиофайл")
+
+    raw_user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
+    info = {
+        "id": track_id,
+        "title": str(raw.get("title") or track.get("title") or "Без названия")[:180],
+        "uploader": audius_artist_name(raw),
+        "duration": raw.get("duration"),
+        "thumbnail": audius_artwork_url(raw),
+        "webpage_url": str(raw.get("permalink") or track.get("url") or "https://audius.co"),
+        "source": "audius",
+        "license_label": audius_license_info(raw)[1],
+        "copyright_line": str(raw.get("copyright_line") or raw.get("copyrightLine")
+                               or f"Copyright: {audius_artist_name(raw)}")[:250],
+        "artist_handle": str(raw_user.get("handle") or "")[:100],
+    }
+    return info, filename
+
 
 def store_tracks(tracks):
     """Сохраняет конкретную выдачу под коротким id, чтобы старые кнопки не качали чужие треки."""
@@ -1714,7 +1729,7 @@ def handle_chosen_inline(chosen):
         workdir = tempfile.mkdtemp(prefix="inl_")
         try:
             with download_slots:
-                info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir)
+                info, audio_filename, thumbnail_filename = prepare_track_with_fallback(track, workdir)
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
@@ -1724,19 +1739,22 @@ def handle_chosen_inline(chosen):
                         audio=audio,
                         title=info.get('title', title),
                         performer=info.get('uploader', uploader),
-                        thumbnail=thumb_file
+                        thumbnail=thumb_file,
+                        caption=audius_attribution_caption(info)
                     )
                 finally:
                     if thumb_file:
                         thumb_file.close()
             file_id = backup_msg.audio.file_id
-            audio_cache[track_url] = file_id
+            if info.get("source") != "audius":
+                audio_cache[track_url] = file_id
 
             bot.edit_message_media(
                 media=InputMediaAudio(
                     media=file_id,
                     title=info.get('title', title),
-                    performer=info.get('uploader', uploader)
+                    performer=info.get('uploader', uploader),
+                    caption=audius_attribution_caption(info)
                 ),
                 inline_message_id=inline_msg_id
             )
@@ -2013,13 +2031,7 @@ def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filt
                     all_tracks = None
 
             if all_tracks is None:
-                try:
-                    all_tracks = soundcloud_search(query, max(30, limit_ydl))
-                except Exception as soundcloud_error:
-                    print(f"SoundCloud не дал результаты, включаю резервный поиск: {soundcloud_error!r}")
-                    all_tracks = []
-                if not all_tracks:
-                    all_tracks = search_licensed_fallback_tracks(query, limit=effective_limit)
+                all_tracks = soundcloud_search(query, max(30, limit_ydl))
 
                 with search_cache_lock:
                     search_results_cache[cache_key] = (time.time(), all_tracks)
@@ -2046,8 +2058,7 @@ def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filt
 
             for i, track in enumerate(tracks):
                 title = track["title"][:35]
-                source_mark = "🌐" if track.get("_fallback_verified") else "🎵"
-                markup.add(InlineKeyboardButton(text=f"{source_mark} {i+1}. {title}", callback_data=f"dl_{sid}_{i}"))
+                markup.add(InlineKeyboardButton(text=f"🎵 {i+1}. {title}", callback_data=f"dl_{sid}_{i}"))
 
             nav_buttons = []
             if is_random:
@@ -2127,63 +2138,6 @@ def handle_navigation(call):
         pass
 
 
-
-def _try_send_licensed_fallback(chat_id, target_track, effect, status_msg_id, finish_ok):
-    """Пробует несколько проверенных резервных вариантов, не обходя DRM."""
-    if not FALLBACK_SEARCH_ENABLED or target_track.get("_fallback_verified"):
-        return False
-    try:
-        candidates = search_licensed_fallback_tracks(
-            target_track.get("title", ""),
-            target_track.get("uploader", ""),
-            target_track.get("duration"),
-            limit=FALLBACK_DOWNLOAD_ATTEMPTS,
-        )
-    except Exception as search_error:
-        print(f"Ошибка резервного поиска: {search_error!r}")
-        return False
-
-    for candidate in candidates[:FALLBACK_DOWNLOAD_ATTEMPTS]:
-        fallback_dir = None
-        try:
-            if not candidate.get("_fallback_verified") or not candidate.get("_fallback_license"):
-                continue
-            with download_slots:
-                fallback_dir = tempfile.mkdtemp(prefix="licensed_fallback_")
-                info, audio_filename, thumbnail_filename = prepare_track_file(
-                    candidate["url"], fallback_dir, effect
-                )
-                out_title = candidate.get("title") or info.get("title") or target_track.get("title", "Музыка")
-                if effect != "none":
-                    out_title = f"{out_title} ({EFFECT_NAMES[effect]})"
-                out_artist = candidate.get("uploader") or info.get("artist") or info.get("uploader") or target_track.get("uploader", "")
-                caption = (
-                    f"Источник: {candidate.get('_fallback_source', 'музыкальная площадка')}\n"
-                    f"Лицензия: {candidate.get('_fallback_license', '')}\n"
-                    f"{candidate.get('_fallback_page', '')}"
-                )[:950]
-                with open(audio_filename, "rb") as audio:
-                    thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
-                    try:
-                        sent = bot.send_audio(
-                            chat_id, audio, title=out_title, performer=out_artist,
-                            thumbnail=thumb_file, caption=caption
-                        )
-                    finally:
-                        if thumb_file:
-                            thumb_file.close()
-            if effect == "none":
-                audio_cache[candidate["url"]] = sent.audio.file_id
-            finish_ok(out_title, out_artist)
-            print(f"✅ Отправлен резервный трек с лицензией: {candidate.get('_fallback_page')}")
-            return True
-        except Exception as fallback_error:
-            print(f"Резервный вариант не подошёл ({candidate.get('_fallback_page')}): {fallback_error!r}")
-        finally:
-            if fallback_dir:
-                shutil.rmtree(fallback_dir, ignore_errors=True)
-    return False
-
 # --- ОТПРАВКА ТРЕКА В ЧАТ (общая для бота и Mini App) ---
 def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
     """Скачивает трек и отправляет в Telegram. Для VIP может применить аудиоэффект."""
@@ -2198,15 +2152,19 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
     uploader = track["uploader"]
     workdir = None
 
-    def finish_ok(shown_title, shown_uploader):
+    def finish_ok(shown_title, shown_uploader, info=None):
         if status_msg_id:
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="tosearch"))
             try:
+                text = f"▶️ **Плеер:**\n🎵 {shown_title}\n🧑‍🎤 {shown_uploader}"
+                attribution = audius_attribution_caption(info)
+                if attribution:
+                    text += "\n\n" + attribution
                 bot.edit_message_text(
-                    text=f"▶️ **Плеер:**\n🎵 {shown_title}\n🧑‍🎤 {shown_uploader}",
+                    text=text,
                     chat_id=chat_id, message_id=status_msg_id,
-                    parse_mode="Markdown", reply_markup=markup
+                    parse_mode=None if attribution else "Markdown", reply_markup=markup
                 )
             except Exception:
                 pass
@@ -2226,48 +2184,39 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
 
         with download_slots:
             workdir = tempfile.mkdtemp(prefix="trk_")
-            info, audio_filename, thumbnail_filename = prepare_track_file(track_url, workdir, effect)
+            info, audio_filename, thumbnail_filename = prepare_track_with_fallback(track, workdir, effect)
 
-            is_verified_fallback = bool(track.get("_fallback_verified"))
-            out_title = (track.get("title") if is_verified_fallback else info.get("title")) or title
+            out_title = info.get("title", title)
             if effect != "none":
                 out_title = f"{out_title} ({EFFECT_NAMES[effect]})"
-            out_uploader = (track.get("uploader") if is_verified_fallback else info.get("uploader")) or uploader
-            caption = None
-            if is_verified_fallback:
-                caption = (
-                    f"Источник: {track.get('_fallback_source', 'музыкальная площадка')}\n"
-                    f"Лицензия: {track.get('_fallback_license', '')}\n"
-                    f"{track.get('_fallback_page', '')}"
-                )[:950]
+            out_uploader = info.get("uploader", uploader)
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
                 try:
-                    sent = bot.send_audio(chat_id, audio, title=out_title,
-                                          performer=out_uploader, thumbnail=thumb_file,
-                                          caption=caption)
+                    sent = bot.send_audio(
+                        chat_id, audio, title=out_title,
+                        performer=out_uploader, thumbnail=thumb_file,
+                        caption=audius_attribution_caption(info)
+                    )
                 finally:
                     if thumb_file:
                         thumb_file.close()
 
-        if effect == "none":
+        if effect == "none" and info.get("source") != "audius":
             audio_cache[track_url] = sent.audio.file_id
-        finish_ok(out_title, out_uploader)
+        finish_ok(out_title, out_uploader, info)
     except Exception as e:
         report_error(f"Ошибка загрузки трека {track_url}", e)
-        if _should_try_fallback(e) and _try_send_licensed_fallback(
-            chat_id, track, effect, status_msg_id, finish_ok
-        ):
-            return
         reason = explain_error(e)
-        text = f"❌ Не удалось скачать «{title[:80]}»."
-        if track.get("_fallback_verified"):
-            text += "\nПроверенный источник сейчас не отдаёт аудиофайл. Выбери другой найденный вариант."
-        elif _should_try_fallback(e):
-            text += "\n🔎 Проверил другие музыкальные площадки, но не нашёл точную версию с подтверждённой разрешающей лицензией."
+        if "Audius не нашёл точный трек" in str(e):
+            text = (
+                f"❌ Не удалось скачать «{title[:80]}».\n"
+                "SoundCloud не отдал аудио, а Audius не нашёл точную версию "
+                "с открытым скачиванием."
+            )
         else:
-            text += " Попробуй выбрать другой результат."
+            text = f"❌ Не удалось скачать «{title[:80]}». Попробуй выбрать другой результат."
         if reason:
             text += f"\n{reason}"
         try:
@@ -2443,7 +2392,8 @@ def normalize_miniapp_track(raw):
     track_url = str(raw.get("url", "")).strip()
     parsed = urlparse(track_url)
     host = (parsed.hostname or "").lower()
-    if parsed.scheme != "https" or not (host == "soundcloud.com" or host.endswith(".soundcloud.com")):
+    is_soundcloud = host == "soundcloud.com" or host.endswith(".soundcloud.com")
+    if parsed.scheme != "https" or not is_soundcloud:
         return None
     thumbnail = str(raw.get("thumbnail") or "").strip()[:1000]
     thumb_parsed = urlparse(thumbnail)
@@ -2453,13 +2403,15 @@ def normalize_miniapp_track(raw):
         duration = int(raw.get("duration")) if raw.get("duration") is not None else None
     except (TypeError, ValueError):
         duration = None
-    return {
+    normalized = {
         "url": track_url,
         "title": str(raw.get("title") or "Без названия")[:180],
         "uploader": str(raw.get("uploader") or "Неизвестен")[:120],
         "thumbnail": thumbnail,
-        "duration": duration
+        "duration": duration,
+        "source": "soundcloud",
     }
+    return normalized
 
 
 def resolve_soundcloud_metadata(track_url):
@@ -2544,13 +2496,6 @@ def handle_miniapp_get_data(handler):
         "theme": settings.get("theme", "default")
     })
     favs = settings.get("favorites", [])
-    history = settings.get("history", [])
-    with miniapp_track_cache_lock:
-        for saved_track in (favs + history):
-            if isinstance(saved_track, dict) and saved_track.get("url"):
-                miniapp_track_cache[saved_track["url"]] = dict(saved_track)
-        while len(miniapp_track_cache) > MINIAPP_TRACK_CACHE_LIMIT:
-            miniapp_track_cache.pop(next(iter(miniapp_track_cache)))
     if favs:
         threading.Thread(target=prewarm_tracks_stream_urls, args=(favs[:20],), daemon=True).start()
 
@@ -2603,14 +2548,6 @@ def handle_miniapp_search(handler, query_params):
                     except Exception as e:
                         print(f"Не удалось получить метаданные трека: {e}")
         if tracks:
-            with miniapp_track_cache_lock:
-                for found_track in tracks:
-                    if isinstance(found_track, dict) and found_track.get("url"):
-                        miniapp_track_cache[found_track["url"]] = dict(found_track)
-                while len(miniapp_track_cache) > MINIAPP_TRACK_CACHE_LIMIT:
-                    miniapp_track_cache.pop(next(iter(miniapp_track_cache)))
-            # Прогрев теперь тоже использует резервный поиск при DRM,
-            # поэтому ошибка обнаруживается ещё до нажатия Play.
             threading.Thread(target=prewarm_tracks_stream_urls, args=(tracks[:2],), daemon=True).start()
         api_json(handler, 200, {"tracks": tracks, "query": query})
     except Exception as e:
@@ -2618,8 +2555,13 @@ def handle_miniapp_search(handler, query_params):
         api_json(handler, 500, {"error": "Не удалось выполнить поиск. Попробуй ещё раз."})
 
 
-def _extract_direct_audio_url(source_url):
-    """Получает прямой URL аудио с SoundCloud или проверенной резервной площадки."""
+def get_soundcloud_stream_url(track_url):
+    now = time.time()
+    with stream_cache_lock:
+        cached = stream_url_cache.get(track_url)
+        if cached and (now - cached[1] < STREAM_CACHE_TTL):
+            return cached[0]
+
     options = {
         "format": "bestaudio[protocol^=http]/bestaudio/best",
         "quiet": True, "no_warnings": True, "noplaylist": True,
@@ -2627,7 +2569,7 @@ def _extract_direct_audio_url(source_url):
         "retries": 1, "extractor_retries": 1
     }
     with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(source_url, download=False)
+        info = ydl.extract_info(track_url, download=False)
     direct_url = info.get("url")
     if not direct_url:
         formats = info.get("requested_formats") or info.get("formats") or []
@@ -2636,65 +2578,10 @@ def _extract_direct_audio_url(source_url):
             audio_formats.sort(key=lambda f: (f.get("vcodec") == "none", f.get("abr") or 0), reverse=True)
             direct_url = audio_formats[0]["url"]
     if not direct_url or urlparse(direct_url).scheme not in ("http", "https"):
-        raise RuntimeError("Источник не вернул прямую ссылку на аудио")
-    return direct_url
-
-
-def _get_cached_miniapp_track(track_url):
-    with miniapp_track_cache_lock:
-        item = miniapp_track_cache.get(track_url)
-        return dict(item) if isinstance(item, dict) else None
-
-
-def get_soundcloud_stream_url(track_url, track_info=None):
-    now = time.time()
-    with stream_cache_lock:
-        cached = stream_url_cache.get(track_url)
-        if cached and (now - cached[1] < STREAM_CACHE_TTL):
-            return cached[0]
-
-    try:
-        direct_url = _extract_direct_audio_url(track_url)
-    except Exception as primary_error:
-        if not _should_try_fallback(primary_error):
-            raise
-
-        track_info = track_info or _get_cached_miniapp_track(track_url)
-        if not track_info or not track_info.get("title") or track_info.get("title") == "Без названия":
-            print("⚠️ DRM SoundCloud, но метаданные трека не найдены — резервный поиск пропущен")
-            raise
-
-        print(
-            f"🔎 Mini App: SoundCloud не отдаёт аудио (DRM). "
-            f"Запускаю резерв для {track_info.get('uploader', '')} — {track_info.get('title', '')}"
-        )
-        candidates = search_licensed_fallback_tracks(
-            track_info.get("title", ""),
-            track_info.get("uploader", ""),
-            track_info.get("duration"),
-            limit=FALLBACK_DOWNLOAD_ATTEMPTS,
-        )
-        direct_url = None
-        for candidate in candidates[:FALLBACK_DOWNLOAD_ATTEMPTS]:
-            if not candidate.get("_fallback_verified") or not candidate.get("_fallback_license"):
-                continue
-            try:
-                direct_url = _extract_direct_audio_url(candidate["url"])
-                print(
-                    f"✅ Mini App: резерв найден: {candidate.get('_fallback_page')} "
-                    f"| лицензия: {candidate.get('_fallback_license')}"
-                )
-                break
-            except Exception as fallback_error:
-                print(f"Резервный поток не открылся ({candidate.get('_fallback_page')}): {fallback_error!r}")
-        if not direct_url:
-            print("❌ Mini App: резервный поиск не нашёл подходящий источник с подтверждённой лицензией")
-            raise RuntimeError(
-                "SoundCloud защищён DRM; резервный источник с точным совпадением и разрешающей лицензией не найден"
-            ) from primary_error
+        raise RuntimeError("SoundCloud не вернул прямую ссылку на аудио")
 
     with stream_cache_lock:
-        stream_url_cache[track_url] = (direct_url, time.time())
+        stream_url_cache[track_url] = (direct_url, now)
         if len(stream_url_cache) > 1000:
             stream_url_cache.pop(next(iter(stream_url_cache)))
     return direct_url
@@ -2702,14 +2589,12 @@ def get_soundcloud_stream_url(track_url, track_info=None):
 
 def prewarm_tracks_stream_urls(tracks, max_count=20):
     def _warm_one(item):
-        if not isinstance(item, dict):
-            return
-        url = item.get("url")
+        url = item.get("url") if isinstance(item, dict) else None
         if url:
             try:
-                get_soundcloud_stream_url(url, item)
-            except Exception as e:
-                print(f"Предварительная проверка аудио не прошла для {item.get('title', url)}: {e!r}")
+                get_soundcloud_stream_url(url)
+            except Exception:
+                pass
 
     items = tracks[:max_count] if tracks else []
     if not items:
@@ -2729,9 +2614,8 @@ def handle_miniapp_stream(handler, query_params):
     normalized = normalize_miniapp_track({"url": track_url})
     if not normalized:
         return api_json(handler, 400, {"error": "Некорректная ссылка на трек."})
-    track_info = _get_cached_miniapp_track(track_url) or normalized
     try:
-        direct_url = get_soundcloud_stream_url(track_url, track_info)
+        direct_url = get_soundcloud_stream_url(track_url)
         handler.send_response(302)
         handler.send_header("Location", direct_url)
         handler.send_header("Cache-Control", "public, max-age=1800")
@@ -2739,7 +2623,7 @@ def handle_miniapp_stream(handler, query_params):
         handler.end_headers()
     except Exception as e:
         print(f"Ошибка получения аудиопотока: {e!r}")
-        api_json(handler, 502, {"error": "Не удалось получить аудио. SoundCloud может защищать трек DRM, а разрешённая резервная версия не найдена."})
+        api_json(handler, 502, {"error": "Не удалось получить аудио для этого трека."})
 
 
 def handle_miniapp_lyrics(handler, query_params):
