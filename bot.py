@@ -9,7 +9,7 @@ from telebot.apihelper import ApiTelegramException
 import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode
+from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode, quote
 import hmac
 import hashlib
 import time
@@ -1498,12 +1498,446 @@ def download_audius_track(track, workdir):
     return info, filename
 
 
-def audius_attribution_caption(info, max_length=900):
-    if not isinstance(info, dict) or str(info.get("source", "")).lower() != "audius":
+# --- ДОПОЛНИТЕЛЬНЫЙ ИСТОЧНИК: INTERNET ARCHIVE ---
+# В поиск попадают только записи с явной открытой лицензией, допускающей коммерческое
+# распространение неизменённого файла: CC0 и CC BY. Метаданные лицензии
+# размещаются загрузчиком и не являются независимой юридической проверкой прав.
+INTERNET_ARCHIVE_BASE = "https://archive.org"
+INTERNET_ARCHIVE_TIMEOUT = 18
+INTERNET_ARCHIVE_MAX_FILE_BYTES = 100 * 1024 * 1024
+INTERNET_ARCHIVE_CACHE_TTL = 300
+INTERNET_ARCHIVE_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".wav"}
+INTERNET_ARCHIVE_ALLOWED_LICENSES = {
+    "publicdomain/zero/1.0",
+    "licenses/by/2.0",
+    "licenses/by/2.5",
+    "licenses/by/3.0",
+    "licenses/by/4.0",
+}
+internet_archive_metadata_cache = {}
+internet_archive_metadata_lock = threading.Lock()
+
+
+def _internet_archive_text(value, default=""):
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                return text
+        return default
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("value") or ""
+    text = str(value or "").strip()
+    return text or default
+
+
+def internet_archive_license_allowed(license_url):
+    """True only for explicit CC0 / CC BY licenses; NC, ND and SA are excluded."""
+    parsed = urlparse(str(license_url or "").strip())
+    host = (parsed.hostname or "").lower()
+    license_path = parsed.path.strip("/").lower()
+    return (
+        parsed.scheme in ("http", "https")
+        and host in ("creativecommons.org", "www.creativecommons.org")
+        and license_path in INTERNET_ARCHIVE_ALLOWED_LICENSES
+    )
+
+
+def internet_archive_json(path, params=None, max_bytes=8 * 1024 * 1024):
+    url = f"{INTERNET_ARCHIVE_BASE}/{str(path).lstrip('/')}"
+    if params:
+        url += "?" + urlencode(params, doseq=True)
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "SoundMusicTelegramBot/1.0",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=INTERNET_ARCHIVE_TIMEOUT) as response:
+        raw = response.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise RuntimeError("Internet Archive вернул слишком большой ответ")
+    payload = json.loads(raw.decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError("Internet Archive вернул некорректный ответ")
+    return payload
+
+
+def internet_archive_metadata(identifier, use_cache=True):
+    identifier = str(identifier or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", identifier):
+        raise RuntimeError("Некорректный идентификатор Internet Archive")
+
+    now = time.time()
+    if use_cache:
+        with internet_archive_metadata_lock:
+            cached = internet_archive_metadata_cache.get(identifier)
+            if cached and now - cached[0] < INTERNET_ARCHIVE_CACHE_TTL:
+                return cached[1]
+
+    payload = internet_archive_json(f"metadata/{quote(identifier, safe='')}")
+    if not isinstance(payload.get("metadata"), dict) or not isinstance(payload.get("files"), list):
+        raise RuntimeError("Internet Archive не вернул метаданные файлов")
+
+    with internet_archive_metadata_lock:
+        internet_archive_metadata_cache[identifier] = (now, payload)
+        if len(internet_archive_metadata_cache) > 250:
+            oldest = min(internet_archive_metadata_cache, key=lambda key: internet_archive_metadata_cache[key][0])
+            internet_archive_metadata_cache.pop(oldest, None)
+    return payload
+
+
+def internet_archive_pick_audio_file(files):
+    if not isinstance(files, list):
         return None
+    ranked = []
+    extension_scores = {
+        ".mp3": 100, ".m4a": 90, ".aac": 85, ".ogg": 80,
+        ".opus": 78, ".flac": 75, ".wav": 60,
+    }
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            continue
+        if _internet_archive_flag_is_true(item.get("private")):
+            continue
+        extension = os.path.splitext(name)[1].lower()
+        if extension not in INTERNET_ARCHIVE_AUDIO_EXTENSIONS:
+            continue
+        try:
+            size = int(item.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > INTERNET_ARCHIVE_MAX_FILE_BYTES:
+            continue
+        if any(part in name.lower() for part in ("_thumb", "thumbnail", "sample")):
+            continue
+        ranked.append((extension_scores.get(extension, 0), size, item))
+    if not ranked:
+        return None
+    # MP3/M4A получают приоритет; при одинаковом формате берём самый качественный по размеру.
+    ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return ranked[0][2]
+
+
+def _internet_archive_flag_is_true(value):
+    return value is True or str(value or "").strip().lower() in ("1", "true", "yes")
+
+
+def internet_archive_item_allowed(payload):
+    if not isinstance(payload, dict):
+        return False
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    if _internet_archive_text(metadata.get("mediatype")).lower() != "audio":
+        return False
+    if _internet_archive_flag_is_true(metadata.get("access-restricted-item")) or _internet_archive_flag_is_true(metadata.get("is_dark")):
+        return False
+    license_url = _internet_archive_text(metadata.get("licenseurl"))
+    if not internet_archive_license_allowed(license_url):
+        return False
+    rights = _internet_archive_text(metadata.get("rights")).casefold()
+    if any(term in rights for term in ("all rights reserved", "no redistribution", "not for redistribution")):
+        return False
+    return internet_archive_pick_audio_file(payload.get("files")) is not None
+
+
+def _internet_archive_duration(value):
+    value = _internet_archive_text(value)
+    if not value:
+        return None
+    try:
+        if ":" in value:
+            parts = [float(part) for part in value.split(":")]
+            seconds = 0.0
+            for part in parts:
+                seconds = seconds * 60 + part
+        else:
+            seconds = float(value)
+        return int(seconds) if 0 < seconds < 24 * 60 * 60 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def internet_archive_candidate(identifier, payload):
+    if not internet_archive_item_allowed(payload):
+        return None
+    metadata = payload["metadata"]
+    audio_file = internet_archive_pick_audio_file(payload.get("files"))
+    if not audio_file:
+        return None
+    identifier = str(metadata.get("identifier") or identifier or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", identifier):
+        return None
+    license_url = _internet_archive_text(metadata.get("licenseurl"))
+    title = _internet_archive_text(metadata.get("title"), "Без названия")
+    artist = _internet_archive_text(
+        metadata.get("creator") or metadata.get("artist") or metadata.get("contributor"),
+        "Неизвестный автор",
+    )
+    duration = _internet_archive_duration(metadata.get("runtime") or audio_file.get("length"))
+    return {
+        "url": f"{INTERNET_ARCHIVE_BASE}/details/{identifier}",
+        "title": title[:180],
+        "uploader": artist[:120],
+        "thumbnail": f"{INTERNET_ARCHIVE_BASE}/services/img/{quote(identifier, safe='')}",
+        "duration": duration,
+        "source": "internet_archive",
+        "ia_identifier": identifier,
+        "ia_file_name": str(audio_file.get("name"))[:240],
+        "license_url": license_url[:500],
+    }
+
+
+def _internet_archive_search_raw(query, count=30):
+    cleaned = re.sub(r"[^\w\s&'’-]", " ", str(query or ""), flags=re.UNICODE)
+    cleaned = " ".join(cleaned.split())[:120]
+    if not cleaned:
+        return []
+    # Поиск идёт только среди audio items. Права всё равно перепроверяются по полным метаданным.
+    search_expression = f'mediatype:audio AND "{cleaned.replace(chr(34), " ")}"'
+    params = [
+        ("q", search_expression),
+        ("fl[]", "identifier"),
+        ("fl[]", "title"),
+        ("fl[]", "creator"),
+        ("fl[]", "licenseurl"),
+        ("rows", str(min(50, max(1, int(count))))),
+        ("page", "1"),
+        ("output", "json"),
+    ]
+    payload = internet_archive_json("advancedsearch.php", params)
+    response = payload.get("response") or {}
+    docs = response.get("docs") or []
+    return [doc for doc in docs if isinstance(doc, dict) and doc.get("identifier")] if isinstance(docs, list) else []
+
+
+def _internet_archive_flat_search(query, count=20):
+    try:
+        docs = _internet_archive_search_raw(query, count)
+    except Exception as e:
+        print(f"Internet Archive: поиск по запросу «{query}» не удался: {e!r}")
+        return []
+    identifiers = list(dict.fromkeys(str(doc.get("identifier") or "") for doc in docs))
+    identifiers = [value for value in identifiers if re.fullmatch(r"[A-Za-z0-9._-]{1,120}", value)]
+    if not identifiers:
+        return []
+
+    found = []
+    def load_candidate(identifier):
+        try:
+            payload = internet_archive_metadata(identifier)
+            return internet_archive_candidate(identifier, payload)
+        except Exception as e:
+            print(f"Internet Archive: не удалось проверить «{identifier}»: {e!r}")
+            return None
+
+    with ThreadPoolExecutor(max_workers=min(5, len(identifiers))) as pool:
+        for candidate in pool.map(load_candidate, identifiers[:min(30, len(identifiers))]):
+            if candidate:
+                found.append(candidate)
+    return found
+
+
+def find_internet_archive_match(track):
+    """Ищет достаточно точное совпадение в Internet Archive среди записей с открытой лицензией."""
+    from difflib import SequenceMatcher
+
+    if not isinstance(track, dict):
+        return None
+    original_title = str(track.get("title") or "").strip()
+    original_artist = str(track.get("uploader") or track.get("artist") or "").strip()
+    if not original_title:
+        return None
+    parsed_artist, clean_title = split_artist_title(original_title, original_artist)
+    wanted_title = _clean_match_value(clean_title or original_title)
+    wanted_artist = _clean_match_value(parsed_artist or original_artist)
+    queries = []
+    for value in (f"{wanted_artist} {wanted_title}".strip(), wanted_title, *query_variants(wanted_title)):
+        value = " ".join(str(value or "").split())
+        if value and value.casefold() not in {item.casefold() for item in queries}:
+            queries.append(value)
+    candidates = []
+    seen = set()
+    for query in queries[:2]:
+        for candidate in _internet_archive_flat_search(query, 15):
+            identifier = candidate.get("ia_identifier")
+            if identifier and identifier not in seen:
+                seen.add(identifier)
+                candidates.append(candidate)
+
+    try:
+        wanted_duration = int(float(track.get("duration"))) if track.get("duration") is not None else None
+    except (TypeError, ValueError):
+        wanted_duration = None
+
+    ranked = []
+    for candidate in candidates:
+        candidate_title = _clean_match_value(candidate.get("title"))
+        candidate_artist = _clean_match_value(candidate.get("uploader"))
+        title_ratio = SequenceMatcher(None, wanted_title, candidate_title).ratio() if wanted_title and candidate_title else 0.0
+        title_tokens = set(wanted_title.split())
+        candidate_tokens = set(candidate_title.split())
+        token_ratio = len(title_tokens & candidate_tokens) / max(1, len(title_tokens | candidate_tokens))
+        title_score = title_ratio * 0.75 + token_ratio * 0.25
+        artist_ratio = SequenceMatcher(None, wanted_artist, candidate_artist).ratio() if wanted_artist and candidate_artist else 0.0
+        if title_score < 0.76:
+            continue
+        if wanted_artist and candidate_artist and artist_ratio < 0.25 and title_score < 0.92:
+            continue
+        try:
+            candidate_duration = int(candidate.get("duration")) if candidate.get("duration") is not None else None
+        except (TypeError, ValueError):
+            candidate_duration = None
+        duration_penalty = 0.0
+        if wanted_duration and candidate_duration:
+            difference = abs(wanted_duration - candidate_duration) / max(1, wanted_duration)
+            if difference > 0.40 and title_score < 0.94:
+                continue
+            duration_penalty = min(25.0, difference * 30.0)
+        score = title_score * 100 + artist_ratio * 20 - duration_penalty
+        ranked.append((score, candidate))
+    if not ranked:
+        return None
+    ranked.sort(key=lambda pair: pair[0], reverse=True)
+    return ranked[0][1] if ranked[0][0] >= 76 else None
+
+
+def download_internet_archive_track(track, workdir):
+    identifier = str((track or {}).get("ia_identifier") or "").strip()
+    if not identifier:
+        parsed = urlparse(str((track or {}).get("url") or ""))
+        parts = [part for part in parsed.path.split("/") if part]
+        identifier = parts[1] if len(parts) >= 2 and parts[0] == "details" else ""
+    payload = internet_archive_metadata(identifier, use_cache=False)
+    candidate = internet_archive_candidate(identifier, payload)
+    if not candidate:
+        raise RuntimeError("Internet Archive не подтвердил открытую лицензию или доступный аудиофайл")
+
+    requested_name = str((track or {}).get("ia_file_name") or "").strip()
+    audio_file = None
+    if requested_name:
+        audio_file = next(
+            (item for item in payload.get("files", [])
+             if isinstance(item, dict) and item.get("name") == requested_name
+             and item.get("name") == candidate.get("ia_file_name")),
+            None,
+        )
+    if not audio_file:
+        audio_file = internet_archive_pick_audio_file(payload.get("files"))
+    if not audio_file:
+        raise RuntimeError("В Internet Archive не найден подходящий аудиофайл")
+
+    file_name = str(audio_file.get("name") or "")
+    if not file_name or "/" in file_name or "\\" in file_name:
+        raise RuntimeError("Некорректное имя файла Internet Archive")
+    extension = os.path.splitext(file_name)[1].lower()
+    if extension not in INTERNET_ARCHIVE_AUDIO_EXTENSIONS:
+        raise RuntimeError("Формат файла Internet Archive не поддерживается")
+    url = (
+        f"{INTERNET_ARCHIVE_BASE}/download/{quote(identifier, safe='')}/"
+        f"{quote(file_name, safe='')}"
+    )
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "SoundMusicTelegramBot/1.0", "Accept": "audio/*,application/octet-stream;q=0.9,*/*;q=0.5"},
+    )
+    filename = os.path.join(workdir, f"internet_archive_{identifier[:50]}{extension}")
+    written = 0
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            content_type = (response.headers.get("Content-Type") or "").lower()
+            content_length = response.headers.get("Content-Length")
+            if content_length and content_length.isdigit() and int(content_length) > INTERNET_ARCHIVE_MAX_FILE_BYTES:
+                raise RuntimeError("Файл Internet Archive слишком большой")
+            first_chunk = response.read(2048)
+            if ("text/html" in content_type or "json" in content_type
+                    or first_chunk.lstrip().startswith((b"{", b"[", b"<!DOCTYPE", b"<html"))):
+                raise RuntimeError("Internet Archive не выдал аудиофайл")
+            with open(filename, "wb") as output:
+                if first_chunk:
+                    output.write(first_chunk)
+                    written += len(first_chunk)
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > INTERNET_ARCHIVE_MAX_FILE_BYTES:
+                        raise RuntimeError("Файл Internet Archive превысил допустимый размер")
+                    output.write(chunk)
+        if not os.path.exists(filename) or os.path.getsize(filename) < 1024:
+            raise RuntimeError("Internet Archive вернул пустой или неполный аудиофайл")
+    except Exception:
+        try:
+            if os.path.exists(filename):
+                os.remove(filename)
+        except OSError:
+            pass
+        raise
+
+    metadata = payload.get("metadata") or {}
+    artist = candidate.get("uploader") or "Неизвестный автор"
+    info = {
+        "id": identifier,
+        "title": candidate.get("title") or "Без названия",
+        "uploader": artist,
+        "duration": candidate.get("duration"),
+        "thumbnail": candidate.get("thumbnail"),
+        "webpage_url": candidate.get("url"),
+        "source": "internet_archive",
+        "license_url": candidate.get("license_url"),
+        "copyright_line": f"Автор: {artist}; лицензия: {candidate.get('license_url', '')}"[:400],
+    }
+    return info, filename
+
+
+def get_internet_archive_stream_url(identifier):
+    payload = internet_archive_metadata(identifier, use_cache=False)
+    candidate = internet_archive_candidate(identifier, payload)
+    if not candidate:
+        raise RuntimeError("Internet Archive не подтвердил открытую лицензию для воспроизведения")
+    file_name = candidate.get("ia_file_name")
+    if not file_name:
+        raise RuntimeError("Internet Archive не вернул аудиофайл")
+    return (
+        f"{INTERNET_ARCHIVE_BASE}/download/{quote(identifier, safe='')}/"
+        f"{quote(file_name, safe='')}"
+    )
+
+
+def prepare_internet_archive_track(track, workdir, effect="none"):
+    info, audio_filename = download_internet_archive_track(track, workdir)
+    _original_thumb, thumbnail_filename = get_track_thumbnail(info, audio_filename)
+    if effect != "none":
+        audio_filename = apply_audio_effect(audio_filename, effect)
+    else:
+        audio_filename = ensure_telegram_audio(audio_filename)
+    audio_filename = compress_audio_if_needed(audio_filename, thumbnail_filename)
+    return info, audio_filename, thumbnail_filename
+
+
+def audius_attribution_caption(info, max_length=900):
+    if not isinstance(info, dict):
+        return None
+    source = str(info.get("source", "")).lower()
     artist = str(info.get("uploader") or "Неизвестный автор").strip()
-    permalink = str(info.get("webpage_url") or "https://audius.co").strip()
-    return f"Источник: Audius\nИсполнитель: {artist}\nОригинал: {permalink}"[:max_length]
+    permalink = str(info.get("webpage_url") or "").strip()
+    if source == "audius":
+        permalink = permalink or "https://audius.co"
+        return f"Источник: Audius\nИсполнитель: {artist}\nОригинал: {permalink}"[:max_length]
+    if source == "internet_archive":
+        license_url = str(info.get("license_url") or "").strip()
+        permalink = permalink or "https://archive.org"
+        return (
+            f"Источник: Internet Archive\nАвтор: {artist}\n"
+            f"Лицензия: {license_url}\nОригинал: {permalink}"
+        )[:max_length]
+    return None
 
 
 def prepare_audius_track(track, workdir, effect="none"):
@@ -1518,24 +1952,57 @@ def prepare_audius_track(track, workdir, effect="none"):
 
 
 def prepare_track_with_fallback(track, workdir, effect="none"):
-    """Сначала использует выбранный источник, затем проверяет доступную версию в Audius."""
+    """Пробует исходный источник, затем Audius и Internet Archive с проверкой лицензии."""
     source = str((track or {}).get("source") or "soundcloud").lower()
-    if source == "audius":
-        return prepare_audius_track(track, workdir, effect)
-    try:
-        return prepare_track_file(track["url"], workdir, effect)
-    except Exception as original_error:
-        print(f"SoundCloud не смог скачать «{track.get('title', '')}»: {original_error!r}")
+    errors = []
+
+    if source == "soundcloud":
+        try:
+            return prepare_track_file(track["url"], workdir, effect)
+        except Exception as e:
+            errors.append(f"SoundCloud: {e}")
+            print(f"SoundCloud не смог скачать «{track.get('title', '')}»: {e!r}")
+    elif source == "audius":
+        try:
+            return prepare_audius_track(track, workdir, effect)
+        except Exception as e:
+            errors.append(f"Audius: {e}")
+            print(f"Audius не смог скачать «{track.get('title', '')}»: {e!r}")
+    elif source == "internet_archive":
+        try:
+            return prepare_internet_archive_track(track, workdir, effect)
+        except Exception as e:
+            errors.append(f"Internet Archive: {e}")
+            print(f"Internet Archive не смог скачать «{track.get('title', '')}»: {e!r}")
+    else:
+        errors.append(f"Неизвестный источник: {source}")
+
+    if source != "audius":
         try:
             candidate = find_audius_match(track, require_download=True)
-            if not candidate:
-                raise RuntimeError("Audius не нашёл достаточно точную версию с разрешённым скачиванием")
-            print(f"Audius: найден доступный вариант «{candidate['title']}» — {candidate['uploader']}")
-            return prepare_audius_track(candidate, workdir, effect)
-        except Exception as fallback_error:
-            raise RuntimeError(
-                f"SoundCloud не смог отдать аудио; Audius тоже не смог предоставить разрешённую версию: {fallback_error}"
-            ) from original_error
+            if candidate:
+                print(f"Audius: найден доступный вариант «{candidate['title']}» — {candidate['uploader']}")
+                return prepare_audius_track(candidate, workdir, effect)
+            errors.append("Audius: точное совпадение с разрешённым скачиванием не найдено")
+        except Exception as e:
+            errors.append(f"Audius: {e}")
+            print(f"Резервный поиск Audius завершился ошибкой: {e!r}")
+
+    if source != "internet_archive":
+        try:
+            candidate = find_internet_archive_match(track)
+            if candidate:
+                print(
+                    f"Internet Archive: найден вариант «{candidate['title']}» — "
+                    f"{candidate['uploader']} ({candidate.get('license_url', '')})"
+                )
+                return prepare_internet_archive_track(candidate, workdir, effect)
+            errors.append("Internet Archive: точное совпадение с подходящей открытой лицензией не найдено")
+        except Exception as e:
+            errors.append(f"Internet Archive: {e}")
+            print(f"Резервный поиск Internet Archive завершился ошибкой: {e!r}")
+
+    raise RuntimeError("Не удалось получить аудио из доступных источников. " + " | ".join(errors[-3:]))
 
 
 def _sc_flat_search(query, count):
@@ -1566,7 +2033,7 @@ def _sc_flat_search(query, count):
 
 
 def soundcloud_search(query, count=30):
-    """Ищет в SoundCloud и Audius, объединяет, удаляет повторы и ранжирует результаты."""
+    """Объединяет SoundCloud, Audius и Internet Archive, затем ранжирует совпадения."""
     query = " ".join((query or "").split())
     if not query:
         return []
@@ -1575,26 +2042,25 @@ def soundcloud_search(query, count=30):
     queries = [query] + variants
     raw_tracks = []
     errors = []
-
     jobs = []
-    with ThreadPoolExecutor(max_workers=min(8, len(queries) * 2)) as pool:
+    with ThreadPoolExecutor(max_workers=min(10, len(queries) * 2 + 3)) as pool:
         for value in queries:
             jobs.append((value, "soundcloud", pool.submit(_sc_flat_search, value, count)))
-        # Audius ищем по исходному запросу и двум наиболее полезным вариантам.
         for value in queries[:3]:
             jobs.append((value, "audius", pool.submit(_audius_flat_search, value, min(count, 50), True)))
-        for value, source, future in jobs:
+        # Internet Archive ищем по исходной фразе, чтобы не перегружать API.
+        jobs.append((queries[0], "internet_archive", pool.submit(_internet_archive_flat_search, queries[0], min(count, 15))))
+        for value, source_name, future in jobs:
             try:
-                found = future.result()
-                raw_tracks.extend(found or [])
+                raw_tracks.extend(future.result() or [])
             except Exception as e:
                 errors.append(e)
-                print(f"Поиск {source} по запросу «{value}» не удался: {e!r}")
+                print(f"Поиск {source_name} по запросу «{value}» не удался: {e!r}")
 
     merged = dedupe_tracks(raw_tracks)
     scored = score_tracks(merged, queries)
     if not scored and errors:
-        raise RuntimeError("Поиск не удался ни в SoundCloud, ни в Audius") from errors[0]
+        raise RuntimeError("Поиск не удался ни в SoundCloud, ни в Audius, ни в Internet Archive") from errors[0]
     return [track for _, track in scored]
 
 
@@ -2349,12 +2815,16 @@ def normalize_miniapp_track(raw):
         return None
     is_soundcloud = host == "soundcloud.com" or host.endswith(".soundcloud.com")
     is_audius = host == "audius.co" or host.endswith(".audius.co")
-    source = str(raw.get("source") or ("audius" if is_audius else "soundcloud" if is_soundcloud else "")).lower()
+    is_archive = host in ("archive.org", "www.archive.org") and parsed.path.startswith("/details/")
+    inferred_source = "internet_archive" if is_archive else "audius" if is_audius else "soundcloud" if is_soundcloud else ""
+    source = str(raw.get("source") or inferred_source).lower()
     if source == "soundcloud" and not is_soundcloud:
         return None
     if source == "audius" and not is_audius:
         return None
-    if source not in ("soundcloud", "audius"):
+    if source == "internet_archive" and not is_archive:
+        return None
+    if source not in ("soundcloud", "audius", "internet_archive"):
         return None
     thumbnail = str(raw.get("thumbnail") or "").strip()[:1000]
     thumb_parsed = urlparse(thumbnail)
@@ -2374,6 +2844,14 @@ def normalize_miniapp_track(raw):
     }
     if source == "audius":
         result["audius_id"] = str(raw.get("audius_id") or raw.get("id") or "")[:100]
+    elif source == "internet_archive":
+        parts = [part for part in parsed.path.split("/") if part]
+        identifier = str(raw.get("ia_identifier") or (parts[1] if len(parts) >= 2 else "")).strip()
+        if not re.fullmatch(r"[A-Za-z0-9._-]{1,120}", identifier):
+            return None
+        result["ia_identifier"] = identifier
+        result["ia_file_name"] = str(raw.get("ia_file_name") or "")[:240]
+        result["license_url"] = str(raw.get("license_url") or "")[:500]
     return result
 
 
@@ -2566,17 +3044,34 @@ def get_audius_stream_url(track_id):
 def get_track_stream_url(track):
     source = str((track or {}).get("source") or "soundcloud").lower()
     track_url = str((track or {}).get("url") or "").strip()
+
+    if source == "internet_archive":
+        return get_internet_archive_stream_url((track or {}).get("ia_identifier"))
     if source == "audius":
-        return get_audius_stream_url((track or {}).get("audius_id"))
+        try:
+            return get_audius_stream_url((track or {}).get("audius_id"))
+        except Exception as audius_error:
+            print(f"Mini App: Audius stream недоступен: {audius_error!r}")
+            candidate = find_internet_archive_match(track)
+            if candidate:
+                return get_internet_archive_stream_url(candidate.get("ia_identifier"))
+            raise RuntimeError("Audius не отдал поток, а Internet Archive не нашёл подходящий вариант") from audius_error
+
     try:
         return get_soundcloud_stream_url(track_url)
     except Exception as soundcloud_error:
         print(f"Mini App: SoundCloud stream недоступен для «{(track or {}).get('title', '')}»: {soundcloud_error!r}")
-        candidate = find_audius_match(track, require_download=False)
-        if not candidate:
-            raise RuntimeError("SoundCloud не отдал поток, а Audius не нашёл доступную для прослушивания версию") from soundcloud_error
-        print(f"Mini App: для воспроизведения используется Audius — {candidate['uploader']} / {candidate['title']}")
-        return get_audius_stream_url(candidate.get("audius_id"))
+        try:
+            candidate = find_audius_match(track, require_download=False)
+            if candidate:
+                print(f"Mini App: для воспроизведения используется Audius — {candidate['uploader']} / {candidate['title']}")
+                return get_audius_stream_url(candidate.get("audius_id"))
+        except Exception as audius_error:
+            print(f"Mini App: резервный поток Audius не получен: {audius_error!r}")
+        candidate = find_internet_archive_match(track)
+        if candidate:
+            return get_internet_archive_stream_url(candidate.get("ia_identifier"))
+        raise RuntimeError("SoundCloud не отдал поток; доступный вариант в Audius и Internet Archive не найден") from soundcloud_error
 
 
 def prewarm_tracks_stream_urls(tracks, max_count=20):
