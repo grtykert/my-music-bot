@@ -2005,6 +2005,150 @@ def prepare_track_with_fallback(track, workdir, effect="none"):
     raise RuntimeError("Не удалось получить аудио из доступных источников. " + " | ".join(errors[-3:]))
 
 
+
+def _fallback_track_match_score(reference, candidate):
+    """Оценивает, насколько кандидат похож на выбранный трек; слабые совпадения отбрасываются."""
+    from difflib import SequenceMatcher
+
+    if not isinstance(reference, dict) or not isinstance(candidate, dict):
+        return None
+    ref_title = str(reference.get("title") or "").strip()
+    candidate_title = str(candidate.get("title") or "").strip()
+    if not ref_title or not candidate_title:
+        return None
+
+    ref_artist, ref_song = split_artist_title(ref_title, str(reference.get("uploader") or ""))
+    candidate_artist, candidate_song = split_artist_title(
+        candidate_title, str(candidate.get("uploader") or "")
+    )
+    ref_song = _clean_match_value(ref_song or ref_title)
+    candidate_song = _clean_match_value(candidate_song or candidate_title)
+    if not ref_song or not candidate_song:
+        return None
+
+    title_ratio = SequenceMatcher(None, ref_song, candidate_song).ratio()
+    ref_tokens = set(ref_song.split())
+    candidate_tokens = set(candidate_song.split())
+    coverage = len(ref_tokens & candidate_tokens) / max(1, len(ref_tokens))
+    exact_title = ref_song == candidate_song
+
+    ref_artist = _clean_match_value(ref_artist or reference.get("uploader") or "")
+    candidate_artist = _clean_match_value(candidate_artist or candidate.get("uploader") or "")
+    artist_ratio = (
+        SequenceMatcher(None, ref_artist, candidate_artist).ratio()
+        if ref_artist and candidate_artist else 0.0
+    )
+
+    def duration_of(item):
+        try:
+            value = int(float(item.get("duration")))
+            return value if value > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    ref_duration = duration_of(reference)
+    candidate_duration = duration_of(candidate)
+    duration_penalty = 0.0
+    if ref_duration and candidate_duration:
+        difference = abs(ref_duration - candidate_duration) / max(ref_duration, candidate_duration)
+        # Значительно отличающиеся по длительности версии не считаем одной песней.
+        if difference > 0.35 and not (exact_title and difference <= 0.50):
+            return None
+        duration_penalty = min(25.0, difference * 35.0)
+
+    # Для неидентичных названий требуется сильное текстовое совпадение.
+    if not exact_title and (title_ratio < 0.86 or coverage < 0.75):
+        return None
+    # Если оба артиста известны и сильно отличаются, принимаем только точное название.
+    if ref_artist and candidate_artist and artist_ratio < 0.25 and not exact_title:
+        return None
+
+    return title_ratio * 100 + coverage * 12 + artist_ratio * 8 - duration_penalty
+
+
+def find_related_fallback_tracks(reference, candidates=None, max_candidates=3):
+    """Выбирает только близкие результаты; при отсутствии списка делает свежий поиск по названию."""
+    source_candidates = list(candidates or [])
+    ranked = []
+    seen_urls = {str((reference or {}).get("url") or "").split("?")[0].rstrip("/")}
+
+    def add_ranked(items):
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "").split("?")[0].rstrip("/")
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            score = _fallback_track_match_score(reference, item)
+            if score is not None:
+                ranked.append((score, item))
+
+    add_ranked(source_candidates)
+
+    # Mini App передаёт выбранный трек, но не всю выдачу. В таком случае ищем ещё раз
+    # по точному названию, чтобы использовать тот же общий поиск по источникам.
+    if candidates is None or len(ranked) < max_candidates:
+        title = str((reference or {}).get("title") or "").strip()
+        artist, song = split_artist_title(title, str((reference or {}).get("uploader") or ""))
+        queries = []
+        for query in (" ".join(part for part in (artist, song or title) if part).strip(), song or title):
+            query = " ".join(str(query or "").split())
+            if query and query.casefold() not in {item.casefold() for item in queries}:
+                queries.append(query)
+        for query in queries[:2]:
+            try:
+                fresh = soundcloud_search(query, 25)
+                add_ranked(fresh)
+            except Exception as e:
+                print(f"Резервный поиск похожих версий по «{query}» не удался: {e!r}")
+
+    ranked.sort(key=lambda row: row[0], reverse=True)
+    return [item for _, item in ranked[:max_candidates]]
+
+
+def prepare_track_with_alternates(track, workdir, effect="none", fallback_tracks=None, max_attempts=4):
+    """Сначала пробует выбранную запись; похожие варианты ищет только при её неудаче."""
+    attempts = [(track, False)]
+    errors = []
+    candidate_dir = os.path.join(workdir, "candidate_1")
+    os.makedirs(candidate_dir, exist_ok=True)
+    try:
+        info, audio_filename, thumbnail_filename = prepare_track_with_fallback(
+            track, candidate_dir, effect
+        )
+        return track, info, audio_filename, thumbnail_filename
+    except Exception as e:
+        errors.append(f"выбранный вариант: {e}")
+        print(f"Выбранный вариант «{track.get('title', '')}» не скачался: {e!r}")
+
+    related = find_related_fallback_tracks(
+        track,
+        candidates=fallback_tracks,
+        max_candidates=max(0, min(5, int(max_attempts) - 1)),
+    )
+    for index, candidate in enumerate(related, start=2):
+        candidate_dir = os.path.join(workdir, f"candidate_{index}")
+        os.makedirs(candidate_dir, exist_ok=True)
+        try:
+            info, audio_filename, thumbnail_filename = prepare_track_with_fallback(
+                candidate, candidate_dir, effect
+            )
+            return candidate, info, audio_filename, thumbnail_filename
+        except Exception as e:
+            label = str(candidate.get("source") or "неизвестный источник")
+            errors.append(f"похожий вариант {index - 1} ({label}): {e}")
+            print(
+                f"Не удалось подготовить похожий вариант {index - 1} "
+                f"«{candidate.get('title', '')}»: {e!r}"
+            )
+
+    details = " | ".join(errors[-4:])
+    raise RuntimeError(
+        "Не удалось скачать выбранный трек или похожие доступные версии. " + details
+    )
+
+
 def _sc_flat_search(query, count):
     ydl_opts = {
         "extract_flat": True, "quiet": True, "no_warnings": True,
@@ -2159,7 +2303,9 @@ def handle_chosen_inline(chosen):
         workdir = tempfile.mkdtemp(prefix="inl_")
         try:
             with download_slots:
-                info, audio_filename, thumbnail_filename = prepare_track_with_fallback(track, workdir)
+                delivered_track, info, audio_filename, thumbnail_filename = prepare_track_with_alternates(
+                    track, workdir, fallback_tracks=user_tracks
+                )
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
@@ -2567,8 +2713,8 @@ def handle_navigation(call):
 
 
 # --- ОТПРАВКА ТРЕКА В ЧАТ (общая для бота и Mini App) ---
-def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
-    """Скачивает трек и отправляет в Telegram. Для VIP может применить аудиоэффект."""
+def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None, fallback_tracks=None):
+    """Скачивает выбранный трек; при отказе источника перебирает похожие результаты."""
     user_id = user_id or chat_id
     if effect not in VIP_EFFECTS:
         effect = "none"
@@ -2580,12 +2726,23 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
     uploader = track["uploader"]
     workdir = None
 
-    def finish_ok(shown_title, shown_uploader, info=None):
+    def finish_ok(shown_title, shown_uploader, info=None, delivered_track=None):
+        alternate_used = bool(
+            delivered_track
+            and str(delivered_track.get("url") or "") != track_url
+        )
         if status_msg_id:
             markup = InlineKeyboardMarkup()
             markup.add(InlineKeyboardButton(text="🔍 Найти другой трек", callback_data="tosearch"))
             try:
-                text = f"▶️ **Плеер:**\n🎵 {shown_title}\n🧑‍🎤 {shown_uploader}"
+                if alternate_used:
+                    text = (
+                        "✅ Первый вариант оказался недоступен.\n"
+                        "Подобрана похожая доступная версия:\n\n"
+                    )
+                else:
+                    text = ""
+                text += f"▶️ **Плеер:**\n🎵 {shown_title}\n🧑‍🎤 {shown_uploader}"
                 attribution = audius_attribution_caption(info) if info else None
                 if attribution:
                     text += "\n\n" + attribution
@@ -2596,15 +2753,23 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
                 )
             except Exception:
                 pass
+        elif alternate_used:
+            try:
+                bot.send_message(
+                    chat_id,
+                    f"✅ Первый вариант недоступен. Отправлена похожая версия: {shown_title} — {shown_uploader}"
+                )
+            except Exception:
+                pass
         count_download()
 
     try:
-        # Кэш используем только для обычного звука
+        # Кэш выбранного результата проверяем первым, как и раньше.
         cached_file_id = audio_cache.get(track_url)
         if effect == "none" and cached_file_id and not str(cached_file_id).startswith("http"):
             try:
                 bot.send_audio(chat_id, cached_file_id, title=title, performer=uploader)
-                finish_ok(title, uploader)
+                finish_ok(title, uploader, delivered_track=track)
                 return
             except Exception as e:
                 print(f"file_id из кэша не сработал, качаем заново: {e}")
@@ -2612,30 +2777,40 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None):
 
         with download_slots:
             workdir = tempfile.mkdtemp(prefix="trk_")
-            info, audio_filename, thumbnail_filename = prepare_track_with_fallback(track, workdir, effect)
+            delivered_track, info, audio_filename, thumbnail_filename = prepare_track_with_alternates(
+                track,
+                workdir,
+                effect,
+                fallback_tracks=fallback_tracks,
+                max_attempts=4,
+            )
 
-            out_title = info.get("title", title)
+            out_title = info.get("title", delivered_track.get("title", title))
             if effect != "none":
                 out_title = f"{out_title} ({EFFECT_NAMES[effect]})"
-            out_uploader = info.get("uploader", uploader)
+            out_uploader = info.get("uploader", delivered_track.get("uploader", uploader))
 
             with open(audio_filename, "rb") as audio:
                 thumb_file = open(thumbnail_filename, "rb") if thumbnail_filename and os.path.exists(thumbnail_filename) else None
                 try:
-                    sent = bot.send_audio(chat_id, audio, title=out_title,
-                                          performer=out_uploader, thumbnail=thumb_file,
-                                          caption=audius_attribution_caption(info))
+                    sent = bot.send_audio(
+                        chat_id, audio, title=out_title,
+                        performer=out_uploader, thumbnail=thumb_file,
+                        caption=audius_attribution_caption(info)
+                    )
                 finally:
                     if thumb_file:
                         thumb_file.close()
 
         if effect == "none":
             audio_cache[track_url] = sent.audio.file_id
-        finish_ok(out_title, out_uploader, info)
+            if delivered_track.get("url"):
+                audio_cache[delivered_track["url"]] = sent.audio.file_id
+        finish_ok(out_title, out_uploader, info, delivered_track=delivered_track)
     except Exception as e:
         report_error(f"Ошибка загрузки трека {track_url}", e)
         reason = explain_error(e)
-        text = f"❌ Не удалось скачать «{title[:80]}». Попробуй выбрать другой результат."
+        text = f"❌ Не удалось скачать «{title[:80]}» и не нашлось достаточно похожей доступной версии."
         if reason:
             text += f"\n{reason}"
         try:
@@ -2682,6 +2857,7 @@ def handle_download_effect_callback(call):
     threading.Thread(
         target=send_track,
         args=(chat_id, track, effect, call.message.message_id, call.from_user.id),
+        kwargs={"fallback_tracks": user_tracks},
         daemon=True
     ).start()
 
@@ -2736,6 +2912,7 @@ def handle_download_callback(call):
     threading.Thread(
         target=send_track,
         args=(chat_id, track, "none", status_msg.message_id, call.from_user.id),
+        kwargs={"fallback_tracks": user_tracks},
         daemon=True
     ).start()
 
@@ -3041,7 +3218,7 @@ def get_audius_stream_url(track_id):
     return f"{AUDIUS_API_BASE}/tracks/{track_id}/stream"
 
 
-def get_track_stream_url(track):
+def _get_track_stream_url_single(track):
     source = str((track or {}).get("source") or "soundcloud").lower()
     track_url = str((track or {}).get("url") or "").strip()
 
@@ -3072,6 +3249,79 @@ def get_track_stream_url(track):
         if candidate:
             return get_internet_archive_stream_url(candidate.get("ia_identifier"))
         raise RuntimeError("SoundCloud не отдал поток; доступный вариант в Audius и Internet Archive не найден") from soundcloud_error
+
+
+
+def _hydrate_stream_track(track):
+    """Восстанавливает метаданные по ссылке, когда Mini App передал URL без полей трека."""
+    enriched = dict(track or {})
+    if enriched.get("title") and enriched.get("title") != "Без названия":
+        return enriched
+    url = str(enriched.get("url") or "").strip()
+    if not url:
+        return enriched
+
+    source = str(enriched.get("source") or "soundcloud").lower()
+    try:
+        if source == "internet_archive":
+            identifier = str(enriched.get("ia_identifier") or "").strip()
+            if not identifier:
+                parsed = urlparse(url)
+                parts = [part for part in parsed.path.split("/") if part]
+                identifier = parts[1] if len(parts) >= 2 and parts[0] == "details" else ""
+            payload = internet_archive_metadata(identifier)
+            candidate = internet_archive_candidate(identifier, payload)
+            if candidate:
+                enriched.update(candidate)
+                return enriched
+        elif source == "audius":
+            payload = audius_api_json("/resolve", {"url": url})
+            raw = _audius_data_track(payload)
+            candidate = audius_candidate(raw) if raw else None
+            if candidate:
+                enriched.update(candidate)
+                return enriched
+        else:
+            info = resolve_soundcloud_metadata(url)
+            if info:
+                enriched["title"] = str(info.get("title") or enriched.get("title") or "Без названия")[:180]
+                enriched["uploader"] = str(
+                    info.get("uploader") or info.get("artist") or enriched.get("uploader") or "Неизвестен"
+                )[:120]
+                if info.get("duration"):
+                    enriched["duration"] = int(float(info["duration"]))
+                enriched["thumbnail"] = best_soundcloud_thumbnail(info) or enriched.get("thumbnail", "")
+    except Exception as e:
+        print(f"Mini App: не удалось получить метаданные для резервного поиска: {e!r}")
+    return enriched
+
+
+def get_track_stream_url(track):
+    """Пробует поток выбранной записи, затем несколько похожих результатов из общего поиска."""
+    enriched = _hydrate_stream_track(track)
+    try:
+        return _get_track_stream_url_single(enriched)
+    except Exception as original_error:
+        original_error_text = str(original_error)
+        print(
+            f"Mini App: исходная запись недоступна для «{enriched.get('title', '')}»: "
+            f"{original_error!r}. Ищу похожие доступные версии."
+        )
+
+    candidates = find_related_fallback_tracks(enriched, candidates=None, max_candidates=3)
+    errors = [original_error_text]
+    for index, candidate in enumerate(candidates, start=1):
+        try:
+            return _get_track_stream_url_single(candidate)
+        except Exception as e:
+            errors.append(str(e))
+            print(
+                f"Mini App: похожий вариант {index} «{candidate.get('title', '')}» "
+                f"тоже недоступен: {e!r}"
+            )
+    raise RuntimeError(
+        "Не удалось получить поток выбранной записи или похожих версий. " + " | ".join(errors[-4:])
+    )
 
 
 def prewarm_tracks_stream_urls(tracks, max_count=20):
@@ -3108,6 +3358,7 @@ def handle_miniapp_stream(handler, query_params):
     track = normalize_miniapp_track(raw_track)
     if not track:
         return api_json(handler, 400, {"error": "Некорректная ссылка на трек."})
+    track = _hydrate_stream_track(track)
     try:
         direct_url = get_track_stream_url(track)
         handler.send_response(302)
