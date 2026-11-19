@@ -1054,6 +1054,19 @@ BAD_WORDS = ("slowed", "sped up", "speed up", "speedup", "nightcore", "remix",
 
 NOISE_TOKENS = {"official", "audio", "video", "lyrics", "lyric", "feat", "ft", "prod",
                 "music", "new", "hd", "hq", "free", "download", "full"}
+# Слова, которые часто встречаются в названиях разных песен и сами по себе
+# почти ничего не говорят о том, какую композицию ищет пользователь.
+GENERIC_SEARCH_TOKENS = {
+    "i", "a", "an", "the", "to", "go", "of", "my", "your", "you", "me",
+    "we", "us", "he", "she", "it", "is", "are", "am", "be", "do", "does",
+    "did", "not", "no", "and", "or", "in", "on", "at", "for", "with", "from",
+    "by", "up", "down", "out", "into", "when", "where", "what", "who", "how",
+}
+UNREQUESTED_VERSION_TAGS = (
+    "bass boost", "bassboost", "bass boosted", "slowed", "sped up", "speed up",
+    "speedup", "nightcore", "remix", "rmx", "reverb", "cover", "mashup",
+    "karaoke", "instrumental", "8d audio", "8d",
+)
 WEAK_SCORE = 11  # если лучший результат слабее — пробуем варианты запроса
 
 _LAYOUT_EN = "qwertyuiop[]asdfghjkl;'zxcvbnm,./"
@@ -1160,32 +1173,44 @@ def _query_token_matches(token, words):
     return False
 
 
+def _has_unrequested_version_tag(track, query):
+    title = f" {norm_text(track.get('title'))} "
+    query_text = f" {norm_text(query)} "
+    for tag in UNREQUESTED_VERSION_TAGS:
+        tag_norm = norm_text(tag)
+        if f" {tag_norm} " in title and f" {tag_norm} " not in query_text:
+            return True
+    return False
+
+
 def _track_matches_track_query(track, query):
-    """Отбрасывает записи, у которых запрос совпал только со случайными словами."""
+    """Оставляет результаты с совпадающими значимыми словами, а не общими фразами."""
     tokens = _query_tokens(query)
     if not tokens:
         return True
 
+    # Не позволяем словам вроде «I / go / to / the» выдавать посторонние песни.
+    significant = [token for token in tokens if token not in GENERIC_SEARCH_TOKENS]
+    if not significant:
+        significant = tokens
+
     title_words = set(norm_text(track.get("title")).split())
     artist_words = set(norm_text(track.get("uploader")).split())
-    title_hits = sum(_query_token_matches(token, title_words) for token in tokens)
-    artist_hits = sum(_query_token_matches(token, artist_words) for token in tokens)
-    total = max(1, len(tokens))
-    title_coverage = title_hits / total
-    artist_coverage = artist_hits / total
-    overall_coverage = sum(
-        _query_token_matches(token, title_words | artist_words) for token in tokens
-    ) / total
+    all_words = title_words | artist_words
 
-    # В режиме «По трекам» также можно искать по имени одного исполнителя.
-    if len(tokens) == 1:
-        return title_hits > 0 or artist_hits > 0
+    matched_significant = sum(
+        _query_token_matches(token, all_words) for token in significant
+    )
+    required_matches = max(1, int(len(significant) * 0.8 + 0.999999))
+    if matched_significant < required_matches:
+        return False
 
-    if title_coverage >= 0.5:
-        return True
-    if artist_coverage >= 0.8:
-        return True
-    return overall_coverage >= 0.8 and title_coverage >= 0.25
+    # Если пользователь явно не искал remix/bass boost/slowed и т.п.,
+    # не показываем такую модификацию вместо оригинала.
+    if _has_unrequested_version_tag(track, query):
+        return False
+
+    return True
 
 
 def dedupe_ranked_titles(scored_tracks):
@@ -1955,11 +1980,12 @@ def download_internet_archive_track(track, workdir):
     return info, filename
 
 
-def get_internet_archive_stream_url(identifier):
+def get_internet_archive_stream_url(identifier, expected_track=None):
     payload = internet_archive_metadata(identifier, use_cache=False)
     candidate = internet_archive_candidate(identifier, payload)
     if not candidate:
         raise RuntimeError("Internet Archive не подтвердил открытую лицензию для воспроизведения")
+    _validate_stream_metadata(expected_track, candidate, "Internet Archive")
     file_name = candidate.get("ia_file_name")
     if not file_name:
         raise RuntimeError("Internet Archive не вернул аудиофайл")
@@ -3248,12 +3274,76 @@ def handle_miniapp_search(handler, query_params):
         api_json(handler, 500, {"error": "Не удалось выполнить поиск. Попробуй ещё раз."})
 
 
-def get_soundcloud_stream_url(track_url):
+def _duration_seconds(value):
+    try:
+        result = float(value)
+        return result if result > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _validate_stream_metadata(expected_track, actual_info, source_name):
+    """Не отдаёт аудио, если метаданные страницы не соответствуют выбранной карточке."""
+    expected_track = expected_track or {}
+    actual_info = actual_info or {}
+
+    expected_duration = _duration_seconds(expected_track.get("duration"))
+    actual_duration = _duration_seconds(actual_info.get("duration"))
+    if expected_duration and actual_duration:
+        allowed_difference = max(12.0, expected_duration * 0.20)
+        difference = abs(actual_duration - expected_duration)
+        if difference > allowed_difference:
+            raise RuntimeError(
+                f"{source_name} вернул аудио другой длительности: "
+                f"в карточке {int(expected_duration)} сек., источник {int(actual_duration)} сек."
+            )
+
+    expected_title = str(expected_track.get("title") or "").strip()
+    actual_title = str(actual_info.get("title") or "").strip()
+    if expected_title and actual_title:
+        # Используем тот же строгий матчинг, что и в поиске: совпадения
+        # только общих слов вроде «I / go / to» недостаточно.
+        actual_candidate = {
+            "title": actual_title,
+            "uploader": actual_info.get("uploader") or actual_info.get("artist") or actual_info.get("creator") or "",
+        }
+        if not _track_matches_track_query(actual_candidate, expected_title):
+            raise RuntimeError(
+                f"{source_name} вернул другую композицию: «{actual_info.get('title', '')}»"
+            )
+
+    expected_artist = norm_text(expected_track.get("uploader"))
+    actual_artist = norm_text(
+        actual_info.get("uploader") or actual_info.get("artist") or actual_info.get("creator")
+    )
+    if expected_artist and actual_artist and expected_artist not in ("неизвестен", "неизвестный автор"):
+        from difflib import SequenceMatcher
+        expected_words = set(expected_artist.split())
+        actual_words = set(actual_artist.split())
+        artist_coverage = len(expected_words & actual_words) / max(1, len(expected_words))
+        artist_similarity = SequenceMatcher(None, expected_artist, actual_artist).ratio()
+        if artist_similarity < 0.35 and artist_coverage < 0.5:
+            raise RuntimeError(
+                f"{source_name} вернул другого исполнителя: «{actual_info.get('uploader') or actual_info.get('artist') or actual_info.get('creator')}»"
+            )
+
+
+def get_soundcloud_stream_url(track):
+    """Получает поток именно выбранной страницы SoundCloud и проверяет её метаданные."""
+    if isinstance(track, str):
+        track = {"url": track}
+    track_url = str((track or {}).get("url") or "").strip()
+    if not track_url:
+        raise RuntimeError("Не указана ссылка SoundCloud")
+
     now = time.time()
     with stream_cache_lock:
         cached = stream_url_cache.get(track_url)
-        if cached and (now - cached[1] < STREAM_CACHE_TTL):
+        if cached and len(cached) >= 3 and now - cached[1] < STREAM_CACHE_TTL:
+            _validate_stream_metadata(track, cached[2], "SoundCloud")
             return cached[0]
+        if cached:
+            stream_url_cache.pop(track_url, None)
 
     options = {
         "format": "bestaudio[protocol^=http]/bestaudio/best",
@@ -3263,6 +3353,11 @@ def get_soundcloud_stream_url(track_url):
     }
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(track_url, download=False)
+    if not isinstance(info, dict):
+        raise RuntimeError("SoundCloud не вернул метаданные выбранного трека")
+
+    _validate_stream_metadata(track, info, "SoundCloud")
+
     direct_url = info.get("url")
     if not direct_url:
         formats = info.get("requested_formats") or info.get("formats") or []
@@ -3273,55 +3368,47 @@ def get_soundcloud_stream_url(track_url):
     if not direct_url or urlparse(direct_url).scheme not in ("http", "https"):
         raise RuntimeError("SoundCloud не вернул прямую ссылку на аудио")
 
+    cache_meta = {
+        "title": info.get("title"),
+        "uploader": info.get("uploader") or info.get("artist"),
+        "duration": info.get("duration"),
+    }
     with stream_cache_lock:
-        stream_url_cache[track_url] = (direct_url, now)
+        stream_url_cache[track_url] = (direct_url, now, cache_meta)
         if len(stream_url_cache) > 1000:
             stream_url_cache.pop(next(iter(stream_url_cache)))
     return direct_url
 
 
-def get_audius_stream_url(track_id):
+def get_audius_stream_url(track_id, expected_track=None):
     track_id = str(track_id or "").strip()
     if not track_id:
         raise RuntimeError("Не удалось определить ID трека Audius")
     raw = _get_audius_track_details(track_id)
     if not audius_track_allowed(raw, require_download=False):
         raise RuntimeError("Audius не разрешает воспроизведение этой версии")
-    # Этот официальный endpoint отдаёт MP3-поток или перенаправляет на CDN Audius.
+    candidate = audius_candidate(raw)
+    if candidate:
+        _validate_stream_metadata(expected_track, candidate, "Audius")
+    # Этот официальный endpoint отдаёт поток только выбранного ID трека.
     return f"{AUDIUS_API_BASE}/tracks/{track_id}/stream"
 
 
 def _get_track_stream_url_single(track):
+    """Возвращает поток только выбранной записи. Никаких похожих песен вместо неё."""
     source = str((track or {}).get("source") or "soundcloud").lower()
-    track_url = str((track or {}).get("url") or "").strip()
 
     if source == "internet_archive":
-        return get_internet_archive_stream_url((track or {}).get("ia_identifier"))
+        return get_internet_archive_stream_url(
+            (track or {}).get("ia_identifier"), expected_track=track
+        )
     if source == "audius":
-        try:
-            return get_audius_stream_url((track or {}).get("audius_id"))
-        except Exception as audius_error:
-            print(f"Mini App: Audius stream недоступен: {audius_error!r}")
-            candidate = find_internet_archive_match(track)
-            if candidate:
-                return get_internet_archive_stream_url(candidate.get("ia_identifier"))
-            raise RuntimeError("Audius не отдал поток, а Internet Archive не нашёл подходящий вариант") from audius_error
-
-    try:
-        return get_soundcloud_stream_url(track_url)
-    except Exception as soundcloud_error:
-        print(f"Mini App: SoundCloud stream недоступен для «{(track or {}).get('title', '')}»: {soundcloud_error!r}")
-        try:
-            candidate = find_audius_match(track, require_download=False)
-            if candidate:
-                print(f"Mini App: для воспроизведения используется Audius — {candidate['uploader']} / {candidate['title']}")
-                return get_audius_stream_url(candidate.get("audius_id"))
-        except Exception as audius_error:
-            print(f"Mini App: резервный поток Audius не получен: {audius_error!r}")
-        candidate = find_internet_archive_match(track)
-        if candidate:
-            return get_internet_archive_stream_url(candidate.get("ia_identifier"))
-        raise RuntimeError("SoundCloud не отдал поток; доступный вариант в Audius и Internet Archive не найден") from soundcloud_error
+        return get_audius_stream_url(
+            (track or {}).get("audius_id"), expected_track=track
+        )
+    if source == "soundcloud":
+        return get_soundcloud_stream_url(track)
+    raise RuntimeError(f"Неизвестный источник аудио: {source}")
 
 
 
@@ -3370,31 +3457,20 @@ def _hydrate_stream_track(track):
 
 
 def get_track_stream_url(track):
-    """Пробует поток выбранной записи, затем несколько похожих результатов из общего поиска."""
+    """Получает поток строго выбранного трека; при ошибке возвращает ошибку, а не замену."""
     enriched = _hydrate_stream_track(track)
     try:
         return _get_track_stream_url_single(enriched)
-    except Exception as original_error:
-        original_error_text = str(original_error)
+    except Exception as e:
         print(
-            f"Mini App: исходная запись недоступна для «{enriched.get('title', '')}»: "
-            f"{original_error!r}. Ищу похожие доступные версии."
+            f"Mini App: не удалось получить именно выбранный трек "
+            f"«{enriched.get('title', '')}» — {enriched.get('uploader', '')}: {e!r}"
         )
+        raise RuntimeError(
+            f"Не удалось воспроизвести выбранный трек «{enriched.get('title', 'Без названия')}" 
+            f"— {enriched.get('uploader', 'Неизвестен')}». Другой трек вместо него не включён."
+        ) from e
 
-    candidates = find_related_fallback_tracks(enriched, candidates=None, max_candidates=3)
-    errors = [original_error_text]
-    for index, candidate in enumerate(candidates, start=1):
-        try:
-            return _get_track_stream_url_single(candidate)
-        except Exception as e:
-            errors.append(str(e))
-            print(
-                f"Mini App: похожий вариант {index} «{candidate.get('title', '')}» "
-                f"тоже недоступен: {e!r}"
-            )
-    raise RuntimeError(
-        "Не удалось получить поток выбранной записи или похожих версий. " + " | ".join(errors[-4:])
-    )
 
 
 def prewarm_tracks_stream_urls(tracks, max_count=20):
@@ -3427,6 +3503,9 @@ def handle_miniapp_stream(handler, query_params):
         "duration": (query_params.get("duration") or [""])[0],
         "source": (query_params.get("source") or [""])[0],
         "audius_id": (query_params.get("audius_id") or [""])[0],
+        "ia_identifier": (query_params.get("ia_identifier") or [""])[0],
+        "ia_file_name": (query_params.get("ia_file_name") or [""])[0],
+        "license_url": (query_params.get("license_url") or [""])[0],
     }
     track = normalize_miniapp_track(raw_track)
     if not track:
@@ -3436,7 +3515,7 @@ def handle_miniapp_stream(handler, query_params):
         direct_url = get_track_stream_url(track)
         handler.send_response(302)
         handler.send_header("Location", direct_url)
-        handler.send_header("Cache-Control", "public, max-age=1800")
+        handler.send_header("Cache-Control", "no-store")
         handler.send_header("Content-Length", "0")
         handler.end_headers()
     except Exception as e:
