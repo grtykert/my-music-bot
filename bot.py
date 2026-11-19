@@ -1144,6 +1144,65 @@ def rank_tracks(entries, query):
     return [t for _, t in score_tracks(entries, query)]
 
 
+def _query_token_matches(token, words):
+    """Мягкое совпадение слова, чтобы поиск переживал небольшие опечатки."""
+    from difflib import SequenceMatcher
+
+    if token in words:
+        return True
+    if len(token) < 3:
+        return False
+    for word in words:
+        if len(word) < 3 or abs(len(word) - len(token)) > 2:
+            continue
+        if SequenceMatcher(None, token, word).ratio() >= 0.82:
+            return True
+    return False
+
+
+def _track_matches_track_query(track, query):
+    """Отбрасывает записи, у которых запрос совпал только со случайными словами."""
+    tokens = _query_tokens(query)
+    if not tokens:
+        return True
+
+    title_words = set(norm_text(track.get("title")).split())
+    artist_words = set(norm_text(track.get("uploader")).split())
+    title_hits = sum(_query_token_matches(token, title_words) for token in tokens)
+    artist_hits = sum(_query_token_matches(token, artist_words) for token in tokens)
+    total = max(1, len(tokens))
+    title_coverage = title_hits / total
+    artist_coverage = artist_hits / total
+    overall_coverage = sum(
+        _query_token_matches(token, title_words | artist_words) for token in tokens
+    ) / total
+
+    # В режиме «По трекам» также можно искать по имени одного исполнителя.
+    if len(tokens) == 1:
+        return title_hits > 0 or artist_hits > 0
+
+    if title_coverage >= 0.5:
+        return True
+    if artist_coverage >= 0.8:
+        return True
+    return overall_coverage >= 0.8 and title_coverage >= 0.25
+
+
+def dedupe_ranked_titles(scored_tracks):
+    """Оставляет лучший результат для повторяющегося многословного названия."""
+    result = []
+    seen_titles = set()
+    for score, track in scored_tracks:
+        title = norm_text(track.get("title"))
+        # Однословные названия слишком часто совпадают у разных песен.
+        if len(title.split()) >= 2:
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
+        result.append((score, track))
+    return result
+
+
 def dedupe_tracks(tracks):
     seen = set()
     out = []
@@ -2176,8 +2235,8 @@ def _sc_flat_search(query, count):
     return tracks
 
 
-def soundcloud_search(query, count=30):
-    """Объединяет SoundCloud, Audius и Internet Archive, затем ранжирует совпадения."""
+def soundcloud_search(query, count=30, search_type="track"):
+    """Объединяет источники и ранжирует выдачу; для треков фильтрует слабые совпадения."""
     query = " ".join((query or "").split())
     if not query:
         return []
@@ -2205,7 +2264,39 @@ def soundcloud_search(query, count=30):
     scored = score_tracks(merged, queries)
     if not scored and errors:
         raise RuntimeError("Поиск не удался ни в SoundCloud, ни в Audius, ни в Internet Archive") from errors[0]
+
+    if str(search_type).lower() != "author":
+        scored = [
+            (score, track) for score, track in scored
+            if _track_matches_track_query(track, query)
+        ]
+        scored = dedupe_ranked_titles(scored)
+
     return [track for _, track in scored]
+
+
+def cached_soundcloud_search(query, count=30, search_type="track"):
+    """Общий TTL-кэш для поиска в чате, inline-режиме и Mini App."""
+    normalized_query = norm_text(query)
+    count = max(1, min(100, int(count)))
+    search_type = "author" if str(search_type).lower() == "author" else "track"
+    cache_key = (normalized_query, count, search_type)
+    now = time.time()
+
+    with search_cache_lock:
+        cached = search_results_cache.get(cache_key)
+        if cached and now - cached[0] < SEARCH_CACHE_TTL:
+            return cached[1]
+        if cached:
+            search_results_cache.pop(cache_key, None)
+
+    tracks = soundcloud_search(query, count, search_type=search_type)
+    with search_cache_lock:
+        search_results_cache[cache_key] = (time.time(), tracks)
+        while len(search_results_cache) > 100:
+            oldest_key = min(search_results_cache, key=lambda key: search_results_cache[key][0])
+            search_results_cache.pop(oldest_key, None)
+    return tracks
 
 
 def store_tracks(tracks):
@@ -2243,7 +2334,7 @@ def inline_query(query):
 
     def worker():
         try:
-            tracks = soundcloud_search(search_text, 20)[:10]
+            tracks = cached_soundcloud_search(search_text, 20, "track")[:10]
 
             inline_tracks_cache[query.from_user.id] = tracks
             if len(inline_tracks_cache) > 500:
@@ -2590,28 +2681,10 @@ def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filt
             user_limit = int((user_settings.get(str(user_id)) or {}).get("search_limit", 10))
             effective_limit = max(5, min(max_possible, user_limit))
 
-            limit_ydl = 50 if is_random else max(20, effective_limit * page)
-            normalized_query = " ".join(query.casefold().split())
-            cache_key = (normalized_query, limit_ydl)
-            now = time.time()
-
-            with search_cache_lock:
-                cached = search_results_cache.get(cache_key)
-                if cached and now - cached[0] < SEARCH_CACHE_TTL:
-                    all_tracks = cached[1]
-                else:
-                    if cached:
-                        search_results_cache.pop(cache_key, None)
-                    all_tracks = None
-
-            if all_tracks is None:
-                all_tracks = soundcloud_search(query, max(30, limit_ydl))
-
-                with search_cache_lock:
-                    search_results_cache[cache_key] = (time.time(), all_tracks)
-                    if len(search_results_cache) > 100:
-                        oldest_key = min(search_results_cache, key=lambda key: search_results_cache[key][0])
-                        search_results_cache.pop(oldest_key, None)
+            # На первой странице используем тот же размер выдачи, что и Mini App.
+            # Для следующих страниц увеличиваем выборку, чтобы работала пагинация.
+            limit_ydl = 50 if is_random else min(100, max(30, effective_limit * max(2, page)))
+            all_tracks = cached_soundcloud_search(query, limit_ydl, "track")
 
             if is_random:
                 if len(all_tracks) >= effective_limit:
@@ -3140,8 +3213,8 @@ def handle_miniapp_search(handler, query_params):
     limit = max(5, min(max_possible, int(settings.get("search_limit", 10))))
 
     try:
-        fetch_count = min(100, max(30, limit * 3) if search_type == 'author' else max(30, limit * 2))
-        tracks = soundcloud_search(query, fetch_count)
+        fetch_count = min(100, max(30, limit * 3) if search_type == "author" else max(30, limit * 2))
+        tracks = cached_soundcloud_search(query, fetch_count, search_type)
 
         if search_type == "author":
             q_low = query.lower()
