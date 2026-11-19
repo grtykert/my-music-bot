@@ -542,7 +542,40 @@
         image.src = url;
       }
 
+      let playerStreamRejected = false;
+
+      function validatePlayerDuration() {
+        const track = state.nowPlaying;
+        const expected = Number(track && track.duration);
+        const actual = Number(audioPlayer.duration);
+        if (!track || !Number.isFinite(expected) || expected <= 0 ||
+            !Number.isFinite(actual) || actual <= 0) return true;
+
+        const allowedDifference = Math.max(12, expected * 0.20);
+        const difference = Math.abs(actual - expected);
+        if (difference <= allowedDifference) return true;
+        if (playerStreamRejected) return false;
+
+        playerStreamRejected = true;
+        audioPlayer.pause();
+        audioPlayer.removeAttribute('src');
+        audioPlayer.load();
+        playerToggle.textContent = '▶';
+        playerSeek.disabled = true;
+        playerSeek.value = '0';
+        playerSeek.style.setProperty('--seek-progress', '0%');
+        $('playerCurrentTime').textContent = '0:00';
+        $('playerDuration').textContent = formatClock(expected);
+        $('playerStatus').textContent = 'Ошибка: длительность аудио не совпадает';
+        notify(`Воспроизведение остановлено: карточка ${formatClock(expected)}, аудио ${formatClock(actual)}.`);
+        console.error('Отклонён аудиопоток с неподходящей длительностью', {
+          title: track.title, artist: track.uploader, expected, actual
+        });
+        return false;
+      }
+
       function updatePlayerControls() {
+        if (playerStreamRejected) return;
         playerToggle.textContent = audioPlayer.paused ? '▶' : 'Ⅱ';
         playerToggle.setAttribute('aria-label', audioPlayer.paused ? 'Воспроизвести' : 'Пауза');
         const duration = Number.isFinite(audioPlayer.duration) ? audioPlayer.duration : 0;
@@ -556,7 +589,19 @@
       }
 
       function streamUrl(track) {
-        return `/api/stream?url=${encodeURIComponent(track.url)}&auth=${encodeURIComponent(initData)}`;
+        const params = new URLSearchParams({
+          url: track.url || '',
+          title: track.title || '',
+          artist: track.uploader || track.artist || '',
+          duration: track.duration ? String(track.duration) : '',
+          source: track.source || '',
+          audius_id: track.audius_id || '',
+          ia_identifier: track.ia_identifier || '',
+          ia_file_name: track.ia_file_name || '',
+          license_url: track.license_url || '',
+          auth: initData
+        });
+        return `/api/stream?${params.toString()}`;
       }
 
       const preloadedUrls = new Set();
@@ -590,10 +635,12 @@
           if (audioPlayer.paused) {
             try {
               await audioPlayer.play();
+              if (playerStreamRejected) return;
               $('playerStatus').textContent = 'Сейчас играет';
             } catch (error) {
+              if (playerStreamRejected) return;
               $('playerStatus').textContent = 'Не удалось запустить аудио';
-              notify('Не удалось запустить аудио. Попробуй ещё раз.');
+              notify('Не удалось запустить выбранный трек. Попробуй ещё раз.');
             }
           } else {
             audioPlayer.pause();
@@ -604,6 +651,7 @@
         }
 
         state.nowPlaying = track;
+        playerStreamRejected = false;
         $('playerTrackTitle').textContent = `${track.title || 'Без названия'} — ${track.uploader || 'Неизвестен'}`;
         $('playerStatus').textContent = 'Подключаю аудио…';
         setPlayerCover(track.thumbnail);
@@ -617,12 +665,14 @@
         if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
         try {
           await audioPlayer.play();
+          if (playerStreamRejected) return;
           $('playerStatus').textContent = 'Сейчас играет';
           setTimeout(preloadSurroundingTracks, 300);
         } catch (error) {
+          if (playerStreamRejected) return;
           console.error('Ошибка запуска аудио:', error);
-          $('playerStatus').textContent = 'Нажми ▶, чтобы начать';
-          notify('Не удалось запустить аудио. Проверь соединение и попробуй ещё раз.');
+          $('playerStatus').textContent = 'Не удалось запустить аудио';
+          notify('Не удалось запустить выбранный трек. Проверь соединение и попробуй ещё раз.');
         }
         updatePlayerControls();
       }
@@ -673,17 +723,20 @@
         document.body.classList.remove('has-player');
         state.nowPlaying = null;
         state.queueSource = null;
+        playerStreamRejected = false;
       }
 
       playerToggle.addEventListener('click', async () => {
-        if (!state.nowPlaying) return;
+        if (!state.nowPlaying || playerStreamRejected) return;
         if (audioPlayer.paused) {
           try {
             await audioPlayer.play();
+            if (playerStreamRejected) return;
             $('playerStatus').textContent = 'Сейчас играет';
           } catch (error) {
+            if (playerStreamRejected) return;
             $('playerStatus').textContent = 'Не удалось запустить аудио';
-            notify('Не удалось запустить аудио.');
+            notify('Не удалось запустить выбранный трек.');
           }
         } else {
           audioPlayer.pause();
@@ -701,9 +754,18 @@
         if (duration) audioPlayer.currentTime = (Number(playerSeek.value) / 1000) * duration;
       });
       audioPlayer.addEventListener('timeupdate', updatePlayerControls);
-      audioPlayer.addEventListener('loadedmetadata', updatePlayerControls);
-      audioPlayer.addEventListener('durationchange', updatePlayerControls);
-      audioPlayer.addEventListener('play', updatePlayerControls);
+      audioPlayer.addEventListener('loadedmetadata', () => {
+        if (!validatePlayerDuration()) return;
+        updatePlayerControls();
+      });
+      audioPlayer.addEventListener('durationchange', () => {
+        if (!validatePlayerDuration()) return;
+        updatePlayerControls();
+      });
+      audioPlayer.addEventListener('play', () => {
+        if (!validatePlayerDuration()) return;
+        updatePlayerControls();
+      });
       audioPlayer.addEventListener('pause', updatePlayerControls);
       audioPlayer.addEventListener('ended', () => {
         $('playerStatus').textContent = 'Трек завершён';
@@ -711,9 +773,9 @@
         playNextTrack();
       });
       audioPlayer.addEventListener('error', () => {
-        if (!state.nowPlaying) return;
+        if (!state.nowPlaying || playerStreamRejected) return;
         $('playerStatus').textContent = 'Ошибка загрузки аудио';
-        notify('Не удалось загрузить аудио этого трека.');
+        notify('Не удалось загрузить именно этот трек. Другой трек автоматически не подставлялся.');
       });
 
       $('playerNext').addEventListener('click', () => {
