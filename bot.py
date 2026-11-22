@@ -519,9 +519,10 @@ def apply_audio_effect(input_filename, effect):
 #              ЕДИНАЯ ЗАГРУЗКА АУДИО (с запасными вариантами)
 # ============================================================
 def ydl_download_audio(track_url, outtmpl):
-    """Пробует несколько конфигураций yt-dlp. Возвращает (info, путь к файлу)."""
+    """Скачивает SoundCloud только через официальный формат download, без подмены стримом."""
     base = {
-        "format": "bestaudio[protocol^=http]/bestaudio/best",  # сначала прямой mp3, потом HLS
+        # У yt-dlp этот формат появляется только если SoundCloud отдал оригинальный download.
+        "format": "download",
         "outtmpl": outtmpl,
         "writethumbnail": True,
         "quiet": True,
@@ -540,7 +541,8 @@ def ydl_download_audio(track_url, outtmpl):
         {**base, "postprocessors": [
             {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
         ]},
-        {**base, "writethumbnail": False, "format": "bestaudio/best"},
+        # Без обработки обложки, но всё ещё только официальный download.
+        {**base, "writethumbnail": False},
     ]
     last_error = None
     for opts in attempts:
@@ -553,8 +555,8 @@ def ydl_download_audio(track_url, outtmpl):
                 raise RuntimeError("Файл после загрузки не найден")
         except Exception as e:
             last_error = e
-            print(f"Попытка загрузки не удалась ({track_url}): {e!r}")
-    raise last_error
+            print(f"Попытка официального скачивания SoundCloud не удалась ({track_url}): {e!r}")
+    raise last_error or RuntimeError("SoundCloud не предоставил официальный файл для скачивания")
 
 
 def prepare_track_file(track_url, workdir, effect="none"):
@@ -1184,46 +1186,47 @@ def _has_unrequested_version_tag(track, query):
 
 
 def _track_matches_track_query(track, query):
-    """Оставляет результаты с совпадающими значимыми словами, а не общими фразами."""
-    tokens = _query_tokens(query)
-    if not tokens:
-        return True
-
-    # Не позволяем словам вроде «I / go / to / the» выдавать посторонние песни.
-    significant = [token for token in tokens if token not in GENERIC_SEARCH_TOKENS]
-    if not significant:
-        significant = tokens
-
+    """Проверяет запрос по оригиналу и вариантам транслитерации/раскладки."""
+    candidates = [query] + query_variants(query)
     title_words = set(norm_text(track.get("title")).split())
     artist_words = set(norm_text(track.get("uploader")).split())
     all_words = title_words | artist_words
 
-    matched_significant = sum(
-        _query_token_matches(token, all_words) for token in significant
-    )
-    required_matches = max(1, int(len(significant) * 0.8 + 0.999999))
-    if matched_significant < required_matches:
-        return False
+    for candidate_query in candidates:
+        tokens = _query_tokens(candidate_query)
+        if not tokens:
+            return True
+        significant = [token for token in tokens if token not in GENERIC_SEARCH_TOKENS]
+        if not significant:
+            significant = tokens
 
-    # Если пользователь явно не искал remix/bass boost/slowed и т.п.,
-    # не показываем такую модификацию вместо оригинала.
-    if _has_unrequested_version_tag(track, query):
-        return False
+        matched = sum(_query_token_matches(token, all_words) for token in significant)
+        required = max(1, int(len(significant) * 0.8 + 0.999999))
+        if matched < required:
+            continue
 
-    return True
+        # При запросе из нескольких слов хотя бы одно смысловое слово должно
+        # совпасть с названием композиции, а не только с именем автора.
+        title_matches = sum(_query_token_matches(token, title_words) for token in significant)
+        if len(significant) > 1 and title_matches == 0:
+            continue
+
+        # Не показываем незаказанный remix/slowed/nightcore вместо оригинала.
+        if _has_unrequested_version_tag(track, candidate_query):
+            continue
+        return True
+    return False
 
 
 def dedupe_ranked_titles(scored_tracks):
-    """Оставляет лучший результат для повторяющегося многословного названия."""
+    """Удаляет дубли одной композиции, но не смешивает треки разных исполнителей."""
     result = []
-    seen_titles = set()
+    seen = set()
     for score, track in scored_tracks:
-        title = norm_text(track.get("title"))
-        # Однословные названия слишком часто совпадают у разных песен.
-        if len(title.split()) >= 2:
-            if title in seen_titles:
-                continue
-            seen_titles.add(title)
+        key = (norm_text(track.get("title")), norm_text(track.get("uploader")))
+        if key in seen:
+            continue
+        seen.add(key)
         result.append((score, track))
     return result
 
@@ -1247,30 +1250,64 @@ def _looks_like_wrong_layout(q):
     return bool(words) and all(not re.search(r"[aeiouy]", w) for w in words)
 
 
+def _latin_to_cyrillic(text):
+    """Практичная транслитерация для запросов вроде Miyagi / Zivert."""
+    value = str(text or "").lower()
+    replacements = (
+        ("shch", "щ"), ("sch", "щ"), ("yo", "ё"), ("zh", "ж"),
+        ("kh", "х"), ("ts", "ц"), ("ch", "ч"), ("sh", "ш"),
+        ("yu", "ю"), ("ya", "я"), ("ye", "е"),
+        ("a", "а"), ("b", "б"), ("v", "в"), ("g", "г"),
+        ("d", "д"), ("e", "е"), ("z", "з"), ("i", "и"),
+        ("y", "й"), ("k", "к"), ("l", "л"), ("m", "м"),
+        ("n", "н"), ("o", "о"), ("p", "п"), ("r", "р"),
+        ("s", "с"), ("t", "т"), ("u", "у"), ("f", "ф"),
+        ("h", "х"), ("c", "к"), ("w", "в"), ("x", "кс"), ("q", "к"),
+    )
+    result = []
+    index = 0
+    while index < len(value):
+        matched = False
+        for source, target in replacements:
+            if value.startswith(source, index):
+                result.append(target)
+                index += len(source)
+                matched = True
+                break
+        if not matched:
+            result.append(value[index])
+            index += 1
+    return "".join(result)
+
+
 def query_variants(query):
-    # Запасные формулировки запроса, если обычный поиск дал слабый результат.
-    q = query.strip()
+    """Дополнительные запросы: транслитерация, раскладка, очищенный запрос и порядок артист/трек."""
+    q = str(query or "").strip()
     out = []
 
-    def add(v):
-        v = " ".join((v or "").split())
-        if v and v.casefold() != q.casefold() and v.casefold() not in [x.casefold() for x in out]:
-            out.append(v)
+    def add(value):
+        value = " ".join((value or "").split())
+        if value and value.casefold() != q.casefold() and value.casefold() not in [x.casefold() for x in out]:
+            out.append(value)
 
     if re.search(r"[а-яА-ЯёЁ]", q):
         add("".join(_TRANSLIT.get(ch, ch) for ch in q.lower()))
-    elif re.search(r"[a-zA-Z]", q) and _looks_like_wrong_layout(q):
-        add(q.lower().translate(EN2RU))
+    elif re.search(r"[a-zA-Z]", q):
+        if _looks_like_wrong_layout(q):
+            add(q.lower().translate(EN2RU))
+        # Помогает найти кириллические названия по латинской записи.
+        add(_latin_to_cyrillic(q))
 
-    cleaned = re.sub(r"[\(\[][^\)\]]*[\)\]]", " ", q)
+    cleaned = re.sub(r"[\(\[].*?[\)\]]", " ", q)
     cleaned = " ".join(w for w in cleaned.split() if w.casefold().strip(".,") not in NOISE_TOKENS)
     add(cleaned)
 
-    if " - " in q:
-        left, right = q.split(" - ", 1)
+    pair = re.split(r"\s+(?:-|–|—|\|)\s+", q, maxsplit=1)
+    if len(pair) == 2:
+        left, right = pair
         add(f"{left} {right}")
         add(f"{right} {left}")
-    return out[:3]
+    return out[:4]
 
 
 
@@ -2261,44 +2298,163 @@ def _sc_flat_search(query, count):
     return tracks
 
 
+def _phrase_match_score(target, candidate):
+    from difflib import SequenceMatcher
+
+    target_norm = norm_text(target)
+    candidate_norm = norm_text(candidate)
+    if not target_norm or not candidate_norm:
+        return 0.0
+    if target_norm == candidate_norm:
+        return 100.0
+    if target_norm in candidate_norm or candidate_norm in target_norm:
+        shorter = min(len(target_norm), len(candidate_norm))
+        longer = max(len(target_norm), len(candidate_norm))
+        return 88.0 + 12.0 * shorter / max(1, longer)
+    target_tokens = _query_tokens(target_norm)
+    candidate_words = set(candidate_norm.split())
+    coverage = sum(_query_token_matches(token, candidate_words) for token in target_tokens) / max(1, len(target_tokens))
+    return SequenceMatcher(None, target_norm, candidate_norm).ratio() * 70.0 + coverage * 30.0
+
+
+def _candidate_artist_title(track):
+    artist_from_title, clean_title = split_artist_title(
+        str(track.get("title") or ""), str(track.get("uploader") or "")
+    )
+    artist_names = []
+    for value in (track.get("uploader"), artist_from_title):
+        value = str(value or "").strip()
+        if value and norm_text(value) not in {norm_text(x) for x in artist_names}:
+            artist_names.append(value)
+    title = clean_title or str(track.get("title") or "")
+    return artist_names, title
+
+
+def _search_relevance_score(track, query, search_type="track"):
+    artist_names, candidate_title = _candidate_artist_title(track)
+    if str(search_type).lower() == "author":
+        return max((_phrase_match_score(query, name) for name in artist_names), default=0.0)
+
+    # Формат «исполнитель - название»: сравниваем обе части раздельно.
+    parts = re.split(r"\s+(?:-|–|—|\|)\s+", str(query or "").strip(), maxsplit=1)
+    if len(parts) == 2:
+        left, right = parts
+        artist_score = max((_phrase_match_score(left, name) for name in artist_names), default=0.0)
+        title_score = _phrase_match_score(right, candidate_title)
+        forward = title_score * 0.72 + artist_score * 0.28
+
+        reverse_artist_score = max((_phrase_match_score(right, name) for name in artist_names), default=0.0)
+        reverse_title_score = _phrase_match_score(left, candidate_title)
+        reverse = reverse_title_score * 0.72 + reverse_artist_score * 0.28
+        return max(forward, reverse)
+
+    query_tokens = _query_tokens(query)
+    if not query_tokens:
+        return 0.0
+    title_words = set(norm_text(candidate_title).split())
+    artist_words = set(" ".join(artist_names).split())
+    all_words = title_words | artist_words
+    title_coverage = sum(_query_token_matches(token, title_words) for token in query_tokens) / len(query_tokens)
+    combined_coverage = sum(_query_token_matches(token, all_words) for token in query_tokens) / len(query_tokens)
+    title_phrase = _phrase_match_score(query, candidate_title)
+    combined_phrase = _phrase_match_score(query, " ".join(artist_names + [candidate_title]))
+    return combined_coverage * 42.0 + title_coverage * 32.0 + title_phrase * 0.18 + combined_phrase * 0.08
+
+
+def _rank_search_candidates(entries, query, queries, search_type="track"):
+    ranked = []
+    for track in entries or []:
+        if not isinstance(track, dict):
+            continue
+        if str(search_type).lower() != "author" and not _track_matches_track_query(track, query):
+            continue
+
+        score = 0.0
+        for index, candidate_query in enumerate(queries):
+            weight = 1.0 if index == 0 else 0.84
+            score = max(score, _search_relevance_score(track, candidate_query, search_type) * weight)
+
+        threshold = 42.0 if str(search_type).lower() == "author" else 48.0
+        if score < threshold:
+            continue
+        if str(track.get("source") or "soundcloud") == "soundcloud":
+            score += 2.0
+
+        try:
+            duration = float(track.get("duration")) if track.get("duration") is not None else None
+        except (TypeError, ValueError):
+            duration = None
+        if duration and (duration < 45 or duration > 1200):
+            score -= 8.0
+        ranked.append((score, track))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return dedupe_ranked_titles(ranked) if str(search_type).lower() != "author" else ranked
+
+
 def soundcloud_search(query, count=30, search_type="track"):
-    """Объединяет источники и ранжирует выдачу; для треков фильтрует слабые совпадения."""
+    """Сначала ищет в SoundCloud; Audius и Archive используются только как резерв."""
     query = " ".join((query or "").split())
     if not query:
         return []
 
-    variants = query_variants(query)
-    queries = [query] + variants
-    raw_tracks = []
+    count = max(1, min(100, int(count)))
+    queries = [query] + query_variants(query)
+    soundcloud_raw = []
     errors = []
-    jobs = []
-    with ThreadPoolExecutor(max_workers=min(10, len(queries) * 2 + 3)) as pool:
-        for value in queries:
-            jobs.append((value, "soundcloud", pool.submit(_sc_flat_search, value, count)))
-        for value in queries[:3]:
-            jobs.append((value, "audius", pool.submit(_audius_flat_search, value, min(count, 50), True)))
-        # Internet Archive ищем по исходной фразе, чтобы не перегружать API.
-        jobs.append((queries[0], "internet_archive", pool.submit(_internet_archive_flat_search, queries[0], min(count, 15))))
-        for value, source_name, future in jobs:
+
+    with ThreadPoolExecutor(max_workers=min(8, len(queries))) as pool:
+        jobs = [(value, pool.submit(_sc_flat_search, value, count)) for value in queries]
+        for value, future in jobs:
             try:
-                raw_tracks.extend(future.result() or [])
-            except Exception as e:
-                errors.append(e)
-                print(f"Поиск {source_name} по запросу «{value}» не удался: {e!r}")
+                soundcloud_raw.extend(future.result() or [])
+            except Exception as exc:
+                errors.append(exc)
+                print(f"SoundCloud: поиск по «{value}» не удался: {exc!r}")
 
-    merged = dedupe_tracks(raw_tracks)
-    scored = score_tracks(merged, queries)
-    if not scored and errors:
-        raise RuntimeError("Поиск не удался ни в SoundCloud, ни в Audius, ни в Internet Archive") from errors[0]
+    soundcloud_candidates = dedupe_tracks(soundcloud_raw)
+    ranked_soundcloud = _rank_search_candidates(soundcloud_candidates, query, queries, search_type)
 
-    if str(search_type).lower() != "author":
-        scored = [
-            (score, track) for score, track in scored
-            if _track_matches_track_query(track, query)
-        ]
-        scored = dedupe_ranked_titles(scored)
+    # Подтверждаем наличие именно оригинального download, не просто stream/preview.
+    max_checks = min(80, max(24, count * 2))
+    soundcloud_tracks = verify_soundcloud_download_candidates(
+        [track for _, track in ranked_soundcloud[:max_checks]]
+    )
+    soundcloud_tracks = [
+        track for _, track in _rank_search_candidates(soundcloud_tracks, query, queries, search_type)
+    ]
 
-    return [track for _, track in scored]
+    # Резервный поиск запускается, только если скачиваемых SoundCloud-результатов мало.
+    backup_tracks = []
+    if len(soundcloud_tracks) < count:
+        backup_queries = queries[:min(3, len(queries))]
+        backup_jobs = []
+        with ThreadPoolExecutor(max_workers=min(5, len(backup_queries) + 1)) as pool:
+            for value in backup_queries:
+                backup_jobs.append(("Audius", value, pool.submit(
+                    _audius_flat_search, value, min(count, 50), True
+                )))
+            backup_jobs.append(("Internet Archive", query, pool.submit(
+                _internet_archive_flat_search, query, min(count, 15)
+            )))
+            for source_name, value, future in backup_jobs:
+                try:
+                    backup_tracks.extend(future.result() or [])
+                except Exception as exc:
+                    errors.append(exc)
+                    print(f"{source_name}: резервный поиск по «{value}» не удался: {exc!r}")
+
+    backup_tracks = dedupe_tracks(backup_tracks)
+    ranked_backup = _rank_search_candidates(backup_tracks, query, queries, search_type)
+    backup_tracks = [track for _, track in ranked_backup]
+
+    # Сначала сохраняем SoundCloud, затем добавляем резервные доступные совпадения.
+    merged = dedupe_tracks(soundcloud_tracks + backup_tracks)
+    ranked_final = _rank_search_candidates(merged, query, queries, search_type)
+
+    if not ranked_final and errors:
+        print(f"Поиск завершился без результатов; последняя ошибка: {errors[-1]!r}")
+    return [track for _, track in ranked_final]
 
 
 def cached_soundcloud_search(query, count=30, search_type="track"):
@@ -2863,9 +3019,27 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None, 
         count_download()
 
     try:
-        # Кэш выбранного результата проверяем первым, как и раньше.
+        # Старый Telegram file_id не доказывает, что источник всё ещё разрешает скачивание.
+        # Перед повторной отправкой кэшированного аудио заново проверяем права источника.
         cached_file_id = audio_cache.get(track_url)
-        if effect == "none" and cached_file_id and not str(cached_file_id).startswith("http"):
+        cached_download_allowed = False
+        if cached_file_id and not str(cached_file_id).startswith("http"):
+            source = str(track.get("source") or "soundcloud").lower()
+            try:
+                if source == "soundcloud":
+                    cached_download_allowed, _ = check_soundcloud_download_permission(track)
+                elif source == "audius":
+                    raw = _get_audius_track_details(track.get("audius_id"))
+                    cached_download_allowed = audius_track_allowed(raw, require_download=True)
+                elif source == "internet_archive":
+                    identifier = str(track.get("ia_identifier") or "").strip()
+                    raw = internet_archive_metadata(identifier, use_cache=False) if identifier else {}
+                    cached_download_allowed = internet_archive_candidate(identifier, raw) is not None
+            except Exception as e:
+                print(f"Не удалось повторно проверить разрешение для кэшированного трека: {e!r}")
+                cached_download_allowed = False
+
+        if effect == "none" and cached_file_id and cached_download_allowed:
             try:
                 bot.send_audio(chat_id, cached_file_id, title=title, performer=uploader)
                 finish_ok(title, uploader, delivered_track=track)
@@ -2873,6 +3047,8 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None, 
             except Exception as e:
                 print(f"file_id из кэша не сработал, качаем заново: {e}")
                 audio_cache.pop(track_url, None)
+        elif cached_file_id and not cached_download_allowed:
+            audio_cache.pop(track_url, None)
 
         with download_slots:
             workdir = tempfile.mkdtemp(prefix="trk_")
@@ -3140,6 +3316,113 @@ def resolve_soundcloud_metadata(track_url):
     with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(track_url, download=False)
     return info or {}
+
+
+SOUNDCLOUD_DOWNLOAD_CACHE_TTL = 900
+SOUNDCLOUD_DENIED_CACHE_TTL = 180
+soundcloud_download_check_cache = {}
+soundcloud_download_check_lock = threading.Lock()
+
+
+def soundcloud_has_official_download(info):
+    """True только если SoundCloud/yt-dlp подтвердил оригинальный формат download."""
+    if not isinstance(info, dict):
+        return False
+    if info.get("downloadable") is False or str(info.get("policy") or "").upper() == "BLOCK":
+        return False
+
+    availability = str(info.get("availability") or "").casefold()
+    if availability in {
+        "blocked", "private", "premium_only", "subscriber_only",
+        "needs_auth", "geo_blocked", "unavailable",
+    }:
+        return False
+
+    for item in info.get("formats") or []:
+        if not isinstance(item, dict) or str(item.get("format_id") or "").casefold() != "download":
+            continue
+        if "preview" in str(item.get("format_note") or "").casefold():
+            continue
+        media_url = str(item.get("url") or "").strip()
+        parsed = urlparse(media_url)
+        if parsed.scheme in ("http", "https") and parsed.hostname:
+            return True
+    return False
+
+
+def check_soundcloud_download_permission(track):
+    """Проверяет разрешённую опцию скачивания и кэширует ответ."""
+    track_url = str((track or {}).get("url") or "").strip()
+    if not track_url:
+        return False, {}
+
+    now = time.time()
+    with soundcloud_download_check_lock:
+        cached = soundcloud_download_check_cache.get(track_url)
+        if cached:
+            checked_at, allowed, details = cached
+            ttl = SOUNDCLOUD_DOWNLOAD_CACHE_TTL if allowed else SOUNDCLOUD_DENIED_CACHE_TTL
+            if now - checked_at < ttl:
+                return allowed, dict(details)
+            soundcloud_download_check_cache.pop(track_url, None)
+
+    allowed = False
+    details = {}
+    failed = False
+    try:
+        info = resolve_soundcloud_metadata(track_url)
+        allowed = soundcloud_has_official_download(info)
+        if allowed:
+            details = {
+                "title": str(info.get("title") or "")[:180],
+                "uploader": str(info.get("uploader") or info.get("artist") or "")[:120],
+                "thumbnail": best_soundcloud_thumbnail(info),
+            }
+            try:
+                details["duration"] = int(float(info.get("duration"))) if info.get("duration") else None
+            except (TypeError, ValueError):
+                details["duration"] = None
+    except Exception as exc:
+        failed = True
+        print(f"SoundCloud: не удалось проверить скачивание «{track_url}»: {exc!r}")
+
+    ttl = 45 if failed else (SOUNDCLOUD_DOWNLOAD_CACHE_TTL if allowed else SOUNDCLOUD_DENIED_CACHE_TTL)
+    with soundcloud_download_check_lock:
+        soundcloud_download_check_cache[track_url] = (now, allowed, dict(details))
+        if len(soundcloud_download_check_cache) > 2000:
+            oldest = min(soundcloud_download_check_cache, key=lambda key: soundcloud_download_check_cache[key][0])
+            soundcloud_download_check_cache.pop(oldest, None)
+    return allowed, details
+
+
+def verify_soundcloud_download_candidates(tracks):
+    """Оставляет только карточки с подтверждённым оригинальным SoundCloud download."""
+    candidates = [track for track in (tracks or []) if isinstance(track, dict) and track.get("url")]
+    if not candidates:
+        return []
+
+    verified_by_url = {}
+    with ThreadPoolExecutor(max_workers=min(6, len(candidates))) as pool:
+        jobs = {pool.submit(check_soundcloud_download_permission, track): track for track in candidates}
+        for future in as_completed(jobs):
+            original = jobs[future]
+            try:
+                allowed, details = future.result()
+            except Exception as exc:
+                print(f"SoundCloud: проверка карточки не удалась: {exc!r}")
+                continue
+            if not allowed:
+                continue
+
+            enriched = dict(original)
+            for key in ("title", "uploader", "thumbnail", "duration"):
+                if details.get(key) not in (None, ""):
+                    enriched[key] = details[key]
+            enriched["source"] = "soundcloud"
+            enriched["sc_downloadable"] = True
+            verified_by_url[original["url"]] = enriched
+
+    return [verified_by_url[track["url"]] for track in candidates if track["url"] in verified_by_url]
 
 
 def fill_missing_track_covers(tracks, max_items=12):
