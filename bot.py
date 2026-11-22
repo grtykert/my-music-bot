@@ -1185,14 +1185,65 @@ def _has_unrequested_version_tag(track, query):
     return False
 
 
+def _query_artist_title_splits(query):
+    """Предлагает варианты разделения запроса на исполнителя и название."""
+    value = " ".join(str(query or "").split())
+    if not value:
+        return []
+    separated = re.split(r"\s+(?:-|–|—|\|)\s+", value, maxsplit=1)
+    if len(separated) == 2:
+        left, right = separated
+        return [(left, right), (right, left)]
+
+    words = value.split()
+    if len(words) < 2:
+        return []
+    # Пользователь часто пишет «исполнитель название» без тире.
+    return [(" ".join(words[:index]), " ".join(words[index:])) for index in range(1, len(words))]
+
+
 def _track_matches_track_query(track, query):
-    """Проверяет запрос по оригиналу и вариантам транслитерации/раскладки."""
+    """Проверяет название и исполнителя раздельно, включая запрос без тире."""
     candidates = [query] + query_variants(query)
-    title_words = set(norm_text(track.get("title")).split())
-    artist_words = set(norm_text(track.get("uploader")).split())
+    artist_names, candidate_title = _candidate_artist_title(track)
+    title_words = set(norm_text(candidate_title).split())
+    artist_words = set(" ".join(artist_names).split())
     all_words = title_words | artist_words
 
     for candidate_query in candidates:
+        if _has_unrequested_version_tag(track, candidate_query):
+            continue
+
+        query_norm = norm_text(candidate_query)
+        title_norm = norm_text(candidate_title)
+        # Если пользователь явно запросил версию (remix/slowed и т. п.),
+        # не подменяем её оригиналом без соответствующей отметки в названии.
+        requested_tags = [
+            norm_text(tag) for tag in UNREQUESTED_VERSION_TAGS
+            if f" {norm_text(tag)} " in f" {query_norm} "
+        ]
+        if any(tag not in f" {title_norm} " for tag in requested_tags):
+            continue
+
+        # Прямое совпадение по названию. Не считаем совпадением ситуацию,
+        # когда короткое название просто является частью более длинного запроса
+        # с другим исполнителем.
+        if query_norm == title_norm:
+            return True
+        if query_norm and query_norm in title_norm and len(query_norm) / max(1, len(title_norm)) >= 0.72:
+            return True
+
+        # Перебираем возможные разрезы для запросов без разделителя:
+        # «Artist Song Name», «Song Name Artist» и т. п.
+        for artist_query, title_query in _query_artist_title_splits(candidate_query):
+            artist_score = max(
+                (_phrase_match_score(artist_query, name) for name in artist_names),
+                default=0.0,
+            )
+            title_score = _phrase_match_score(title_query, candidate_title)
+            if title_score >= 72 and artist_score >= 62:
+                return True
+
         tokens = _query_tokens(candidate_query)
         if not tokens:
             return True
@@ -1205,15 +1256,13 @@ def _track_matches_track_query(track, query):
         if matched < required:
             continue
 
-        # При запросе из нескольких слов хотя бы одно смысловое слово должно
-        # совпасть с названием композиции, а не только с именем автора.
         title_matches = sum(_query_token_matches(token, title_words) for token in significant)
         if len(significant) > 1 and title_matches == 0:
-            continue
-
-        # Не показываем незаказанный remix/slowed/nightcore вместо оригинала.
-        if _has_unrequested_version_tag(track, candidate_query):
-            continue
+            # Допускаем совпадение по исполнителю, только когда название
+            # само по себе уверенно совпало с одной из частей запроса.
+            if not any(_phrase_match_score(part, candidate_title) >= 72
+                       for pair in _query_artist_title_splits(candidate_query) for part in pair):
+                continue
         return True
     return False
 
@@ -1372,25 +1421,70 @@ def audius_artwork_url(item):
     return url[:1000] if parsed.scheme == "https" and parsed.hostname else ""
 
 
+def _audius_flag(item, *names):
+    """Читает bool-флаги Audius в старом snake_case и новом camelCase."""
+    for name in names:
+        if name in item:
+            value = item.get(name)
+            if value is None:
+                continue
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)) and value in (0, 1):
+                return bool(value)
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in ("true", "1", "yes"):
+                    return True
+                if lowered in ("false", "0", "no", ""):
+                    return False
+            return None
+    return None
+
+
+def _audius_conditions(item, *names):
+    for name in names:
+        if name in item and item.get(name) is not None:
+            return item.get(name)
+    return None
+
+
 def audius_track_allowed(item, require_download=True):
+    """Принимает только явно доступные записи; понимает разные схемы ответа Audius."""
     if not isinstance(item, dict):
         return False
-    if (item.get("is_available") is False or item.get("is_deleted") is True
-            or item.get("is_delete") is True or item.get("is_unlisted") is True):
+
+    unavailable = (
+        _audius_flag(item, "is_available", "isAvailable") is False
+        or _audius_flag(item, "is_deleted", "isDeleted", "is_delete", "isDelete") is True
+        or _audius_flag(item, "is_unlisted", "isUnlisted") is True
+    )
+    if unavailable:
         return False
-    if item.get("allowed_api_keys"):
+
+    allowed_api_keys = _audius_conditions(item, "allowed_api_keys", "allowedApiKeys")
+    if isinstance(allowed_api_keys, list) and allowed_api_keys:
+        # Ограниченные конкретными ключами записи не считаем публично доступными.
         return False
+
     if require_download:
-        # Не пытаемся скачивать то, что сам Audius не помечает доступным для загрузки.
-        if item.get("is_downloadable") is not True or item.get("is_download_gated") is True:
+        # В ответах Audius встречаются is_downloadable, isDownloadable и downloadable.
+        downloadable = _audius_flag(item, "is_downloadable", "isDownloadable", "downloadable")
+        download_gated = _audius_flag(item, "is_download_gated", "isDownloadGated")
+        conditions = _audius_conditions(item, "download_conditions", "downloadConditions")
+        if downloadable is not True or download_gated is True:
             return False
-        if item.get("download_conditions") not in (None, {}, [], ""):
+        if conditions not in (None, {}, [], ""):
             return False
     else:
-        if item.get("is_streamable") is not True or item.get("is_stream_gated") is True:
+        streamable = _audius_flag(item, "is_streamable", "isStreamable", "streamable")
+        stream_gated = _audius_flag(item, "is_stream_gated", "isStreamGated")
+        conditions = _audius_conditions(item, "stream_conditions", "streamConditions")
+        if streamable is not True or stream_gated is True:
             return False
-        if item.get("stream_conditions") not in (None, {}, [], ""):
+        if conditions not in (None, {}, [], ""):
             return False
+
     return True
 
 
@@ -1434,12 +1528,18 @@ def _audius_flat_search(query, count=30, require_download=True):
         print(f"Audius: поиск по запросу «{query}» не удался: {e!r}")
         return []
     tracks = []
+    allowed_count = 0
     for item in raw_items:
         if not audius_track_allowed(item, require_download=require_download):
             continue
+        allowed_count += 1
         candidate = audius_candidate(item)
         if candidate:
             tracks.append(candidate)
+    print(
+        f"Audius search: query={query!r}; raw={len(raw_items)}; "
+        f"allowed={allowed_count}; usable={len(tracks)}; require_download={require_download}"
+    )
     return tracks
 
 
@@ -1491,12 +1591,16 @@ def find_audius_match(track, require_download=True):
         target_duration = None
 
     ranked = []
+    allowed_count = 0
+    candidate_count = 0
     for item in raw_items:
         if not audius_track_allowed(item, require_download=require_download):
             continue
+        allowed_count += 1
         candidate = audius_candidate(item)
         if not candidate:
             continue
+        candidate_count += 1
         candidate_title = _clean_match_value(candidate["title"])
         candidate_artist = _clean_match_value(candidate["uploader"])
         title_ratio = SequenceMatcher(None, target_title, candidate_title).ratio() if target_title else 0.0
@@ -1524,9 +1628,18 @@ def find_audius_match(track, require_download=True):
         ranked.append((score, candidate))
 
     if not ranked:
+        print(
+            f"Audius fallback: title={wanted_title!r}; artist={wanted_artist!r}; "
+            f"raw={len(raw_items)}; downloadable={allowed_count}; candidates={candidate_count}; matches=0"
+        )
         return None
     ranked.sort(key=lambda pair: pair[0], reverse=True)
     best_score, best = ranked[0]
+    print(
+        f"Audius fallback: title={wanted_title!r}; artist={wanted_artist!r}; "
+        f"raw={len(raw_items)}; downloadable={allowed_count}; candidates={candidate_count}; "
+        f"matches={len(ranked)}; best_score={best_score:.1f}"
+    )
     if best_score < 70:
         return None
     return best
@@ -1846,6 +1959,7 @@ def _internet_archive_flat_search(query, count=20):
     identifiers = list(dict.fromkeys(str(doc.get("identifier") or "") for doc in docs))
     identifiers = [value for value in identifiers if re.fullmatch(r"[A-Za-z0-9._-]{1,120}", value)]
     if not identifiers:
+        print(f"Internet Archive search: query={query!r}; docs={len(docs)}; valid_ids=0; licensed_audio=0")
         return []
 
     found = []
@@ -1861,6 +1975,10 @@ def _internet_archive_flat_search(query, count=20):
         for candidate in pool.map(load_candidate, identifiers[:min(30, len(identifiers))]):
             if candidate:
                 found.append(candidate)
+    print(
+        f"Internet Archive search: query={query!r}; docs={len(docs)}; "
+        f"valid_ids={len(identifiers)}; licensed_audio={len(found)}"
+    )
     return found
 
 
@@ -1923,8 +2041,17 @@ def find_internet_archive_match(track):
         score = title_score * 100 + artist_ratio * 20 - duration_penalty
         ranked.append((score, candidate))
     if not ranked:
+        print(
+            f"Internet Archive fallback: title={wanted_title!r}; artist={wanted_artist!r}; "
+            f"licensed_candidates={len(candidates)}; matches=0"
+        )
         return None
     ranked.sort(key=lambda pair: pair[0], reverse=True)
+    print(
+        f"Internet Archive fallback: title={wanted_title!r}; artist={wanted_artist!r}; "
+        f"licensed_candidates={len(candidates)}; matches={len(ranked)}; "
+        f"best_score={ranked[0][0]:.1f}"
+    )
     return ranked[0][1] if ranked[0][0] >= 76 else None
 
 
@@ -2335,22 +2462,20 @@ def _search_relevance_score(track, query, search_type="track"):
     if str(search_type).lower() == "author":
         return max((_phrase_match_score(query, name) for name in artist_names), default=0.0)
 
-    # Формат «исполнитель - название»: сравниваем обе части раздельно.
-    parts = re.split(r"\s+(?:-|–|—|\|)\s+", str(query or "").strip(), maxsplit=1)
-    if len(parts) == 2:
-        left, right = parts
-        artist_score = max((_phrase_match_score(left, name) for name in artist_names), default=0.0)
-        title_score = _phrase_match_score(right, candidate_title)
-        forward = title_score * 0.72 + artist_score * 0.28
-
-        reverse_artist_score = max((_phrase_match_score(right, name) for name in artist_names), default=0.0)
-        reverse_title_score = _phrase_match_score(left, candidate_title)
-        reverse = reverse_title_score * 0.72 + reverse_artist_score * 0.28
-        return max(forward, reverse)
+    # Если запрос содержит исполнителя и название без тире, подбираем
+    # лучшее разделение по фактическим метаданным найденного трека.
+    split_scores = []
+    for artist_query, title_query in _query_artist_title_splits(query):
+        artist_score = max(
+            (_phrase_match_score(artist_query, name) for name in artist_names),
+            default=0.0,
+        )
+        title_score = _phrase_match_score(title_query, candidate_title)
+        split_scores.append(title_score * 0.72 + artist_score * 0.28)
 
     query_tokens = _query_tokens(query)
     if not query_tokens:
-        return 0.0
+        return max(split_scores, default=0.0)
     title_words = set(norm_text(candidate_title).split())
     artist_words = set(" ".join(artist_names).split())
     all_words = title_words | artist_words
@@ -2358,7 +2483,8 @@ def _search_relevance_score(track, query, search_type="track"):
     combined_coverage = sum(_query_token_matches(token, all_words) for token in query_tokens) / len(query_tokens)
     title_phrase = _phrase_match_score(query, candidate_title)
     combined_phrase = _phrase_match_score(query, " ".join(artist_names + [candidate_title]))
-    return combined_coverage * 42.0 + title_coverage * 32.0 + title_phrase * 0.18 + combined_phrase * 0.08
+    combined_score = combined_coverage * 42.0 + title_coverage * 32.0 + title_phrase * 0.18 + combined_phrase * 0.08
+    return max(combined_score, max(split_scores, default=0.0))
 
 
 def _rank_search_candidates(entries, query, queries, search_type="track"):
@@ -2414,6 +2540,10 @@ def soundcloud_search(query, count=30, search_type="track"):
 
     soundcloud_candidates = dedupe_tracks(soundcloud_raw)
     ranked_soundcloud = _rank_search_candidates(soundcloud_candidates, query, queries, search_type)
+    print(
+        f"Music search: query={query!r}; SoundCloud raw={len(soundcloud_candidates)}; "
+        f"matching={len(ranked_soundcloud)}"
+    )
 
     # Подтверждаем наличие именно оригинального download, не просто stream/preview.
     max_checks = min(80, max(24, count * 2))
@@ -2423,6 +2553,7 @@ def soundcloud_search(query, count=30, search_type="track"):
     soundcloud_tracks = [
         track for _, track in _rank_search_candidates(soundcloud_tracks, query, queries, search_type)
     ]
+    print(f"Music search: query={query!r}; SoundCloud downloadable={len(soundcloud_tracks)}")
 
     # Резервный поиск запускается, только если скачиваемых SoundCloud-результатов мало.
     backup_tracks = []
@@ -2445,12 +2576,17 @@ def soundcloud_search(query, count=30, search_type="track"):
                     print(f"{source_name}: резервный поиск по «{value}» не удался: {exc!r}")
 
     backup_tracks = dedupe_tracks(backup_tracks)
+    print(f"Music search: query={query!r}; backup raw={len(backup_tracks)}")
     ranked_backup = _rank_search_candidates(backup_tracks, query, queries, search_type)
     backup_tracks = [track for _, track in ranked_backup]
 
     # Сначала сохраняем SoundCloud, затем добавляем резервные доступные совпадения.
     merged = dedupe_tracks(soundcloud_tracks + backup_tracks)
     ranked_final = _rank_search_candidates(merged, query, queries, search_type)
+    print(
+        f"Music search finished: query={query!r}; SoundCloud={len(soundcloud_tracks)}; "
+        f"backup={len(backup_tracks)}; final={len(ranked_final)}"
+    )
 
     if not ranked_final and errors:
         print(f"Поиск завершился без результатов; последняя ошибка: {errors[-1]!r}")
