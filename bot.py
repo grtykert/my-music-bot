@@ -2470,33 +2470,46 @@ def _recognize_video_audio_query(video_url):
         if clip_end < 5:
             return ""
 
-        def section_callback(_info, _ydl):
-            return [{
-                "start_time": 0.0,
-                "end_time": clip_end,
-                "index": 1,
-                "title": "audio_sample",
-            }]
+        # Запускаем yt-dlp в отдельном процессе. У yt-dlp socket_timeout
+        # ограничивает отдельные сетевые операции, но не гарантирует общий
+        # предел времени для всей загрузки. subprocess.run(timeout=...) позволяет
+        # принудительно остановить зависшую загрузку, не блокируя поток бота.
+        output_template = os.path.join(workdir, "audio_sample_%(id)s.%(ext)s")
+        download_command = [
+            sys.executable, "-m", "yt_dlp",
+            "--format", "bestaudio/best",
+            "--output", output_template,
+            "--no-playlist",
+            "--quiet",
+            "--no-warnings",
+            "--socket-timeout", "8",
+            "--retries", "0",
+            "--extractor-retries", "0",
+            "--fragment-retries", "0",
+            "--file-access-retries", "0",
+            "--download-sections", f"*0-{clip_end:.1f}",
+            "--no-part",
+            expanded_url,
+        ]
+        print("🎵 TikTok: загружаю короткий аудиофрагмент (лимит 30 секунд)...")
+        try:
+            download_result = subprocess.run(
+                download_command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            print("⏱️ TikTok: загрузка аудиофрагмента остановлена — превышен лимит 30 секунд")
+            return ""
 
-        ydl_options = {
-            "format": "bestaudio/best",
-            "outtmpl": os.path.join(workdir, "audio_sample_%(id)s.%(ext)s"),
-            "quiet": True,
-            "no_warnings": True,
-            "noplaylist": True,
-            "socket_timeout": 12,
-            "retries": 0,
-            "extractor_retries": 0,
-            "fragment_retries": 0,
-            "file_access_retries": 0,
-            "download_ranges": section_callback,
-            "force_keyframes_at_cuts": False,
-            "continuedl": False,
-            "overwrites": True,
-        }
-        print("🎵 TikTok: загружаю короткий аудиофрагмент...")
-        with yt_dlp.YoutubeDL(ydl_options) as ydl:
-            ydl.download([expanded_url])
+        if download_result.returncode != 0:
+            details = (download_result.stderr or download_result.stdout or "").strip()
+            print(f"TikTok: yt-dlp не смог скачать аудиофрагмент: {details[-1200:]}")
+            return ""
+        print("✅ TikTok: аудиофрагмент загружен, передаю его на распознавание")
 
         media_extensions = (".mp4", ".m4a", ".mp3", ".webm", ".mov", ".mkv", ".ogg", ".wav", ".opus", ".aac")
         media_files = []
