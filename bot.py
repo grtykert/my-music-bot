@@ -1,4 +1,5 @@
 import os
+import asyncio
 import re
 import sys
 import shutil
@@ -21,6 +22,12 @@ import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
+
+try:
+    from shazamio import Shazam
+except Exception as _shazam_import_error:
+    Shazam = None
+    print(f"⚠️ Shazam-распознавание недоступно: {_shazam_import_error}")
 
 # --- ПОДКЛЮЧЕНИЕ FFMPEG / FFPROBE ДЛЯ ОБЛОЖЕК И СЖАТИЯ ---
 import static_ffmpeg
@@ -2404,13 +2411,175 @@ def _expand_short_video_url(video_url):
     return original
 
 
+def _shazam_result_query(result):
+    """Извлекает подтверждённые Shazam название и исполнителя из ответа."""
+    track = result.get("track") if isinstance(result, dict) else getattr(result, "track", None)
+    if not track:
+        return ""
+
+    def field(obj, name):
+        return obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+
+    title = str(field(track, "title") or "").strip()
+    artist = str(field(track, "subtitle") or field(track, "artist") or "").strip()
+    if not title or _is_generic_music_label(title):
+        return ""
+    return f"{artist} - {title}".strip(" -") if artist else title
+
+
+def _recognize_video_audio_query(video_url):
+    """Распознаёт музыку по аудио из видео, а не по его подписи/хэштегам."""
+    if Shazam is None:
+        return ""
+
+    expanded_url = _expand_short_video_url(video_url)
+    workdir = tempfile.mkdtemp(prefix="video_music_recognition_")
+    sample_paths = []
+    try:
+        probe_options = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "socket_timeout": 20,
+            "retries": 1,
+            "extractor_retries": 1,
+        }
+        with yt_dlp.YoutubeDL(probe_options) as ydl:
+            info = ydl.extract_info(expanded_url, download=False)
+        if not isinstance(info, dict):
+            return ""
+
+        try:
+            duration = float(info.get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        if duration and duration < 5:
+            print("Видео слишком короткое для надёжного распознавания музыки")
+            return ""
+
+        ranges = [(0.0, min(12.0, duration) if duration else 12.0)]
+        # Проверяем начало и конец ролика. Совпадение двух разных
+        # фрагментов защищает от случайного ответа Shazam.
+        if duration > 14:
+            second_start = max(0.0, duration - 12.0)
+            if second_start >= 3.0:
+                ranges.append((second_start, duration))
+
+        for index, (start_time, end_time) in enumerate(ranges):
+            if end_time - start_time < 5:
+                continue
+
+            def section_callback(_info, _ydl, start=start_time, end=end_time, section_index=index):
+                return [{
+                    "start_time": start,
+                    "end_time": end,
+                    "index": section_index + 1,
+                    "title": f"sample_{section_index + 1}",
+                }]
+
+            ydl_options = {
+                "format": "bestaudio/best",
+                "outtmpl": os.path.join(workdir, f"sample_{index}_%(id)s.%(ext)s"),
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "socket_timeout": 25,
+                "retries": 1,
+                "extractor_retries": 1,
+                "download_ranges": section_callback,
+                "force_keyframes_at_cuts": True,
+                "continuedl": False,
+                "overwrites": True,
+            }
+            with yt_dlp.YoutubeDL(ydl_options) as ydl:
+                ydl.download([expanded_url])
+
+            media_files = []
+            for filename in os.listdir(workdir):
+                full_path = os.path.join(workdir, filename)
+                if not filename.startswith(f"sample_{index}_"):
+                    continue
+                if filename.lower().endswith((".mp4", ".m4a", ".mp3", ".webm", ".mov", ".mkv", ".ogg", ".wav", ".opus")):
+                    if os.path.isfile(full_path) and os.path.getsize(full_path) > 0:
+                        media_files.append(full_path)
+            if not media_files:
+                print(f"Не удалось сохранить аудиофрагмент TikTok №{index + 1}")
+                continue
+
+            source_path = max(media_files, key=os.path.getsize)
+            wav_path = os.path.join(workdir, f"recognition_{index}.wav")
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", source_path, "-t", "12", "-vn",
+                "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav_path,
+            ]
+            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=90)
+            if os.path.exists(wav_path) and os.path.getsize(wav_path) > 1000:
+                sample_paths.append(wav_path)
+
+        if not sample_paths:
+            return ""
+
+        async def recognize_samples():
+            strict_matches = []
+            loose_matches = []
+            async with Shazam() as shazam:
+                for sample_path in sample_paths:
+                    try:
+                        strict_result = await shazam.recognize(sample_path, max_skew=1e-3)
+                        strict_query = _shazam_result_query(strict_result)
+                        if strict_query:
+                            strict_matches.append(strict_query)
+                            continue
+
+                        # Для ускоренной/замедленной музыки Shazam может вернуть
+                        # совпадение только без строгой проверки. Доверяем ему
+                        # лишь когда второй независимый фрагмент подтвердил тот же трек.
+                        loose_result = await shazam.recognize(sample_path)
+                        loose_query = _shazam_result_query(loose_result)
+                        if loose_query:
+                            loose_matches.append(loose_query)
+                    except Exception as e:
+                        print(f"Ошибка распознавания фрагмента Shazam: {e!r}")
+            return strict_matches, loose_matches
+
+        strict_matches, loose_matches = asyncio.run(recognize_samples())
+        if strict_matches:
+            unique = {norm_text(item): item for item in strict_matches}
+            if len(unique) == 1:
+                query = next(iter(unique.values()))
+                print(f"Shazam распознал музыку по звуку: {query}")
+                return query
+            print(f"Фрагменты видео дали разные строгие распознавания: {strict_matches}")
+            return ""
+
+        if len(loose_matches) >= 2:
+            unique = {norm_text(item): item for item in loose_matches}
+            if len(unique) == 1:
+                query = next(iter(unique.values()))
+                print(f"Shazam подтвердил музыку двумя фрагментами: {query}")
+                return query
+
+        if loose_matches:
+            print(f"Shazam не смог подтвердить совпадение двумя фрагментами: {loose_matches}")
+        return ""
+    except Exception as e:
+        print(f"Не удалось распознать музыку непосредственно по звуку видео: {e!r}")
+        return ""
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def _is_generic_music_label(value):
     value = re.sub(r"\s+", " ", str(value or "")).strip().casefold()
     value = re.sub(r"\s*[-–—]\s*.*$", "", value)
-    return value in {
-        "original sound", "original audio", "original music", "original sound by",
-        "original audio by", "promoted music", "unknown", "неизвестный звук",
-    }
+    value = re.sub(r"\s+by\s+.*$", "", value)
+    generic_labels = (
+        "original sound", "original audio", "original music", "promoted music",
+        "unknown", "неизвестный звук", "оригинальный звук", "исходный звук",
+    )
+    return any(value == label or value.startswith(label + " ") for label in generic_labels)
 
 
 def _video_url_metadata_queries(video_url):
@@ -2528,9 +2697,9 @@ def _video_url_metadata_queries(video_url):
             if len(queries) >= 4:
                 break
 
-    # Последний резерв — подпись самого видео. Отбрасываем служебный заголовок TikTok.
-    if video_title and not re.match(r"(?i)^tiktok video\s*#?\d+$", video_title):
-        add_query(video_title)
+    # Не ищем по обычной подписи ролика: она часто не имеет отношения к музыке
+    # и приводила к случайным песням. Используем только музыкальные метаданные
+    # или явно подписанное название песни в описании.
 
     if not queries:
         raise RuntimeError(
@@ -2655,12 +2824,16 @@ def unified_music_search(query, count=30):
 
     video_url = extract_video_search_url(query)
     if video_url:
-        song_queries = _video_url_metadata_queries(video_url)
+        # Сначала распознаём именно аудио. По названию ролика больше не пытаемся
+        # угадать песню: подпись TikTok часто не связана с музыкой в видео.
+        recognized_query = _recognize_video_audio_query(video_url)
+        if recognized_query:
+            song_queries = [recognized_query]
+        else:
+            song_queries = _video_url_metadata_queries(video_url)
+
         video_tracks = []
         search_errors = []
-
-        # Ищем по каждому найденному варианту: TikTok может отдать и название
-        # звука, и подпись ролика, а один из этих запросов может оказаться неточным.
         with ThreadPoolExecutor(max_workers=min(4, len(song_queries))) as pool:
             jobs = [
                 pool.submit(cached_soundcloud_search, song_query, count, "track")
@@ -2679,6 +2852,12 @@ def unified_music_search(query, count=30):
         if video_tracks:
             ranked_video_tracks = score_tracks(video_tracks, song_queries)
             ranked_video_tracks = dedupe_ranked_titles(ranked_video_tracks)
+            if recognized_query:
+                # Не показываем похожие по одному случайному слову композиции.
+                ranked_video_tracks = [
+                    (score, track) for score, track in ranked_video_tracks
+                    if _track_matches_track_query(track, recognized_query)
+                ]
             return [track for _, track in ranked_video_tracks[:count]]
         return []
 
