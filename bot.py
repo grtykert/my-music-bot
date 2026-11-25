@@ -9,7 +9,8 @@ from telebot.apihelper import ApiTelegramException
 import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode, quote
+from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode, quote, urljoin
+from html import unescape
 import hmac
 import hashlib
 import time
@@ -777,7 +778,7 @@ def send_welcome(message):
         return
 
     text = (
-        "👋 Привет! Напиши название песни, и я попробую её найти. 🎵\n\n"
+        "👋 Напиши название песни, несколько слов из неё или отправь ссылку на видео — я попробую найти трек. 🎵\n\n"
         "💬 Наша группа: https://t.me/+8JYfdTy2YhE0NDJi\n\n"
         "👑 VIP подписка: /vip\n"
         "💖 Поддержка разработчика: /donate"
@@ -2325,6 +2326,294 @@ def cached_soundcloud_search(query, count=30, search_type="track"):
     return tracks
 
 
+
+
+# ============================================================
+#             ЕДИНЫЙ ПОИСК: НАЗВАНИЕ / СЛОВА / ВИДЕО
+# ============================================================
+VIDEO_SEARCH_HOSTS = (
+    "youtube.com", "youtu.be", "youtube-nocookie.com",
+    "tiktok.com", "instagram.com", "facebook.com", "fb.watch",
+    "x.com", "twitter.com", "vimeo.com", "dailymotion.com",
+    "rutube.ru", "vk.com", "ok.ru", "twitch.tv"
+)
+VIDEO_SEARCH_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
+VIDEO_QUERY_CACHE = {}
+VIDEO_QUERY_CACHE_LOCK = threading.Lock()
+VIDEO_QUERY_CACHE_TTL = 900
+
+
+def extract_video_search_url(value):
+    """Возвращает ссылку на поддерживаемый видеосервис, если она есть в запросе."""
+    for candidate in VIDEO_SEARCH_URL_RE.findall(str(value or "")):
+        candidate = candidate.rstrip(".,!?;:)]}>")
+        try:
+            parsed = urlparse(candidate)
+            host = (parsed.hostname or "").lower().rstrip(".")
+            if parsed.scheme not in ("http", "https") or not host:
+                continue
+            if any(host == domain or host.endswith("." + domain) for domain in VIDEO_SEARCH_HOSTS):
+                return candidate
+        except Exception:
+            continue
+    return ""
+
+
+def _video_url_metadata_query(video_url):
+    """
+    Получает название и исполнителя из общедоступных метаданных видео через yt-dlp.
+    Это не аудио-распознавание: если ролик не содержит музыкальных метаданных,
+    вернётся название самого ролика, если оно пригодно для поиска.
+    """
+    if not extract_video_search_url(video_url):
+        raise ValueError("Ссылка не относится к поддерживаемому видеосервису.")
+
+    now = time.time()
+    with VIDEO_QUERY_CACHE_LOCK:
+        cached = VIDEO_QUERY_CACHE.get(video_url)
+        if cached and now - cached[0] < VIDEO_QUERY_CACHE_TTL:
+            return cached[1]
+        if cached:
+            VIDEO_QUERY_CACHE.pop(video_url, None)
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "socket_timeout": 18,
+        "retries": 1,
+        "extractor_retries": 1,
+        "playlistend": 1,
+        "ignoreerrors": False,
+    }
+
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(video_url, download=False)
+
+    if not isinstance(info, dict):
+        raise RuntimeError("Не удалось получить информацию о видео.")
+
+    music_info = info.get("music_info") if isinstance(info.get("music_info"), dict) else {}
+    track_name = (
+        info.get("track")
+        or info.get("music_title")
+        or info.get("release_title")
+        or music_info.get("title")
+        or music_info.get("song")
+    )
+    artist_name = (
+        info.get("artist")
+        or info.get("artist_name")
+        or info.get("creator")
+        or music_info.get("artist")
+        or music_info.get("author")
+    )
+
+    track_name = str(track_name or "").strip()
+    artist_name = str(artist_name or "").strip()
+    video_title = str(info.get("title") or info.get("alt_title") or "").strip()
+
+    if track_name and artist_name:
+        query = f"{artist_name} {track_name}"
+    elif track_name:
+        query = track_name
+    elif video_title and re.search(r"\s[-–—]\s", video_title):
+        left, right = re.split(r"\s[-–—]\s", video_title, maxsplit=1)
+        query = f"{left.strip()} {right.strip()}"
+    else:
+        query = video_title
+
+    # Иногда TikTok/Instagram и авторы роликов указывают композицию только в описании.
+    if len(query) < 5:
+        description = str(info.get("description") or "")[:8000]
+        for line in description.splitlines():
+            match = re.search(
+                r"(?i)(?:song|track|music|audio|sound|песня|трек|музыка)"
+                r"\s*[:：—-]\s*(.{4,160})",
+                line
+            )
+            if match:
+                query = match.group(1).strip()
+                break
+
+    query = re.sub(r"\s+", " ", str(query or "")).strip(" -–—|")[:180]
+    if len(query) < 2:
+        raise RuntimeError(
+            "В метаданных видео не нашлось названия музыки. "
+            "Попробуй отправить другую ссылку или несколько слов из песни."
+        )
+
+    with VIDEO_QUERY_CACHE_LOCK:
+        VIDEO_QUERY_CACHE[video_url] = (time.time(), query)
+        while len(VIDEO_QUERY_CACHE) > 200:
+            oldest_key = min(VIDEO_QUERY_CACHE, key=lambda key: VIDEO_QUERY_CACHE[key][0])
+            VIDEO_QUERY_CACHE.pop(oldest_key, None)
+
+    print(f"Ссылка на видео: музыкальный поисковый запрос «{query}»")
+    return query
+
+
+def _fetch_lyricscom_html(url, timeout=10, max_bytes=2 * 1024 * 1024):
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; DevMusicSearch/1.0)",
+            "Accept": "text/html,application/xhtml+xml",
+        }
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        raw = response.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise ValueError("Страница текстов песен слишком большая")
+        charset = response.headers.get_content_charset() or "utf-8"
+    return raw.decode(charset, errors="replace")
+
+
+def _lyricscom_song_page_contains_phrase(song_url, phrase):
+    """Проверяет совпадение внутри текста на странице, но никогда не отдаёт текст пользователю."""
+    try:
+        page = _fetch_lyricscom_html(song_url, timeout=8, max_bytes=1024 * 1024)
+        match = re.search(
+            r"<(?:pre|div)\b[^>]*id=[\"']lyric-body-text[\"'][^>]*>(.*?)</(?:pre|div)>",
+            page,
+            re.I | re.S
+        )
+        if not match:
+            return False
+        lyrics_text = re.sub(r"<[^>]+>", " ", match.group(1))
+        lyrics_text = unescape(re.sub(r"\s+", " ", lyrics_text))
+        return norm_text(phrase) in norm_text(lyrics_text)
+    except Exception as e:
+        print(f"Не удалось проверить совпадение в тексте песни: {e!r}")
+        return False
+
+
+def search_song_titles_by_lyric_fragment(phrase, limit=4):
+    """
+    Ищет фрагмент непосредственно в базе текстов Lyrics.com.
+    На выходе только названия песен; полный текст не копируется в результаты бота.
+    """
+    phrase = " ".join(str(phrase or "").split()).strip()[:160]
+    if len(phrase) < 8 or len(phrase.split()) < 2:
+        return []
+
+    search_url = "https://www.lyrics.com/serp.php?" + urlencode({
+        "st": phrase,
+        "qtype": "2",
+    })
+
+    try:
+        page = _fetch_lyricscom_html(search_url, timeout=12, max_bytes=3 * 1024 * 1024)
+    except Exception as e:
+        print(f"Поиск фразы в Lyrics.com временно недоступен: {e!r}")
+        return []
+
+    link_pattern = re.compile(
+        r"<a\b[^>]*href=[\"'](?P<href>[^\"']*/lyric/\d+[^\"']*)[\"'][^>]*>"
+        r"(?P<title>.*?)</a>",
+        re.I | re.S
+    )
+
+    matches = []
+    seen_urls = set()
+    for item in link_pattern.finditer(page):
+        href = unescape(item.group("href"))
+        song_url = urljoin("https://www.lyrics.com", href)
+        title = re.sub(r"<[^>]+>", " ", item.group("title"))
+        title = re.sub(r"\s+", " ", unescape(title)).strip(" -–—|")
+        if not title or len(title) < 2:
+            continue
+        if song_url in seen_urls:
+            continue
+        seen_urls.add(song_url)
+        matches.append((title[:160], song_url))
+        if len(matches) >= 8:
+            break
+
+    found_titles = []
+    for title, song_url in matches:
+        if _lyricscom_song_page_contains_phrase(song_url, phrase):
+            found_titles.append(title)
+        if len(found_titles) >= max(1, min(8, int(limit))):
+            break
+
+    return list(dict.fromkeys(found_titles))
+
+
+def unified_music_search(query, count=30):
+    """
+    Один поиск для бота, inline-режима и Mini App:
+    - название/исполнитель: стандартный поиск;
+    - фраза из песни: стандартный поиск плюс поиск совпадения в текстах песен;
+    - ссылка на видео: извлечение названия/исполнителя из метаданных и поиск композиции.
+    """
+    query = " ".join(str(query or "").split()).strip()
+    count = max(1, min(100, int(count)))
+    if not query:
+        return []
+
+    video_url = extract_video_search_url(query)
+    if video_url:
+        song_query = _video_url_metadata_query(video_url)
+        return cached_soundcloud_search(song_query, count, "track")
+
+    # Обычный поиск по названию всегда выполняется первым.
+    title_tracks = cached_soundcloud_search(query, count, "track")
+
+    # Поиск в текстах нужен только для достаточно длинных фраз, а не для обычных коротких названий.
+    words = query.split()
+    lyric_titles = []
+    if len(query) >= 8 and len(words) >= 2:
+        lyric_titles = search_song_titles_by_lyric_fragment(query, limit=4)
+
+    if not lyric_titles:
+        return title_tracks[:count]
+
+    lyric_tracks = []
+    with ThreadPoolExecutor(max_workers=min(3, len(lyric_titles))) as pool:
+        jobs = [
+            pool.submit(cached_soundcloud_search, song_title, 15, "track")
+            for song_title in lyric_titles
+        ]
+        for future in as_completed(jobs):
+            try:
+                lyric_tracks.extend(future.result() or [])
+            except Exception as e:
+                print(f"Не удалось найти аудио по найденному названию песни: {e!r}")
+
+    # Треки, найденные по подтверждённым совпадениям в тексте, показываем раньше.
+    # Обычные совпадения по названию остаются в списке как резерв.
+    lyric_ranked = score_tracks(dedupe_tracks(lyric_tracks), lyric_titles)
+    lyric_ranked = dedupe_ranked_titles(lyric_ranked)
+    lyric_tracks_sorted = [track for _, track in lyric_ranked]
+    return dedupe_tracks(lyric_tracks_sorted + title_tracks)[:count]
+
+
+def cached_unified_music_search(query, count=30):
+    """TTL-кэш единого поиска: одинаковый запрос не запускает повторный парсинг текстов."""
+    normalized_query = norm_text(query)
+    count = max(1, min(100, int(count)))
+    cache_key = (normalized_query, count, "unified")
+    now = time.time()
+
+    with search_cache_lock:
+        cached = search_results_cache.get(cache_key)
+        if cached and now - cached[0] < SEARCH_CACHE_TTL:
+            return cached[1]
+        if cached:
+            search_results_cache.pop(cache_key, None)
+
+    tracks = unified_music_search(query, count)
+    with search_cache_lock:
+        search_results_cache[cache_key] = (time.time(), tracks)
+        while len(search_results_cache) > 100:
+            oldest_key = min(search_results_cache, key=lambda key: search_results_cache[key][0])
+            search_results_cache.pop(oldest_key, None)
+    return tracks
+
+
+
 def store_tracks(tracks):
     """Сохраняет конкретную выдачу под коротким id, чтобы старые кнопки не качали чужие треки."""
     sid = os.urandom(4).hex()
@@ -2360,7 +2649,7 @@ def inline_query(query):
 
     def worker():
         try:
-            tracks = cached_soundcloud_search(search_text, 20, "track")[:10]
+            tracks = cached_unified_music_search(search_text, 20)[:10]
 
             inline_tracks_cache[query.from_user.id] = tracks
             if len(inline_tracks_cache) > 500:
@@ -2696,7 +2985,13 @@ def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filt
     original_queries[chat_id] = base_query
 
     if is_new:
-        msg = bot.reply_to(message, "🔍 Ищу варианты...")
+        if extract_video_search_url(query):
+            status_text = "🔗 Проверяю видео и ищу музыку..."
+        elif len(query.split()) >= 2 and len(query) >= 8:
+            status_text = "🔎 Ищу по названию и словам песни..."
+        else:
+            status_text = "🔍 Ищу варианты..."
+        msg = bot.reply_to(message, status_text)
     else:
         msg = message
 
@@ -2710,7 +3005,10 @@ def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filt
             # На первой странице используем тот же размер выдачи, что и Mini App.
             # Для следующих страниц увеличиваем выборку, чтобы работала пагинация.
             limit_ydl = 50 if is_random else min(100, max(30, effective_limit * max(2, page)))
-            all_tracks = cached_soundcloud_search(query, limit_ydl, "track")
+            if is_random or is_filter:
+                all_tracks = cached_soundcloud_search(query, limit_ydl, "track")
+            else:
+                all_tracks = cached_unified_music_search(query, limit_ydl)
 
             if is_random:
                 if len(all_tracks) >= effective_limit:
@@ -3228,7 +3526,7 @@ def handle_miniapp_search(handler, query_params):
             "subscription_required": True,
             "invite_url": "https://t.me/+8JYfdTy2YhE0NDJi"
         })
-    query = str((query_params.get("q") or [""])[0]).strip()[:100]
+    query = str((query_params.get("q") or [""])[0]).strip()[:1200]
     search_type = str((query_params.get("type") or ["track"])[0]).strip().lower()
     if not query:
         return api_json(handler, 400, {"error": "Введи имя автора или название трека."})
@@ -3240,7 +3538,10 @@ def handle_miniapp_search(handler, query_params):
 
     try:
         fetch_count = min(100, max(30, limit * 3) if search_type == "author" else max(30, limit * 2))
-        tracks = cached_soundcloud_search(query, fetch_count, search_type)
+        if search_type == "author":
+            tracks = cached_soundcloud_search(query, fetch_count, "author")
+        else:
+            tracks = cached_unified_music_search(query, fetch_count)
 
         if search_type == "author":
             q_low = query.lower()
