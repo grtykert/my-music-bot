@@ -2359,40 +2359,110 @@ def extract_video_search_url(value):
     return ""
 
 
-def _video_url_metadata_query(video_url):
-    """
-    Получает название и исполнителя из общедоступных метаданных видео через yt-dlp.
-    Это не аудио-распознавание: если ролик не содержит музыкальных метаданных,
-    вернётся название самого ролика, если оно пригодно для поиска.
-    """
+class _SupportedVideoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Не разрешает короткой ссылке перенаправить запрос на посторонний домен."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        target = urljoin(req.full_url, newurl)
+        if not extract_video_search_url(target):
+            raise urllib.error.HTTPError(
+                req.full_url, code, "Перенаправление на неподдерживаемый адрес заблокировано", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, target)
+
+
+def _expand_short_video_url(video_url):
+    """Раскрывает короткие TikTok-ссылки вида vt.tiktok.com/... в адрес самого ролика."""
+    original = str(video_url or "").strip()
+    try:
+        parsed = urlparse(original)
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except Exception:
+        return original
+
+    if host not in {"vt.tiktok.com", "vm.tiktok.com", "t.tiktok.com"}:
+        return original
+
+    request = urllib.request.Request(
+        original,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": "https://www.tiktok.com/",
+            "Range": "bytes=0-0",
+        },
+    )
+    try:
+        opener = urllib.request.build_opener(_SupportedVideoRedirectHandler())
+        with opener.open(request, timeout=12) as response:
+            final_url = response.geturl()
+        if extract_video_search_url(final_url):
+            print(f"TikTok short link expanded: {original} -> {final_url}")
+            return final_url
+    except Exception as e:
+        # Не обрываем поиск: yt-dlp иногда сам умеет обработать короткую ссылку.
+        print(f"Не удалось раскрыть короткую TikTok-ссылку {original}: {e!r}")
+    return original
+
+
+def _is_generic_music_label(value):
+    value = re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+    value = re.sub(r"\s*[-–—]\s*.*$", "", value)
+    return value in {
+        "original sound", "original audio", "original music", "original sound by",
+        "original audio by", "promoted music", "unknown", "неизвестный звук",
+    }
+
+
+def _video_url_metadata_queries(video_url):
+    """Получает несколько поисковых вариантов из музыкальных метаданных и описания ролика."""
     if not extract_video_search_url(video_url):
         raise ValueError("Ссылка не относится к поддерживаемому видеосервису.")
 
+    expanded_url = _expand_short_video_url(video_url)
+    cache_key = expanded_url or video_url
     now = time.time()
     with VIDEO_QUERY_CACHE_LOCK:
-        cached = VIDEO_QUERY_CACHE.get(video_url)
+        cached = VIDEO_QUERY_CACHE.get(cache_key)
         if cached and now - cached[0] < VIDEO_QUERY_CACHE_TTL:
-            return cached[1]
+            cached_queries = cached[1]
+            return list(cached_queries) if isinstance(cached_queries, (list, tuple)) else [cached_queries]
         if cached:
-            VIDEO_QUERY_CACHE.pop(video_url, None)
+            VIDEO_QUERY_CACHE.pop(cache_key, None)
 
     options = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
-        "socket_timeout": 18,
-        "retries": 1,
-        "extractor_retries": 1,
+        "socket_timeout": 20,
+        "retries": 2,
+        "extractor_retries": 2,
         "playlistend": 1,
         "ignoreerrors": False,
     }
 
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(video_url, download=False)
+    urls_to_try = [expanded_url]
+    if video_url != expanded_url:
+        urls_to_try.append(video_url)
+
+    info = None
+    last_error = None
+    for candidate_url in urls_to_try:
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                candidate_info = ydl.extract_info(candidate_url, download=False)
+            if isinstance(candidate_info, dict):
+                info = candidate_info
+                # Короткая ссылка раскрылась: используем только результат canonical URL.
+                break
+        except Exception as e:
+            last_error = e
+            print(f"Не удалось получить метаданные видео {candidate_url}: {e!r}")
 
     if not isinstance(info, dict):
-        raise RuntimeError("Не удалось получить информацию о видео.")
+        raise RuntimeError(
+            "Не удалось открыть TikTok-видео. Возможно, оно закрыто или TikTok временно ограничил доступ."
+        ) from last_error
 
     music_info = info.get("music_info") if isinstance(info.get("music_info"), dict) else {}
     track_name = (
@@ -2402,57 +2472,87 @@ def _video_url_metadata_query(video_url):
         or music_info.get("title")
         or music_info.get("song")
     )
+    track_name = str(track_name or "").strip()
+    if _is_generic_music_label(track_name):
+        track_name = ""
+
     artist_name = (
         info.get("artist")
         or info.get("artist_name")
-        or info.get("creator")
+        or info.get("album_artist")
         or music_info.get("artist")
         or music_info.get("author")
     )
-
-    track_name = str(track_name or "").strip()
+    if not artist_name:
+        artists = info.get("artists") or music_info.get("artists") or []
+        if isinstance(artists, str):
+            artists = [artists]
+        if isinstance(artists, (list, tuple)):
+            clean_artists = [
+                str(value).strip() for value in artists
+                if value and not str(value).strip().lower().startswith("md5:")
+            ]
+            artist_name = ", ".join(clean_artists[:3])
     artist_name = str(artist_name or "").strip()
+
     video_title = str(info.get("title") or info.get("alt_title") or "").strip()
+    description = str(info.get("description") or "")[:8000]
+    queries = []
 
+    def add_query(value):
+        value = unescape(str(value or ""))
+        value = re.sub(r"https?://\S+", " ", value)
+        value = re.sub(r"#[\w\u0400-\u04ff]+", " ", value)
+        value = re.sub(r"\s+", " ", value).strip(" -–—|,.;:#")
+        value = value[:180]
+        if len(value) < 2 or _is_generic_music_label(value):
+            return
+        if value.casefold() not in {item.casefold() for item in queries}:
+            queries.append(value)
+
+    # Сначала используем музыкальную атрибуцию TikTok, а не заголовок ролика.
     if track_name and artist_name:
-        query = f"{artist_name} {track_name}"
-    elif track_name:
-        query = track_name
-    elif video_title and re.search(r"\s[-–—]\s", video_title):
-        left, right = re.split(r"\s[-–—]\s", video_title, maxsplit=1)
-        query = f"{left.strip()} {right.strip()}"
-    else:
-        query = video_title
+        add_query(f"{artist_name} - {track_name}")
+    if track_name:
+        add_query(track_name)
 
-    # Иногда TikTok/Instagram и авторы роликов указывают композицию только в описании.
-    if len(query) < 5:
-        description = str(info.get("description") or "")[:8000]
-        for line in description.splitlines():
-            match = re.search(
-                r"(?i)(?:song|track|music|audio|sound|песня|трек|музыка)"
-                r"\s*[:：—-]\s*(.{4,160})",
-                line
-            )
-            if match:
-                query = match.group(1).strip()
+    # Некоторые авторы вручную указывают название композиции в описании.
+    for line in description.splitlines():
+        match = re.search(
+            r"(?i)(?:song|track|music|audio|sound|песня|трек|музыка)"
+            r"\s*[:：—-]\s*(.{3,160})",
+            line,
+        )
+        if match:
+            add_query(match.group(1))
+            if len(queries) >= 4:
                 break
 
-    query = re.sub(r"\s+", " ", str(query or "")).strip(" -–—|")[:180]
-    if len(query) < 2:
+    # Последний резерв — подпись самого видео. Отбрасываем служебный заголовок TikTok.
+    if video_title and not re.match(r"(?i)^tiktok video\s*#?\d+$", video_title):
+        add_query(video_title)
+
+    if not queries:
         raise RuntimeError(
-            "В метаданных видео не нашлось названия музыки. "
-            "Попробуй отправить другую ссылку или несколько слов из песни."
+            "В видео не нашлось названия композиции. Попробуй отправить другую ссылку "
+            "или несколько слов из песни."
         )
 
+    queries = queries[:4]
     with VIDEO_QUERY_CACHE_LOCK:
-        VIDEO_QUERY_CACHE[video_url] = (time.time(), query)
+        VIDEO_QUERY_CACHE[cache_key] = (time.time(), tuple(queries))
         while len(VIDEO_QUERY_CACHE) > 200:
             oldest_key = min(VIDEO_QUERY_CACHE, key=lambda key: VIDEO_QUERY_CACHE[key][0])
             VIDEO_QUERY_CACHE.pop(oldest_key, None)
 
-    print(f"Ссылка на видео: музыкальный поисковый запрос «{query}»")
-    return query
+    print(f"Ссылка на видео: варианты поиска музыки: {queries}")
+    return queries
 
+
+def _video_url_metadata_query(video_url):
+    """Совместимая функция: возвращает самый точный вариант из метаданных видео."""
+    queries = _video_url_metadata_queries(video_url)
+    return queries[0] if queries else ""
 
 def _fetch_lyricscom_html(url, timeout=10, max_bytes=2 * 1024 * 1024):
     request = urllib.request.Request(
@@ -2555,8 +2655,32 @@ def unified_music_search(query, count=30):
 
     video_url = extract_video_search_url(query)
     if video_url:
-        song_query = _video_url_metadata_query(video_url)
-        return cached_soundcloud_search(song_query, count, "track")
+        song_queries = _video_url_metadata_queries(video_url)
+        video_tracks = []
+        search_errors = []
+
+        # Ищем по каждому найденному варианту: TikTok может отдать и название
+        # звука, и подпись ролика, а один из этих запросов может оказаться неточным.
+        with ThreadPoolExecutor(max_workers=min(4, len(song_queries))) as pool:
+            jobs = [
+                pool.submit(cached_soundcloud_search, song_query, count, "track")
+                for song_query in song_queries
+            ]
+            for future in as_completed(jobs):
+                try:
+                    video_tracks.extend(future.result() or [])
+                except Exception as e:
+                    search_errors.append(e)
+                    print(f"Поиск музыки по данным видео не удался: {e!r}")
+
+        video_tracks = dedupe_tracks(video_tracks)
+        if not video_tracks and search_errors:
+            print(f"Ни один вариант поиска по видео не дал результатов: {search_errors[0]!r}")
+        if video_tracks:
+            ranked_video_tracks = score_tracks(video_tracks, song_queries)
+            ranked_video_tracks = dedupe_ranked_titles(ranked_video_tracks)
+            return [track for _, track in ranked_video_tracks[:count]]
+        return []
 
     # Обычный поиск по названию всегда выполняется первым.
     title_tracks = cached_soundcloud_search(query, count, "track")
