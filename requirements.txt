@@ -5,3 +5,4 @@ urllib3
 certifi
 static-ffmpeg
 Pillow==10.3.0
+shazamio==0.9.0; python_version >= "3.11"
