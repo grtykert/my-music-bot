@@ -2630,23 +2630,31 @@ def _video_url_metadata_queries(video_url):
     if _is_generic_music_label(track_name):
         track_name = ""
 
-    artist_name = (
-        info.get("artist")
-        or info.get("artist_name")
-        or info.get("album_artist")
-        or music_info.get("artist")
-        or music_info.get("author")
+    # TikTok отдаёт исполнителя прикреплённого звука в artists/authorName.
+    # Эти поля приоритетнее автора самого ролика: uploader может быть не музыкантом.
+    artists = (
+        info.get("artists")
+        or music_info.get("artists")
+        or music_info.get("authorName")
+        or []
     )
+    if isinstance(artists, str):
+        artists = re.split(r"\s*(?:,|&| feat\.? | ft\.? )\s*", artists, flags=re.I)
+    elif not isinstance(artists, (list, tuple)):
+        artists = []
+    clean_artists = [
+        str(value).strip() for value in artists
+        if value and not str(value).strip().lower().startswith("md5:")
+    ]
+    artist_name = ", ".join(clean_artists[:3])
     if not artist_name:
-        artists = info.get("artists") or music_info.get("artists") or []
-        if isinstance(artists, str):
-            artists = [artists]
-        if isinstance(artists, (list, tuple)):
-            clean_artists = [
-                str(value).strip() for value in artists
-                if value and not str(value).strip().lower().startswith("md5:")
-            ]
-            artist_name = ", ".join(clean_artists[:3])
+        artist_name = (
+            info.get("artist")
+            or info.get("artist_name")
+            or music_info.get("artist")
+            or music_info.get("author")
+            or info.get("album_artist")
+        )
     artist_name = str(artist_name or "").strip()
 
     video_title = str(info.get("title") or info.get("alt_title") or "").strip()
@@ -2809,13 +2817,29 @@ def unified_music_search(query, count=30):
 
     video_url = extract_video_search_url(query)
     if video_url:
-        # Сначала распознаём именно аудио. По названию ролика больше не пытаемся
-        # угадать песню: подпись TikTok часто не связана с музыкой в видео.
-        recognized_query = _recognize_video_audio_query(video_url)
-        if recognized_query:
-            song_queries = [recognized_query]
-        else:
+        # Сначала берём звук, который сам автор прикрепил в TikTok.
+        # yt-dlp извлекает track/artists из music metadata; этот путь не скачивает
+        # видео и поэтому значительно быстрее и стабильнее обычного аудио-распознавания.
+        song_queries = []
+        metadata_error = None
+        try:
             song_queries = _video_url_metadata_queries(video_url)
+        except Exception as e:
+            metadata_error = e
+            print(f"Не удалось получить название прикреплённого звука TikTok: {e!r}")
+
+        # Если TikTok показывает только 'Original sound' или не отдаёт название,
+        # тогда уже пытаемся определить композицию по самому звучанию через Shazam.
+        recognized_query = ""
+        if not song_queries:
+            recognized_query = _recognize_video_audio_query(video_url)
+            if recognized_query:
+                song_queries = [recognized_query]
+
+        if not song_queries:
+            if metadata_error:
+                print(f"TikTok metadata unavailable and Shazam found no match: {metadata_error!r}")
+            return []
 
         video_tracks = []
         search_errors = []
