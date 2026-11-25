@@ -2400,7 +2400,7 @@ def _expand_short_video_url(video_url):
     )
     try:
         opener = urllib.request.build_opener(_SupportedVideoRedirectHandler())
-        with opener.open(request, timeout=12) as response:
+        with opener.open(request, timeout=8) as response:
             final_url = response.geturl()
         if extract_video_search_url(final_url):
             print(f"TikTok short link expanded: {original} -> {final_url}")
@@ -2428,23 +2428,28 @@ def _shazam_result_query(result):
 
 
 def _recognize_video_audio_query(video_url):
-    """Распознаёт музыку по аудио из видео, а не по его подписи/хэштегам."""
+    """Быстро распознаёт один 12-секундный фрагмент аудио видео через Shazam."""
     if Shazam is None:
+        print("Shazam не установлен — перехожу к музыкальным метаданным видео")
         return ""
 
     expanded_url = _expand_short_video_url(video_url)
     workdir = tempfile.mkdtemp(prefix="video_music_recognition_")
-    sample_paths = []
+    sample_path = None
     try:
+        # Не запускаем длинные повторы: TikTok иногда зависает на выдаче метаданных.
         probe_options = {
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
             "noplaylist": True,
-            "socket_timeout": 20,
-            "retries": 1,
-            "extractor_retries": 1,
+            "socket_timeout": 10,
+            "retries": 0,
+            "extractor_retries": 0,
+            "fragment_retries": 0,
+            "playlistend": 1,
         }
+        print("🎵 TikTok: получаю информацию о видео для распознавания звука...")
         with yt_dlp.YoutubeDL(probe_options) as ydl:
             info = ydl.extract_info(expanded_url, download=False)
         if not isinstance(info, dict):
@@ -2458,114 +2463,80 @@ def _recognize_video_audio_query(video_url):
             print("Видео слишком короткое для надёжного распознавания музыки")
             return ""
 
-        ranges = [(0.0, min(12.0, duration) if duration else 12.0)]
-        # Проверяем начало и конец ролика. Совпадение двух разных
-        # фрагментов защищает от случайного ответа Shazam.
-        if duration > 14:
-            second_start = max(0.0, duration - 12.0)
-            if second_start >= 3.0:
-                ranges.append((second_start, duration))
-
-        for index, (start_time, end_time) in enumerate(ranges):
-            if end_time - start_time < 5:
-                continue
-
-            def section_callback(_info, _ydl, start=start_time, end=end_time, section_index=index):
-                return [{
-                    "start_time": start,
-                    "end_time": end,
-                    "index": section_index + 1,
-                    "title": f"sample_{section_index + 1}",
-                }]
-
-            ydl_options = {
-                "format": "bestaudio/best",
-                "outtmpl": os.path.join(workdir, f"sample_{index}_%(id)s.%(ext)s"),
-                "quiet": True,
-                "no_warnings": True,
-                "noplaylist": True,
-                "socket_timeout": 25,
-                "retries": 1,
-                "extractor_retries": 1,
-                "download_ranges": section_callback,
-                "force_keyframes_at_cuts": True,
-                "continuedl": False,
-                "overwrites": True,
-            }
-            with yt_dlp.YoutubeDL(ydl_options) as ydl:
-                ydl.download([expanded_url])
-
-            media_files = []
-            for filename in os.listdir(workdir):
-                full_path = os.path.join(workdir, filename)
-                if not filename.startswith(f"sample_{index}_"):
-                    continue
-                if filename.lower().endswith((".mp4", ".m4a", ".mp3", ".webm", ".mov", ".mkv", ".ogg", ".wav", ".opus")):
-                    if os.path.isfile(full_path) and os.path.getsize(full_path) > 0:
-                        media_files.append(full_path)
-            if not media_files:
-                print(f"Не удалось сохранить аудиофрагмент TikTok №{index + 1}")
-                continue
-
-            source_path = max(media_files, key=os.path.getsize)
-            wav_path = os.path.join(workdir, f"recognition_{index}.wav")
-            command = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-i", source_path, "-t", "12", "-vn",
-                "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav_path,
-            ]
-            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=90)
-            if os.path.exists(wav_path) and os.path.getsize(wav_path) > 1000:
-                sample_paths.append(wav_path)
-
-        if not sample_paths:
+        # Shazam использует окно около 12 секунд. Загружаем только один фрагмент,
+        # а не два: раньше оба скачивались до первого обращения к Shazam, из-за
+        # чего пользователь мог долго видеть только сообщение «Проверяю видео».
+        clip_end = min(12.0, duration) if duration else 12.0
+        if clip_end < 5:
             return ""
 
-        async def recognize_samples():
-            strict_matches = []
-            loose_matches = []
+        def section_callback(_info, _ydl):
+            return [{
+                "start_time": 0.0,
+                "end_time": clip_end,
+                "index": 1,
+                "title": "audio_sample",
+            }]
+
+        ydl_options = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(workdir, "audio_sample_%(id)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+            "noplaylist": True,
+            "socket_timeout": 12,
+            "retries": 0,
+            "extractor_retries": 0,
+            "fragment_retries": 0,
+            "file_access_retries": 0,
+            "download_ranges": section_callback,
+            "force_keyframes_at_cuts": False,
+            "continuedl": False,
+            "overwrites": True,
+        }
+        print("🎵 TikTok: загружаю короткий аудиофрагмент...")
+        with yt_dlp.YoutubeDL(ydl_options) as ydl:
+            ydl.download([expanded_url])
+
+        media_extensions = (".mp4", ".m4a", ".mp3", ".webm", ".mov", ".mkv", ".ogg", ".wav", ".opus", ".aac")
+        media_files = []
+        for filename in os.listdir(workdir):
+            full_path = os.path.join(workdir, filename)
+            if filename.startswith("audio_sample_") and filename.lower().endswith(media_extensions):
+                if os.path.isfile(full_path) and os.path.getsize(full_path) > 1000:
+                    media_files.append(full_path)
+        if not media_files:
+            print("TikTok: yt-dlp не сохранил аудиофрагмент")
+            return ""
+        sample_path = max(media_files, key=os.path.getsize)
+
+        async def recognize_one_sample():
             async with Shazam() as shazam:
-                for sample_path in sample_paths:
-                    try:
-                        strict_result = await shazam.recognize(sample_path, max_skew=1e-3)
-                        strict_query = _shazam_result_query(strict_result)
-                        if strict_query:
-                            strict_matches.append(strict_query)
-                            continue
+                try:
+                    # Жёсткий тайм-аут, чтобы запрос Shazam не оставлял поиск
+                    # навсегда в состоянии ожидания при проблемах сети.
+                    result = await asyncio.wait_for(
+                        shazam.recognize(sample_path, max_skew=1e-3),
+                        timeout=12,
+                    )
+                    return _shazam_result_query(result)
+                except asyncio.TimeoutError:
+                    print("Shazam не ответил за 12 секунд")
+                    return ""
+                except Exception as e:
+                    print(f"Ошибка распознавания Shazam: {e!r}")
+                    return ""
 
-                        # Для ускоренной/замедленной музыки Shazam может вернуть
-                        # совпадение только без строгой проверки. Доверяем ему
-                        # лишь когда второй независимый фрагмент подтвердил тот же трек.
-                        loose_result = await shazam.recognize(sample_path)
-                        loose_query = _shazam_result_query(loose_result)
-                        if loose_query:
-                            loose_matches.append(loose_query)
-                    except Exception as e:
-                        print(f"Ошибка распознавания фрагмента Shazam: {e!r}")
-            return strict_matches, loose_matches
+        print("🎵 TikTok: распознаю музыку через Shazam...")
+        recognized_query = asyncio.run(recognize_one_sample())
+        if recognized_query:
+            print(f"Shazam распознал музыку по звуку: {recognized_query}")
+            return recognized_query
 
-        strict_matches, loose_matches = asyncio.run(recognize_samples())
-        if strict_matches:
-            unique = {norm_text(item): item for item in strict_matches}
-            if len(unique) == 1:
-                query = next(iter(unique.values()))
-                print(f"Shazam распознал музыку по звуку: {query}")
-                return query
-            print(f"Фрагменты видео дали разные строгие распознавания: {strict_matches}")
-            return ""
-
-        if len(loose_matches) >= 2:
-            unique = {norm_text(item): item for item in loose_matches}
-            if len(unique) == 1:
-                query = next(iter(unique.values()))
-                print(f"Shazam подтвердил музыку двумя фрагментами: {query}")
-                return query
-
-        if loose_matches:
-            print(f"Shazam не смог подтвердить совпадение двумя фрагментами: {loose_matches}")
+        print("Shazam не подтвердил композицию по аудиофрагменту; проверяю музыкальные метаданные")
         return ""
     except Exception as e:
-        print(f"Не удалось распознать музыку непосредственно по звуку видео: {e!r}")
+        print(f"Не удалось распознать музыку по звуку видео: {e!r}")
         return ""
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -2603,9 +2574,10 @@ def _video_url_metadata_queries(video_url):
         "no_warnings": True,
         "skip_download": True,
         "noplaylist": True,
-        "socket_timeout": 20,
-        "retries": 2,
-        "extractor_retries": 2,
+        "socket_timeout": 10,
+        "retries": 0,
+        "extractor_retries": 0,
+        "fragment_retries": 0,
         "playlistend": 1,
         "ignoreerrors": False,
     }
@@ -3289,7 +3261,7 @@ def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filt
 
     if is_new:
         if extract_video_search_url(query):
-            status_text = "🔗 Проверяю видео и ищу музыку..."
+            status_text = "🔗 Получаю звук из видео и распознаю музыку..."
         elif len(query.split()) >= 2 and len(query) >= 8:
             status_text = "🔎 Ищу по названию и словам песни..."
         else:
