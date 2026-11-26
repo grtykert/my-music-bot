@@ -8,6 +8,10 @@ import telebot
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, InputMediaAudio
 from telebot.apihelper import ApiTelegramException
 import yt_dlp
+try:
+    from yt_dlp.version import __version__ as YT_DLP_VERSION
+except Exception:
+    YT_DLP_VERSION = "unknown"
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode, quote, urljoin
@@ -2414,13 +2418,15 @@ VIDEO_QUERY_CACHE_TTL = 900
 
 # Ссылки на музыкальные сервисы и прямые ссылки на треки
 MUSIC_LINK_HOSTS = (
-    "open.spotify.com", "spotify.link", "music.apple.com", "music.yandex.ru",
+    "spotify.com", "spotify.link", "music.apple.com", "music.yandex.ru",
     "music.yandex.com", "music.yandex.by", "music.yandex.kz", "deezer.com",
     "tidal.com", "bandcamp.com", "soundcloud.com", "audius.co", "archive.org",
 )
 # Для этих видеосервисов название ролика — разумный запасной вариант поиска
-VIDEO_TITLE_FALLBACK_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com",
-                              "rutube.ru", "vimeo.com", "dailymotion.com", "vk.com")
+VIDEO_TITLE_FALLBACK_HOSTS = (
+    "youtube.com", "youtu.be", "youtube-nocookie.com",
+    "rutube.ru", "vimeo.com", "dailymotion.com", "vk.com", "tiktok.com"
+)
 
 
 def _host_in(url, domains):
@@ -2657,6 +2663,240 @@ def _is_generic_music_label(value):
     return any(value == label or value.startswith(label + " ") for label in generic_labels)
 
 
+def _walk_json_objects(root, max_nodes=12000):
+    """Безопасно обходит вложенный JSON TikTok, не предполагая фиксированную схему."""
+    stack = [root]
+    visited = 0
+    while stack and visited < max_nodes:
+        value = stack.pop()
+        visited += 1
+        if isinstance(value, dict):
+            yield value
+            stack.extend(v for v in value.values() if isinstance(v, (dict, list)))
+        elif isinstance(value, list):
+            stack.extend(v for v in value if isinstance(v, (dict, list)))
+
+
+def _first_text_field(obj, names):
+    if not isinstance(obj, dict):
+        return ""
+    for name in names:
+        value = obj.get(name)
+        if isinstance(value, str):
+            value = " ".join(value.split()).strip()
+            if value and len(value) <= 220:
+                return value
+        elif isinstance(value, dict):
+            nested = _first_text_field(value, ("title", "name", "nickname", "unique_id"))
+            if nested:
+                return nested
+    return ""
+
+
+def _parse_embedded_json_blocks(page):
+    """Извлекает JSON-объекты из типичных контейнеров страниц TikTok/соцсетей."""
+    parsed = []
+    script_re = re.compile(r"<script\b([^>]*)>(.*?)</script\s*>", re.I | re.S)
+    for match in script_re.finditer(page or ""):
+        attrs = match.group(1) or ""
+        body = (match.group(2) or "").strip()
+        if not body:
+            continue
+        is_json = (
+            "__UNIVERSAL_DATA_FOR_REHYDRATION__" in attrs
+            or "SIGI_STATE" in attrs
+            or "__NEXT_DATA__" in attrs
+            or re.search(r"application/ld\+json", attrs, re.I)
+        )
+        if not is_json and not any(k in body for k in ("musicInfo", "musicName", "music_info")):
+            continue
+        if len(body) > 4 * 1024 * 1024:
+            continue
+        try:
+            parsed.append(json.loads(unescape(body)))
+        except Exception:
+            start = body.find("{")
+            end = body.rfind("}")
+            if start >= 0 and end > start:
+                try:
+                    parsed.append(json.loads(unescape(body[start:end + 1])))
+                except Exception:
+                    pass
+    return parsed
+
+
+def _extract_tiktok_music_queries_from_object(root):
+    """Ищет именно данные звуковой дорожки, а не имя автора самого видео."""
+    queries = []
+    seen = set()
+    title_keys = (
+        "musicName", "music_name", "musicTitle", "music_title", "trackName",
+        "track_name", "songName", "song_name", "title"
+    )
+    artist_keys = ("authorName", "author_name", "artistName", "artist_name", "artist", "author")
+
+    def add(title, artist=""):
+        title = " ".join(str(title or "").split()).strip(" -–—|,.;:#")[:160]
+        artist = " ".join(str(artist or "").split()).strip(" -–—|,.;:#")[:100]
+        if not title or _is_generic_music_label(title):
+            return
+        query = f"{artist} - {title}" if artist and not _is_generic_music_label(artist) else title
+        key = query.casefold()
+        if key not in seen:
+            seen.add(key)
+            queries.append(query)
+
+    for obj in _walk_json_objects(root):
+        for music_key in ("music", "musicInfo", "music_info", "sound", "soundInfo"):
+            music_obj = obj.get(music_key)
+            if isinstance(music_obj, dict):
+                title = _first_text_field(music_obj, title_keys)
+                artist = _first_text_field(music_obj, artist_keys)
+                add(title, artist)
+        title = _first_text_field(
+            obj,
+            ("musicName", "music_name", "musicTitle", "music_title",
+             "trackName", "track_name", "songName", "song_name")
+        )
+        artist = _first_text_field(obj, artist_keys)
+        add(title, artist)
+        if len(queries) >= 4:
+            break
+    return queries[:4]
+
+
+def _video_oembed_payload(video_url):
+    """Запрашивает официальный публичный oEmbed, когда он доступен у источника."""
+    if _host_in(video_url, ("tiktok.com",)):
+        endpoint = "https://www.tiktok.com/oembed?" + urlencode({"url": video_url})
+    elif _host_in(video_url, ("youtube.com", "youtu.be", "youtube-nocookie.com")):
+        endpoint = "https://www.youtube.com/oembed?" + urlencode({"url": video_url, "format": "json"})
+    elif _host_in(video_url, ("vimeo.com",)):
+        endpoint = "https://vimeo.com/api/oembed.json?" + urlencode({"url": video_url})
+    else:
+        return None
+    try:
+        payload = _http_json(endpoint, timeout=7)
+        return payload if isinstance(payload, dict) else None
+    except Exception as e:
+        print(f"oEmbed не вернул метаданные для {video_url}: {e!r}")
+        return None
+
+
+def _video_page_music_metadata_queries(video_url):
+    """Запасное получение названия звука напрямую со страницы, без yt-dlp."""
+    queries = []
+    seen = set()
+
+    def add(value):
+        value = re.sub(r"https?://\S+", " ", unescape(str(value or "")))
+        value = re.sub(r"#[\w\u0400-\u04ff]+", " ", value)
+        value = " ".join(value.split()).strip(" -–—|,.;:#")[:180]
+        if len(value) < 2 or _is_generic_music_label(value):
+            return
+        if value.casefold() not in seen:
+            seen.add(value.casefold())
+            queries.append(value)
+
+    payload = _video_oembed_payload(video_url)
+    if payload:
+        title = payload.get("music_title") or payload.get("track") or payload.get("sound_title")
+        artist = payload.get("music_author") or payload.get("artist")
+        if title and artist:
+            add(f"{artist} - {title}")
+        elif title:
+            add(title)
+
+    try:
+        page = _fetch_page_html(video_url, timeout=8, max_bytes=3 * 1024 * 1024)
+    except Exception as e:
+        print(f"Не удалось получить HTML страницы видео {video_url}: {e!r}")
+        page = ""
+
+    for data in _parse_embedded_json_blocks(page):
+        for query in _extract_tiktok_music_queries_from_object(data):
+            add(query)
+            if len(queries) >= 4:
+                return queries[:4]
+
+    if page and not queries:
+        for title_match in re.finditer(
+            r'"(?:musicName|music_name|musicTitle|music_title|trackName)"\s*:\s*"((?:\\.|[^"\\]){2,180})"',
+            page,
+            re.I,
+        ):
+            raw_title = title_match.group(1)
+            try:
+                title = json.loads('"' + raw_title + '"')
+            except Exception:
+                title = raw_title.replace(r"\/", "/")
+            add(title)
+            if len(queries) >= 4:
+                break
+
+    if page and len(queries) < 4:
+        page_text = re.sub(r"<[^>]+>", "\n", page)
+        for line in page_text.splitlines():
+            match = re.search(
+                r"(?i)(?:song|track|music|audio|sound|песня|трек|музыка)\s*[:：—-]\s*(.{3,160})",
+                unescape(line),
+            )
+            if match:
+                add(match.group(1))
+                if len(queries) >= 4:
+                    break
+    return queries[:4]
+
+
+def _extract_meta_content(page, key_names):
+    """Извлекает meta content независимо от порядка property/name и content."""
+    wanted = {name.casefold() for name in key_names}
+    for tag_match in re.finditer(r"<meta\b[^>]*>", page or "", re.I):
+        tag = tag_match.group(0)
+        attrs = {}
+        for attr in re.finditer(r"([\w:-]+)\s*=\s*([\"'])(.*?)\2", tag, re.I | re.S):
+            attrs[attr.group(1).casefold()] = unescape(attr.group(3))
+        name = (attrs.get("property") or attrs.get("name") or "").casefold()
+        if name in wanted and attrs.get("content"):
+            return " ".join(attrs["content"].split()).strip()[:300]
+    return ""
+
+
+def _public_video_title_fallback(video_url):
+    """Берёт заголовок через oEmbed/og:title, если yt-dlp не смог открыть ролик."""
+    payload = _video_oembed_payload(video_url)
+    title = str((payload or {}).get("title") or "").strip()
+    author = str((payload or {}).get("author_name") or "").strip()
+
+    try:
+        page = _fetch_page_html(video_url, timeout=8, max_bytes=2 * 1024 * 1024)
+    except Exception as e:
+        print(f"Не удалось прочитать заголовок страницы {video_url}: {e!r}")
+        page = ""
+
+    if page:
+        page_title = (_extract_meta_content(page, ("og:title", "twitter:title"))
+                      or _extract_meta_content(page, ("title",)))
+        if page_title:
+            title = page_title
+        if not title:
+            title_tag = re.search(r"<title[^>]*>(.*?)</title>", page, re.I | re.S)
+            if title_tag:
+                title = unescape(re.sub(r"\s+", " ", title_tag.group(1))).strip()
+
+    title = re.sub(r"\s*[|–—-]\s*(?:TikTok|YouTube|Vimeo|Facebook|Instagram).*$", "", title, flags=re.I)
+    title = re.sub(r"(?i)^watch\s+", "", title)
+    title = re.sub(r"(?i)\s+on\s+TikTok$", "", title)
+    title = re.sub(r"#[\w\u0400-\u04ff]+", " ", title)
+    title = " ".join(title.split()).strip(" -–—|")[:160]
+    if not title or _is_generic_music_label(title):
+        return ""
+
+    if author and not _host_in(video_url, ("tiktok.com",)):
+        return f"{author} - {title}"[:180]
+    return title
+
+
 def _video_url_metadata_queries(video_url):
     """Получает несколько поисковых вариантов из музыкальных метаданных и описания ролика."""
     if not extract_video_search_url(video_url):
@@ -2704,8 +2944,19 @@ def _video_url_metadata_queries(video_url):
             print(f"Не удалось получить метаданные видео {candidate_url}: {e!r}")
 
     if not isinstance(info, dict):
+        # yt-dlp не всегда может прочитать TikTok/соцсети. Пробуем получить звук
+        # из JSON страницы или публичного oEmbed, не завися от extractor-а.
+        fallback_queries = _video_page_music_metadata_queries(expanded_url)
+        if fallback_queries:
+            with VIDEO_QUERY_CACHE_LOCK:
+                VIDEO_QUERY_CACHE[cache_key] = (time.time(), tuple(fallback_queries))
+                while len(VIDEO_QUERY_CACHE) > 200:
+                    oldest_key = min(VIDEO_QUERY_CACHE, key=lambda key: VIDEO_QUERY_CACHE[key][0])
+                    VIDEO_QUERY_CACHE.pop(oldest_key, None)
+            print(f"Ссылка: музыка получена из публичных метаданных страницы: {fallback_queries}")
+            return fallback_queries
         raise RuntimeError(
-            "Не удалось открыть видео. Возможно, оно закрыто или сервис временно ограничил доступ."
+            "Не удалось получить название звука из видео. Источник мог закрыть метаданные или ограничить доступ."
         ) from last_error
 
     music_info = info.get("music_info") if isinstance(info.get("music_info"), dict) else {}
@@ -2778,6 +3029,15 @@ def _video_url_metadata_queries(video_url):
             if len(queries) >= 4:
                 break
 
+    if len(queries) < 4:
+        try:
+            for fallback_query in _video_page_music_metadata_queries(expanded_url):
+                add_query(fallback_query)
+                if len(queries) >= 4:
+                    break
+        except Exception as e:
+            print(f"Резервное чтение музыкальных метаданных страницы не удалось: {e!r}")
+
     if not queries:
         raise RuntimeError(
             "В видео не нашлось названия композиции. Попробуй отправить другую ссылку "
@@ -2802,21 +3062,39 @@ def _video_url_metadata_query(video_url):
 
 
 def _video_title_fallback_query(video_url):
-    """Запасной вариант для YouTube/Rutube/Vimeo и т.п.: очищенное название ролика."""
+    """Запасной запрос из заголовка видео, если музыкальные метаданные недоступны."""
     if not _host_in(video_url, VIDEO_TITLE_FALLBACK_HOSTS):
         return ""
-    try:
-        opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True,
-                "socket_timeout": 10, "retries": 0, "extractor_retries": 0}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(_expand_short_video_url(video_url), download=False) or {}
-    except Exception as e:
-        print(f"Не удалось получить название видео: {e!r}")
-        return ""
-    title = str(info.get("title") or "")
+
+    title = ""
+    # Для TikTok extractor часто падает до получения info, поэтому сразу используем
+    # публичную страницу/oEmbed, а не повторяем тот же запрос через yt-dlp.
+    if not _host_in(video_url, ("tiktok.com",)):
+        try:
+            opts = {
+                "quiet": True, "no_warnings": True, "skip_download": True,
+                "noplaylist": True, "socket_timeout": 10, "retries": 0,
+                "extractor_retries": 0, "fragment_retries": 0,
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(_expand_short_video_url(video_url), download=False) or {}
+            title = str(info.get("title") or "")
+        except Exception as e:
+            print(f"Не удалось получить название видео через yt-dlp: {e!r}")
+
+    if not title:
+        title = _public_video_title_fallback(video_url)
+
     title = re.sub(r"[\(\[][^\)\]]*[\)\]]", " ", title)
-    title = re.sub(r"(?i)\b(official|music|video|audio|lyrics?|clip|клип|премьера|hd|4k)\b", " ", title)
-    return " ".join(title.split()).strip(" -–—|")[:160]
+    title = re.sub(
+        r"(?i)\b(official|music|video|audio|lyrics?|clip|клип|премьера|hd|4k)\b",
+        " ", title
+    )
+    title = re.sub(r"#[\w\u0400-\u04ff]+", " ", title)
+    title = " ".join(title.split()).strip(" -–—|")[:160]
+    if _is_generic_music_label(title):
+        return ""
+    return title
 
 
 # --- ПОИСК ПО ССЫЛКЕ НА МУЗЫКАЛЬНЫЙ СЕРВИС / ТРЕК ---
@@ -2890,6 +3168,20 @@ def _direct_track_from_link(url):
     return None
 
 
+def _music_link_oembed_query(url):
+    """Резерв для Spotify: получаем публичное название страницы через их oEmbed."""
+    host = (urlparse(url).hostname or "").lower()
+    if host == "spotify.link" or host.endswith(".spotify.link") or host == "open.spotify.com":
+        payload = _http_json(
+            "https://open.spotify.com/oembed?" + urlencode({"url": url}), timeout=7
+        )
+        if isinstance(payload, dict):
+            title = str(payload.get("title") or "").strip()
+            if title and not _is_generic_music_label(title):
+                return title[:160]
+    return ""
+
+
 def _search_by_music_link(url, count):
     results = []
     title_query = ""
@@ -2906,6 +3198,11 @@ def _search_by_music_link(url, count):
             title_query = _page_title_query(url)
         except Exception as e:
             print(f"Не удалось прочитать страницу {url}: {e!r}")
+        if not title_query:
+            try:
+                title_query = _music_link_oembed_query(url)
+            except Exception as e:
+                print(f"Не удалось получить oEmbed музыкальной ссылки: {e!r}")
     if title_query:
         try:
             results += cached_soundcloud_search(title_query, count, "track")
@@ -3025,6 +3322,7 @@ def unified_music_search(query, count=30):
         song_queries = []
         strict_query = ""
         metadata_error = None
+        shazam_attempted = False
 
         # 1) Музыка, которую сам сервис прикрепил к ролику (быстро, без загрузки).
         try:
@@ -3042,6 +3340,7 @@ def unified_music_search(query, count=30):
 
         # 3) Распознавание по звуку через Shazam.
         if not song_queries:
+            shazam_attempted = True
             recognized_query = _recognize_video_audio_query(video_url)
             if recognized_query:
                 song_queries = [recognized_query]
@@ -3069,6 +3368,7 @@ def unified_music_search(query, count=30):
         video_tracks = dedupe_tracks(video_tracks)
         if not video_tracks and search_errors:
             print(f"Ни один вариант поиска по видео не дал результатов: {search_errors[0]!r}")
+        ranked_video_tracks = []
         if video_tracks:
             ranked_video_tracks = score_tracks(video_tracks, song_queries)
             ranked_video_tracks = dedupe_ranked_titles(ranked_video_tracks)
@@ -3079,7 +3379,29 @@ def unified_music_search(query, count=30):
                     (score, track) for score, track in ranked_video_tracks
                     if _track_matches_track_query(track, strict_query)
                 ]
-            return [track for _, track in ranked_video_tracks[:count]]
+            if ranked_video_tracks:
+                return [track for _, track in ranked_video_tracks[:count]]
+
+        # Если заголовок ролика оказался лишь подписью и по нему ничего не нашлось,
+        # даём Shazam вторую возможность распознать сам звук видео.
+        if not shazam_attempted:
+            recognized_query = _recognize_video_audio_query(video_url)
+            if recognized_query and recognized_query.casefold() not in {
+                value.casefold() for value in song_queries
+            }:
+                try:
+                    recognized_tracks = cached_soundcloud_search(recognized_query, count, "track")
+                    recognized_ranked = dedupe_ranked_titles(
+                        score_tracks(dedupe_tracks(recognized_tracks), recognized_query)
+                    )
+                    recognized_ranked = [
+                        (score, track) for score, track in recognized_ranked
+                        if _track_matches_track_query(track, recognized_query)
+                    ]
+                    if recognized_ranked:
+                        return [track for _, track in recognized_ranked[:count]]
+                except Exception as e:
+                    print(f"Поиск распознанного через Shazam трека не удался: {e!r}")
         return []
 
     # Обычный поиск по названию всегда выполняется первым.
@@ -4558,6 +4880,8 @@ def handle_web_app_data(message):
 # --- ОСНОВНОЙ БЛОК ЗАПУСКА С ЗАЩИТОЙ ОТ 409 ОШИБКИ ---
 if __name__ == '__main__':
     print("🚀 Запуск бота...")
+    print(f"📦 yt-dlp version: {YT_DLP_VERSION}")
+    print("ℹ️ Для актуального парсинга TikTok используй yt-dlp 2026.11.23 или новее.")
     try:
         bot.set_my_commands([
             telebot.types.BotCommand("app", "🎧 Открыть плеер"),
