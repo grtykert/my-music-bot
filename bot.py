@@ -2834,17 +2834,6 @@ def _video_page_music_metadata_queries(video_url):
             if len(queries) >= 4:
                 break
 
-    if page and len(queries) < 4:
-        page_text = re.sub(r"<[^>]+>", "\n", page)
-        for line in page_text.splitlines():
-            match = re.search(
-                r"(?i)(?:song|track|music|audio|sound|песня|трек|музыка)\s*[:：—-]\s*(.{3,160})",
-                unescape(line),
-            )
-            if match:
-                add(match.group(1))
-                if len(queries) >= 4:
-                    break
     return queries[:4]
 
 
@@ -3300,14 +3289,69 @@ def search_song_titles_by_lyric_fragment(phrase, limit=4):
     return list(dict.fromkeys(found_titles))[:max(1, min(8, int(limit)))]
 
 
+def _video_track_matches_query(track, query):
+    """Строгая проверка кандидата по названию звука из ссылки."""
+    tokens = [t for t in _query_tokens(query) if t not in GENERIC_SEARCH_TOKENS]
+    if not tokens:
+        return False
+
+    title_words = set(norm_text(track.get("title")).split())
+    artist_words = set(norm_text(track.get("uploader")).split())
+    all_words = title_words | artist_words
+
+    # Однословный запрос должен встретиться в названии или имени исполнителя.
+    # Не позволяем SequenceMatcher подобрать случайный похожий трек.
+    if len(tokens) == 1:
+        return tokens[0] in all_words
+
+    return _track_matches_track_query(track, query)
+
+
+def _search_video_query_variants(queries, count):
+    """Ищет варианты отдельно и сохраняет связь результата с исходной фразой."""
+    found = []
+    errors = []
+    unique_queries = []
+    for value in queries or []:
+        value = " ".join(str(value or "").split()).strip()
+        if value and value.casefold() not in {q.casefold() for q in unique_queries}:
+            unique_queries.append(value)
+
+    if not unique_queries:
+        return [], []
+
+    with ThreadPoolExecutor(max_workers=min(4, len(unique_queries))) as pool:
+        futures = {pool.submit(cached_soundcloud_search, q, count, "track"): q for q in unique_queries}
+        for future in as_completed(futures):
+            q = futures[future]
+            try:
+                for track in future.result() or []:
+                    found.append((q, track))
+            except Exception as e:
+                errors.append(e)
+                print(f"Поиск по данным ссылки «{q}» не удался: {e!r}")
+
+    # Фильтруем каждый результат именно по тому запросу, из которого он пришёл.
+    # Раньше результаты разных вариантов смешивались, после чего ранжировались
+    # по всему набору запросов — это могло протащить слабое/чужое совпадение.
+    verified = []
+    seen = set()
+    for q, track in found:
+        if not _video_track_matches_query(track, q):
+            continue
+        url = str(track.get("url") or "")
+        key = url or (norm_text(track.get("title")), norm_text(track.get("uploader")))
+        if key in seen:
+            continue
+        seen.add(key)
+        verified.append(track)
+
+    ranked = dedupe_ranked_titles(score_tracks(verified, unique_queries))
+    return [track for _, track in ranked[:count]], errors
+
+
 def unified_music_search(query, count=30):
-    """
-    Один поиск для бота, inline-режима и Mini App:
-    - ссылка на музыкальный сервис / трек: читаем название со страницы и ищем композицию;
-    - ссылка на видео: музыкальные метаданные → Shazam → название ролика (YouTube и др.);
-    - название/исполнитель: стандартный поиск;
-    - фраза из песни: стандартный поиск плюс поиск совпадения в текстах песен.
-    """
+    """Единый поиск для бота, inline-режима и Mini App."""
     query = " ".join(str(query or "").split()).strip()
     count = max(1, min(100, int(count)))
     if not query:
@@ -3319,95 +3363,99 @@ def unified_music_search(query, count=30):
 
     video_url = extract_video_search_url(query)
     if video_url:
-        song_queries = []
-        strict_query = ""
-        metadata_error = None
-        shazam_attempted = False
+        host = (urlparse(video_url).hostname or "").lower()
+        is_tiktok = _host_in(video_url, ("tiktok.com",))
+        print(f"[VIDEO SEARCH] Начинаю разбор ссылки: host={host}, url={video_url}")
 
-        # 1) Музыка, которую сам сервис прикрепил к ролику (быстро, без загрузки).
+        song_queries = []
+        metadata_error = None
+        recognized_query = ""
+        shazam_search_attempted = False
+
+        # TikTok нередко отдаёт одинаковые/неполные подписи в HTML. Поэтому
+        # сначала пытаемся распознать фактический звук видео, а не угадывать по caption.
+        if is_tiktok:
+            shazam_search_attempted = True
+            recognized_query = _recognize_video_audio_query(video_url)
+            if recognized_query:
+                print(f"[VIDEO SEARCH] Shazam распознал TikTok: {recognized_query}")
+                recognized_tracks, recognized_errors = _search_video_query_variants([recognized_query], count)
+                if recognized_tracks:
+                    print(
+                        "[VIDEO SEARCH] Подтверждённые совпадения Shazam: "
+                        + "; ".join(
+                            f"{t.get('title', '')} — {t.get('uploader', '')} [{t.get('source', 'unknown')}]"
+                            for t in recognized_tracks[:5]
+                        )
+                    )
+                    return recognized_tracks[:count]
+                if recognized_errors:
+                    print(f"[VIDEO SEARCH] Поиск трека Shazam не удался: {recognized_errors[0]!r}")
+
         try:
             song_queries = _video_url_metadata_queries(video_url)
         except Exception as e:
             metadata_error = e
-            print(f"Не удалось получить название прикреплённого звука: {e!r}")
+            print(f"[VIDEO SEARCH] Не удалось получить музыкальные метаданные: {e!r}")
 
-        # 2) Для YouTube и похожих сервисов название ролика надёжнее и быстрее Shazam.
-        if not song_queries and _host_in(video_url, VIDEO_TITLE_FALLBACK_HOSTS):
-            title_query = _video_title_fallback_query(video_url)
-            if title_query:
-                song_queries = [title_query]
-                strict_query = title_query
+        # В TikTok заголовок ролика часто является подписью автора, а не песней.
+        # Поэтому не превращаем caption/имя автора в название трека.
+        if song_queries:
+            print(f"[VIDEO SEARCH] Найдены метаданные звука: {song_queries}")
+            verified_tracks, search_errors = _search_video_query_variants(song_queries, count)
+            if verified_tracks:
+                print(
+                    "[VIDEO SEARCH] Подтверждённые совпадения: "
+                    + "; ".join(
+                        f"{t.get('title', '')} — {t.get('uploader', '')} [{t.get('source', 'unknown')}]"
+                        for t in verified_tracks[:5]
+                    )
+                )
+                return verified_tracks[:count]
+            if search_errors:
+                print(f"[VIDEO SEARCH] Поиск по метаданным завершился с ошибкой: {search_errors[0]!r}")
 
-        # 3) Распознавание по звуку через Shazam.
-        if not song_queries:
-            shazam_attempted = True
+        # Если в структурированных данных не оказалось точного совпадения,
+        # пробуем распознать сам аудиофрагмент. Это важнее названия публикации.
+        if not shazam_search_attempted:
+            shazam_search_attempted = True
             recognized_query = _recognize_video_audio_query(video_url)
             if recognized_query:
-                song_queries = [recognized_query]
-                strict_query = recognized_query
-
-        if not song_queries:
-            if metadata_error:
-                print(f"Метаданные недоступны, название и Shazam ничего не дали: {metadata_error!r}")
-            return []
-
-        video_tracks = []
-        search_errors = []
-        with ThreadPoolExecutor(max_workers=min(4, len(song_queries))) as pool:
-            jobs = [
-                pool.submit(cached_soundcloud_search, song_query, count, "track")
-                for song_query in song_queries
-            ]
-            for future in as_completed(jobs):
-                try:
-                    video_tracks.extend(future.result() or [])
-                except Exception as e:
-                    search_errors.append(e)
-                    print(f"Поиск музыки по данным видео не удался: {e!r}")
-
-        video_tracks = dedupe_tracks(video_tracks)
-        if not video_tracks and search_errors:
-            print(f"Ни один вариант поиска по видео не дал результатов: {search_errors[0]!r}")
-        ranked_video_tracks = []
-        if video_tracks:
-            ranked_video_tracks = score_tracks(video_tracks, song_queries)
-            ranked_video_tracks = dedupe_ranked_titles(ranked_video_tracks)
-            if strict_query:
-                # Название ролика или Shazam могут быть неточными —
-                # не показываем похожие по одному случайному слову композиции.
-                ranked_video_tracks = [
-                    (score, track) for score, track in ranked_video_tracks
-                    if _track_matches_track_query(track, strict_query)
-                ]
-            if ranked_video_tracks:
-                return [track for _, track in ranked_video_tracks[:count]]
-
-        # Если заголовок ролика оказался лишь подписью и по нему ничего не нашлось,
-        # даём Shazam вторую возможность распознать сам звук видео.
-        if not shazam_attempted:
-            recognized_query = _recognize_video_audio_query(video_url)
-            if recognized_query and recognized_query.casefold() not in {
-                value.casefold() for value in song_queries
-            }:
-                try:
-                    recognized_tracks = cached_soundcloud_search(recognized_query, count, "track")
-                    recognized_ranked = dedupe_ranked_titles(
-                        score_tracks(dedupe_tracks(recognized_tracks), recognized_query)
+                print(f"[VIDEO SEARCH] Shazam распознал композицию: {recognized_query}")
+                recognized_tracks, recognized_errors = _search_video_query_variants([recognized_query], count)
+                if recognized_tracks:
+                    print(
+                        "[VIDEO SEARCH] Найдены совпадения Shazam: "
+                        + "; ".join(
+                            f"{t.get('title', '')} — {t.get('uploader', '')} [{t.get('source', 'unknown')}]"
+                            for t in recognized_tracks[:5]
+                        )
                     )
-                    recognized_ranked = [
-                        (score, track) for score, track in recognized_ranked
-                        if _track_matches_track_query(track, recognized_query)
-                    ]
-                    if recognized_ranked:
-                        return [track for _, track in recognized_ranked[:count]]
-                except Exception as e:
-                    print(f"Поиск распознанного через Shazam трека не удался: {e!r}")
+                    return recognized_tracks[:count]
+                if recognized_errors:
+                    print(f"[VIDEO SEARCH] Поиск распознанного трека не удался: {recognized_errors[0]!r}")
+
+        # Для YouTube/Vimeo/Rutube допускаем название ролика как последний
+        # резервный запрос, но только если оно даёт реальное совпадение.
+        # TikTok сюда намеренно не попадает: его caption не доказывает, какая там музыка.
+        if not is_tiktok and _host_in(video_url, VIDEO_TITLE_FALLBACK_HOSTS):
+            title_query = _video_title_fallback_query(video_url)
+            if title_query:
+                print(f"[VIDEO SEARCH] Запасной запрос по заголовку видео: {title_query}")
+                title_tracks, title_errors = _search_video_query_variants([title_query], count)
+                if title_tracks:
+                    return title_tracks[:count]
+                if title_errors:
+                    print(f"[VIDEO SEARCH] Поиск по заголовку видео не удался: {title_errors[0]!r}")
+
+        if metadata_error:
+            print(f"[VIDEO SEARCH] Не удалось распознать ссылку {video_url}: {metadata_error!r}")
+        print(f"[VIDEO SEARCH] Надёжное совпадение не найдено для ссылки: {video_url}")
         return []
 
-    # Обычный поиск по названию всегда выполняется первым.
+    # Обычный поиск по названию и фрагменту текста песни не меняем.
     title_tracks = cached_soundcloud_search(query, count, "track")
 
-    # Поиск в текстах нужен только для достаточно длинных фраз.
     words = query.split()
     lyric_titles = []
     if len(query) >= 12 and len(words) >= 3:
@@ -3428,7 +3476,6 @@ def unified_music_search(query, count=30):
             except Exception as e:
                 print(f"Не удалось найти аудио по найденному названию песни: {e!r}")
 
-    # Треки, найденные по подтверждённым совпадениям в тексте, показываем раньше.
     lyric_ranked = score_tracks(dedupe_tracks(lyric_tracks), lyric_titles)
     lyric_ranked = dedupe_ranked_titles(lyric_ranked)
     lyric_tracks_sorted = [track for _, track in lyric_ranked]
