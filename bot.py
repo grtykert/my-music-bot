@@ -11,7 +11,7 @@ import yt_dlp
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, parse_qsl, urlencode, quote, urljoin
-from html import unescape
+from html import unescape, escape as esc
 import hmac
 import hashlib
 import time
@@ -39,8 +39,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class DummyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    _response_started = False
 
     def _send_bytes(self, status, body, content_type, extra_headers=None):
+        self._response_started = True
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
@@ -69,17 +71,26 @@ class DummyHandler(BaseHTTPRequestHandler):
         if parsed.path in ("/healthz", "/health"):
             self._send_json(200, {"ok": True})
             return
-        if parsed.path == "/api/data":
-            handle_miniapp_get_data(self)
-            return
-        if parsed.path == "/api/search":
-            handle_miniapp_search(self, parse_qs(parsed.query))
-            return
-        if parsed.path == "/api/stream":
-            handle_miniapp_stream(self, parse_qs(parsed.query))
-            return
-        if parsed.path == "/api/lyrics":
-            handle_miniapp_lyrics(self, parse_qs(parsed.query))
+        try:
+            if parsed.path == "/api/data":
+                handle_miniapp_get_data(self)
+                return
+            if parsed.path == "/api/search":
+                handle_miniapp_search(self, parse_qs(parsed.query))
+                return
+            if parsed.path == "/api/stream":
+                handle_miniapp_stream(self, parse_qs(parsed.query))
+                return
+            if parsed.path == "/api/lyrics":
+                handle_miniapp_lyrics(self, parse_qs(parsed.query))
+                return
+        except Exception as e:
+            print(f"Ошибка GET {parsed.path}: {e!r}")
+            if not self._response_started:
+                try:
+                    self._send_json(500, {"error": "Внутренняя ошибка сервера"})
+                except Exception:
+                    pass
             return
         self._send_json(404, {"error": "Не найдено"})
 
@@ -88,6 +99,7 @@ class DummyHandler(BaseHTTPRequestHandler):
         if not parsed.path.startswith("/api/"):
             self._send_json(404, {"error": "Не найдено"})
             return
+        # Сначала разбор запроса: ошибка здесь — действительно 400.
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > 256 * 1024:
@@ -96,10 +108,20 @@ class DummyHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(payload, dict):
                 raise ValueError("Ожидался JSON-объект")
+        except Exception as e:
+            print(f"Некорректный запрос к API Mini App: {e}")
+            self._send_json(400, {"error": "Некорректный запрос"})
+            return
+        # Ошибки самих обработчиков — 500, и только если ответ ещё не начат.
+        try:
             handle_miniapp_post(self, parsed.path, payload)
         except Exception as e:
-            print(f"Ошибка API Mini App: {e}")
-            self._send_json(400, {"error": "Некорректный запрос"})
+            print(f"Ошибка API Mini App {parsed.path}: {e!r}")
+            if not self._response_started:
+                try:
+                    self._send_json(500, {"error": "Внутренняя ошибка сервера"})
+                except Exception:
+                    pass
 
     def do_HEAD(self):
         parsed = urlparse(self.path)
@@ -113,16 +135,22 @@ class DummyHandler(BaseHTTPRequestHandler):
                 self.end_headers()
             except OSError:
                 self.send_response(404)
+                self.send_header("Content-Length", "0")
                 self.end_headers()
             return
         if parsed.path in ("/healthz", "/health"):
             self.send_response(200)
+            self.send_header("Content-Length", "0")
             self.end_headers()
             return
         if parsed.path == "/api/stream":
-            handle_miniapp_stream(self, parse_qs(parsed.query))
+            try:
+                handle_miniapp_stream(self, parse_qs(parsed.query))
+            except Exception as e:
+                print(f"Ошибка HEAD stream: {e!r}")
             return
         self.send_response(404)
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def log_message(self, format, *args):
@@ -156,11 +184,13 @@ if WEB_APP_URL:
 else:
     print("⚠️ WEB_APP_URL отсутствует или некорректен. Кнопка Mini App будет скрыта.")
 
+# Все значения можно переопределить переменными окружения (значения по умолчанию — прежние).
 BACKUP_CHANNEL_ID = int(os.environ.get("BACKUP_CHANNEL_ID", -1004445455425))
 ADMIN_ID = int(os.environ.get("ADMIN_ID", 5378591975))
 
 # ОБЯЗАТЕЛЬНЫЙ КАНАЛ/ГРУППА ДЛЯ ПОДПИСКИ
-REQUIRED_CHANNEL = "-1004362385382"
+REQUIRED_CHANNEL = os.environ.get("REQUIRED_CHANNEL", "-1004362385382")
+INVITE_URL = os.environ.get("INVITE_URL", "https://t.me/+8JYfdTy2YhE0NDJi")
 
 bot = telebot.TeleBot(API_TOKEN)
 
@@ -193,6 +223,25 @@ users_offset = 0  # Поправка для ручной корректиров�
 
 # Не больше 2 одновременных загрузок (экономим память на Render)
 download_slots = threading.Semaphore(2)
+
+AUDIO_CACHE_MAX = 2000
+
+
+def trim_dict(d, limit):
+    """Удаляет самые старые записи, чтобы словарь не рос бесконечно."""
+    while len(d) > limit:
+        try:
+            d.pop(next(iter(d)), None)
+        except (StopIteration, RuntimeError):
+            break
+
+
+def cache_audio(url, file_id):
+    if not url or not file_id:
+        return
+    audio_cache[url] = file_id
+    trim_dict(audio_cache, AUDIO_CACHE_MAX)
+
 
 # ============================================================
 #                        VIP СИСТЕМА
@@ -283,9 +332,13 @@ def check_user_subscription(user_id):
         member = bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         status = getattr(member, "status", "left")
         print(f"Проверка подписки: user_id={user_id}, group={REQUIRED_CHANNEL}, status={status}")
-        ok = status in ("creator", "administrator", "member")
+        # restricted с is_member=True — всё ещё участник группы (например, с ограничением на отправку).
+        ok = status in ("creator", "administrator", "member") or (
+            status == "restricted" and bool(getattr(member, "is_member", False))
+        )
         if ok:
             sub_check_cache[user_id] = time.time()
+            trim_dict(sub_check_cache, 5000)
         return ok
     except Exception as e:
         print(f"Ошибка проверки подписки для user_id={user_id} в {REQUIRED_CHANNEL}: {e}")
@@ -294,12 +347,12 @@ def check_user_subscription(user_id):
 
 def send_subscription_prompt(chat_id):
     markup = InlineKeyboardMarkup()
-    markup.row(InlineKeyboardButton("📢 Подписаться на группу", url="https://t.me/+8JYfdTy2YhE0NDJi"))
+    markup.row(InlineKeyboardButton("📢 Подписаться на группу", url=INVITE_URL))
     markup.row(InlineKeyboardButton("🔄 Я подписался", callback_data="check_sub"))
     markup.row(InlineKeyboardButton("👑 Купить VIP (без подписки)", callback_data="show_vip"))
     bot.send_message(
         chat_id,
-        "❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: https://t.me/+8JYfdTy2YhE0NDJi\n\nПосле подписки нажмите кнопку ниже:\n\n*Или купите VIP, чтобы отключить это требование на время подписки!*",
+        f"❌ **Доступ ограничен!**\n\nЧтобы пользоваться ботом и искать музыку, необходимо подписаться на нашу группу: {INVITE_URL}\n\nПосле подписки нажмите кнопку ниже:\n\n*Или купите VIP, чтобы отключить это требование на время подписки!*",
         reply_markup=markup,
         parse_mode="Markdown"
     )
@@ -579,7 +632,7 @@ def prepare_track_file(track_url, workdir, effect="none"):
 
 def count_download():
     with stats_lock:
-        stats_data["total_downloads"] += 1
+        stats_data["total_downloads"] = stats_data.get("total_downloads", 0) + 1
     request_save()
 
 
@@ -650,9 +703,11 @@ def restore_all_data():
             else:
                 active_users = {}
 
-            stats_data = data.get("stats", {"total_downloads": 0})
-            audio_cache = data.get("cache", {})
-            user_settings = data.get("settings", {})
+            loaded_stats = data.get("stats", {})
+            stats_data = loaded_stats if isinstance(loaded_stats, dict) else {}
+            stats_data.setdefault("total_downloads", 0)
+            audio_cache = data.get("cache", {}) or {}
+            user_settings = data.get("settings", {}) or {}
             users_offset = data.get("users_offset", 0)
 
             active_users[str(ADMIN_ID)] = now
@@ -785,8 +840,9 @@ def send_welcome(message):
         return
 
     text = (
-        "👋 Напиши название песни, несколько слов из неё или отправь ссылку на видео — я попробую найти трек. 🎵\n\n"
-        "💬 Наша группа: https://t.me/+8JYfdTy2YhE0NDJi\n\n"
+        "👋 Напиши название песни, несколько слов из неё или отправь ссылку на видео или трек "
+        "(TikTok, YouTube, Spotify, Apple Music, SoundCloud и др.) — я попробую найти трек. 🎵\n\n"
+        f"💬 Наша группа: {INVITE_URL}\n\n"
         "👑 VIP подписка: /vip\n"
         "💖 Поддержка разработчика: /donate"
     )
@@ -856,7 +912,7 @@ def set_users_command(message):
         target_count = int(args[1])
         now = time.time()
         month_ago = now - (28 * 24 * 60 * 60)
-        current_real_count = sum(1 for uid, last_seen in active_users.items() if last_seen >= month_ago)
+        current_real_count = sum(1 for uid, last_seen in list(active_users.items()) if last_seen >= month_ago)
 
         users_offset = target_count - current_real_count
         save_all_data()
@@ -867,12 +923,12 @@ def set_users_command(message):
 
 # --- АДМИН КОМАНДЫ VIP ---
 def parse_admin_target(message):
-    """ID берётся из аргумента, либо из сообщения, на которое ответили."""
+    """Сначала ответ на сообщение (тогда все аргументы — параметры), потом явный ID."""
     args = message.text.split()
-    if len(args) >= 2 and args[1].lstrip("-").isdigit():
-        return args[1], args[2:]
     if message.reply_to_message and message.reply_to_message.from_user:
         return str(message.reply_to_message.from_user.id), args[1:]
+    if len(args) >= 2 and args[1].lstrip("-").isdigit():
+        return args[1], args[2:]
     return None, []
 
 
@@ -1281,7 +1337,6 @@ def query_variants(query):
     return out[:3]
 
 
-
 # --- ДОПОЛНИТЕЛЬНЫЙ ОФИЦИАЛЬНЫЙ ИСТОЧНИК: AUDIUS ---
 # Используем только треки, для которых API прямо указывает доступность загрузки/стриминга.
 AUDIUS_API_BASE = "https://api.audius.co/v1"
@@ -1371,6 +1426,9 @@ def audius_candidate(item):
     track_id = str(item.get("id") or "").strip()
     title = str(item.get("title") or "").strip()
     permalink = str(item.get("permalink") or "").strip()
+    # API часто отдаёт относительный путь вида /artist/track — достраиваем домен.
+    if permalink.startswith("/"):
+        permalink = "https://audius.co" + permalink
     parsed = urlparse(permalink)
     host = (parsed.hostname or "").lower()
     if not track_id or not title or parsed.scheme != "https" or not (host == "audius.co" or host.endswith(".audius.co")):
@@ -1587,6 +1645,8 @@ def download_audius_track(track, workdir):
         "source": "audius",
         "copyright_line": str(raw.get("copyright_line") or raw.get("copyrightLine") or f"Автор: {artist}")[:250],
     }
+    if info["webpage_url"].startswith("/"):
+        info["webpage_url"] = "https://audius.co" + info["webpage_url"]
     return info, filename
 
 
@@ -1680,6 +1740,10 @@ def internet_archive_metadata(identifier, use_cache=True):
     return payload
 
 
+def _internet_archive_flag_is_true(value):
+    return value is True or str(value or "").strip().lower() in ("1", "true", "yes")
+
+
 def internet_archive_pick_audio_file(files):
     if not isinstance(files, list):
         return None
@@ -1713,10 +1777,6 @@ def internet_archive_pick_audio_file(files):
     # MP3/M4A получают приоритет; при одинаковом формате берём самый качественный по размеру.
     ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
     return ranked[0][2]
-
-
-def _internet_archive_flag_is_true(value):
-    return value is True or str(value or "").strip().lower() in ("1", "true", "yes")
 
 
 def internet_archive_item_allowed(payload):
@@ -1820,6 +1880,7 @@ def _internet_archive_flat_search(query, count=20):
         return []
 
     found = []
+
     def load_candidate(identifier):
         try:
             payload = internet_archive_metadata(identifier)
@@ -1828,8 +1889,10 @@ def _internet_archive_flat_search(query, count=20):
             print(f"Internet Archive: не удалось проверить «{identifier}»: {e!r}")
             return None
 
+    # Ограничиваем число проверяемых записей, чтобы не замедлять общий поиск.
+    identifiers = identifiers[:10]
     with ThreadPoolExecutor(max_workers=min(5, len(identifiers))) as pool:
-        for candidate in pool.map(load_candidate, identifiers[:min(30, len(identifiers))]):
+        for candidate in pool.map(load_candidate, identifiers):
             if candidate:
                 found.append(candidate)
     return found
@@ -1972,7 +2035,6 @@ def download_internet_archive_track(track, workdir):
             pass
         raise
 
-    metadata = payload.get("metadata") or {}
     artist = candidate.get("uploader") or "Неизвестный автор"
     info = {
         "id": identifier,
@@ -2098,7 +2160,6 @@ def prepare_track_with_fallback(track, workdir, effect="none"):
     raise RuntimeError("Не удалось получить аудио из доступных источников. " + " | ".join(errors[-3:]))
 
 
-
 def _fallback_track_match_score(reference, candidate):
     """Оценивает, насколько кандидат похож на выбранный трек; слабые совпадения отбрасываются."""
     from difflib import SequenceMatcher
@@ -2202,7 +2263,6 @@ def find_related_fallback_tracks(reference, candidates=None, max_candidates=3):
 
 def prepare_track_with_alternates(track, workdir, effect="none", fallback_tracks=None, max_attempts=4):
     """Сначала пробует выбранную запись; похожие варианты ищет только при её неудаче."""
-    attempts = [(track, False)]
     errors = []
     candidate_dir = os.path.join(workdir, "candidate_1")
     os.makedirs(candidate_dir, exist_ok=True)
@@ -2269,8 +2329,10 @@ def _sc_flat_search(query, count):
     return tracks
 
 
-def soundcloud_search(query, count=30, search_type="track"):
-    """Объединяет источники и ранжирует выдачу; для треков фильтрует слабые совпадения."""
+def soundcloud_search(query, count=30, search_type="track", strict=True):
+    """Объединяет источники и ранжирует выдачу.
+    strict=True — для обычного поиска фильтрует слабые совпадения (подходит любой из вариантов запроса).
+    strict=False — для жанровых подборок и фильтров Speed Up / Slowed (запрос там — не название песни)."""
     query = " ".join((query or "").split())
     if not query:
         return []
@@ -2300,21 +2362,24 @@ def soundcloud_search(query, count=30, search_type="track"):
         raise RuntimeError("Поиск не удался ни в SoundCloud, ни в Audius, ни в Internet Archive") from errors[0]
 
     if str(search_type).lower() != "author":
-        scored = [
-            (score, track) for score, track in scored
-            if _track_matches_track_query(track, query)
-        ]
+        if strict:
+            # Трек подходит, если он соответствует хотя бы одному варианту запроса
+            # (оригинал, транслит, смена раскладки и т.д.).
+            scored = [
+                (score, track) for score, track in scored
+                if any(_track_matches_track_query(track, q) for q in queries)
+            ]
         scored = dedupe_ranked_titles(scored)
 
     return [track for _, track in scored]
 
 
-def cached_soundcloud_search(query, count=30, search_type="track"):
+def cached_soundcloud_search(query, count=30, search_type="track", strict=True):
     """Общий TTL-кэш для поиска в чате, inline-режиме и Mini App."""
     normalized_query = norm_text(query)
     count = max(1, min(100, int(count)))
     search_type = "author" if str(search_type).lower() == "author" else "track"
-    cache_key = (normalized_query, count, search_type)
+    cache_key = (normalized_query, count, search_type, bool(strict))
     now = time.time()
 
     with search_cache_lock:
@@ -2324,7 +2389,7 @@ def cached_soundcloud_search(query, count=30, search_type="track"):
         if cached:
             search_results_cache.pop(cache_key, None)
 
-    tracks = soundcloud_search(query, count, search_type=search_type)
+    tracks = soundcloud_search(query, count, search_type=search_type, strict=strict)
     with search_cache_lock:
         search_results_cache[cache_key] = (time.time(), tracks)
         while len(search_results_cache) > 100:
@@ -2333,10 +2398,8 @@ def cached_soundcloud_search(query, count=30, search_type="track"):
     return tracks
 
 
-
-
 # ============================================================
-#             ЕДИНЫЙ ПОИСК: НАЗВАНИЕ / СЛОВА / ВИДЕО
+#             ЕДИНЫЙ ПОИСК: НАЗВАНИЕ / СЛОВА / ВИДЕО / ССЫЛКА
 # ============================================================
 VIDEO_SEARCH_HOSTS = (
     "youtube.com", "youtu.be", "youtube-nocookie.com",
@@ -2348,6 +2411,21 @@ VIDEO_SEARCH_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 VIDEO_QUERY_CACHE = {}
 VIDEO_QUERY_CACHE_LOCK = threading.Lock()
 VIDEO_QUERY_CACHE_TTL = 900
+
+# Ссылки на музыкальные сервисы и прямые ссылки на треки
+MUSIC_LINK_HOSTS = (
+    "open.spotify.com", "spotify.link", "music.apple.com", "music.yandex.ru",
+    "music.yandex.com", "music.yandex.by", "music.yandex.kz", "deezer.com",
+    "tidal.com", "bandcamp.com", "soundcloud.com", "audius.co", "archive.org",
+)
+# Для этих видеосервисов название ролика — разумный запасной вариант поиска
+VIDEO_TITLE_FALLBACK_HOSTS = ("youtube.com", "youtu.be", "youtube-nocookie.com",
+                              "rutube.ru", "vimeo.com", "dailymotion.com", "vk.com")
+
+
+def _host_in(url, domains):
+    host = (urlparse(url).hostname or "").lower().rstrip(".")
+    return bool(host) and any(host == d or host.endswith("." + d) for d in domains)
 
 
 def extract_video_search_url(value):
@@ -2366,11 +2444,20 @@ def extract_video_search_url(value):
     return ""
 
 
+def extract_music_link(value):
+    """Ссылка на музыкальный сервис (Spotify, Apple Music, SoundCloud и т.д.), если есть в запросе."""
+    for candidate in VIDEO_SEARCH_URL_RE.findall(str(value or "")):
+        candidate = candidate.rstrip(".,!?;:)]}>")
+        if urlparse(candidate).scheme in ("http", "https") and _host_in(candidate, MUSIC_LINK_HOSTS):
+            return candidate
+    return ""
+
+
 class _SupportedVideoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Не разрешает короткой ссылке перенаправить запрос на посторонний домен."""
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         target = urljoin(req.full_url, newurl)
-        if not extract_video_search_url(target):
+        if not (extract_video_search_url(target) or extract_music_link(target)):
             raise urllib.error.HTTPError(
                 req.full_url, code, "Перенаправление на неподдерживаемый адрес заблокировано", headers, fp
             )
@@ -2449,7 +2536,7 @@ def _recognize_video_audio_query(video_url):
             "fragment_retries": 0,
             "playlistend": 1,
         }
-        print("🎵 TikTok: получаю информацию о видео для распознавания звука...")
+        print("🎵 Видео: получаю информацию для распознавания звука...")
         with yt_dlp.YoutubeDL(probe_options) as ydl:
             info = ydl.extract_info(expanded_url, download=False)
         if not isinstance(info, dict):
@@ -2463,17 +2550,13 @@ def _recognize_video_audio_query(video_url):
             print("Видео слишком короткое для надёжного распознавания музыки")
             return ""
 
-        # Shazam использует окно около 12 секунд. Загружаем только один фрагмент,
-        # а не два: раньше оба скачивались до первого обращения к Shazam, из-за
-        # чего пользователь мог долго видеть только сообщение «Проверяю видео».
+        # Shazam использует окно около 12 секунд. Загружаем только один фрагмент.
         clip_end = min(12.0, duration) if duration else 12.0
         if clip_end < 5:
             return ""
 
-        # Запускаем yt-dlp в отдельном процессе. У yt-dlp socket_timeout
-        # ограничивает отдельные сетевые операции, но не гарантирует общий
-        # предел времени для всей загрузки. subprocess.run(timeout=...) позволяет
-        # принудительно остановить зависшую загрузку, не блокируя поток бота.
+        # yt-dlp запускается в отдельном процессе, чтобы можно было жёстко
+        # ограничить общее время загрузки (socket_timeout этого не гарантирует).
         output_template = os.path.join(workdir, "audio_sample_%(id)s.%(ext)s")
         download_command = [
             sys.executable, "-m", "yt_dlp",
@@ -2491,7 +2574,7 @@ def _recognize_video_audio_query(video_url):
             "--no-part",
             expanded_url,
         ]
-        print("🎵 TikTok: загружаю короткий аудиофрагмент (лимит 30 секунд)...")
+        print("🎵 Видео: загружаю короткий аудиофрагмент (лимит 30 секунд)...")
         try:
             download_result = subprocess.run(
                 download_command,
@@ -2502,14 +2585,14 @@ def _recognize_video_audio_query(video_url):
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            print("⏱️ TikTok: загрузка аудиофрагмента остановлена — превышен лимит 30 секунд")
+            print("⏱️ Загрузка аудиофрагмента остановлена — превышен лимит 30 секунд")
             return ""
 
         if download_result.returncode != 0:
             details = (download_result.stderr or download_result.stdout or "").strip()
-            print(f"TikTok: yt-dlp не смог скачать аудиофрагмент: {details[-1200:]}")
+            print(f"yt-dlp не смог скачать аудиофрагмент: {details[-1200:]}")
             return ""
-        print("✅ TikTok: аудиофрагмент загружен, передаю его на распознавание")
+        print("✅ Аудиофрагмент загружен, передаю его на распознавание")
 
         media_extensions = (".mp4", ".m4a", ".mp3", ".webm", ".mov", ".mkv", ".ogg", ".wav", ".opus", ".aac")
         media_files = []
@@ -2519,20 +2602,28 @@ def _recognize_video_audio_query(video_url):
                 if os.path.isfile(full_path) and os.path.getsize(full_path) > 1000:
                     media_files.append(full_path)
         if not media_files:
-            print("TikTok: yt-dlp не сохранил аудиофрагмент")
+            print("yt-dlp не сохранил аудиофрагмент")
             return ""
         sample_path = max(media_files, key=os.path.getsize)
 
         async def recognize_one_sample():
             async with Shazam() as shazam:
                 try:
-                    # Жёсткий тайм-аут, чтобы запрос Shazam не оставлял поиск
-                    # навсегда в состоянии ожидания при проблемах сети.
-                    result = await asyncio.wait_for(
-                        shazam.recognize(sample_path, max_skew=1e-3),
-                        timeout=12,
-                    )
+                    try:
+                        coro = shazam.recognize(sample_path, max_skew=1e-3)
+                    except TypeError:
+                        # В некоторых версиях shazamio параметра max_skew нет.
+                        coro = shazam.recognize(sample_path)
+                    result = await asyncio.wait_for(coro, timeout=12)
                     return _shazam_result_query(result)
+                except TypeError:
+                    # Ошибка сигнатуры возникла уже при выполнении — повторяем без max_skew.
+                    try:
+                        result = await asyncio.wait_for(shazam.recognize(sample_path), timeout=12)
+                        return _shazam_result_query(result)
+                    except Exception as e2:
+                        print(f"Ошибка распознавания Shazam: {e2!r}")
+                        return ""
                 except asyncio.TimeoutError:
                     print("Shazam не ответил за 12 секунд")
                     return ""
@@ -2540,13 +2631,13 @@ def _recognize_video_audio_query(video_url):
                     print(f"Ошибка распознавания Shazam: {e!r}")
                     return ""
 
-        print("🎵 TikTok: распознаю музыку через Shazam...")
+        print("🎵 Распознаю музыку через Shazam...")
         recognized_query = asyncio.run(recognize_one_sample())
         if recognized_query:
             print(f"Shazam распознал музыку по звуку: {recognized_query}")
             return recognized_query
 
-        print("Shazam не подтвердил композицию по аудиофрагменту; проверяю музыкальные метаданные")
+        print("Shazam не подтвердил композицию по аудиофрагменту")
         return ""
     except Exception as e:
         print(f"Не удалось распознать музыку по звуку видео: {e!r}")
@@ -2607,7 +2698,6 @@ def _video_url_metadata_queries(video_url):
                 candidate_info = ydl.extract_info(candidate_url, download=False)
             if isinstance(candidate_info, dict):
                 info = candidate_info
-                # Короткая ссылка раскрылась: используем только результат canonical URL.
                 break
         except Exception as e:
             last_error = e
@@ -2615,7 +2705,7 @@ def _video_url_metadata_queries(video_url):
 
     if not isinstance(info, dict):
         raise RuntimeError(
-            "Не удалось открыть TikTok-видео. Возможно, оно закрыто или TikTok временно ограничил доступ."
+            "Не удалось открыть видео. Возможно, оно закрыто или сервис временно ограничил доступ."
         ) from last_error
 
     music_info = info.get("music_info") if isinstance(info.get("music_info"), dict) else {}
@@ -2630,8 +2720,7 @@ def _video_url_metadata_queries(video_url):
     if _is_generic_music_label(track_name):
         track_name = ""
 
-    # TikTok отдаёт исполнителя прикреплённого звука в artists/authorName.
-    # Эти поля приоритетнее автора самого ролика: uploader может быть не музыкантом.
+    # Исполнитель прикреплённого звука (artists/authorName) приоритетнее автора самого ролика.
     artists = (
         info.get("artists")
         or music_info.get("artists")
@@ -2657,7 +2746,6 @@ def _video_url_metadata_queries(video_url):
         )
     artist_name = str(artist_name or "").strip()
 
-    video_title = str(info.get("title") or info.get("alt_title") or "").strip()
     description = str(info.get("description") or "")[:8000]
     queries = []
 
@@ -2672,7 +2760,7 @@ def _video_url_metadata_queries(video_url):
         if value.casefold() not in {item.casefold() for item in queries}:
             queries.append(value)
 
-    # Сначала используем музыкальную атрибуцию TikTok, а не заголовок ролика.
+    # Сначала используем музыкальную атрибуцию, а не заголовок ролика.
     if track_name and artist_name:
         add_query(f"{artist_name} - {track_name}")
     if track_name:
@@ -2689,10 +2777,6 @@ def _video_url_metadata_queries(video_url):
             add_query(match.group(1))
             if len(queries) >= 4:
                 break
-
-    # Не ищем по обычной подписи ролика: она часто не имеет отношения к музыке
-    # и приводила к случайным песням. Используем только музыкальные метаданные
-    # или явно подписанное название песни в описании.
 
     if not queries:
         raise RuntimeError(
@@ -2716,6 +2800,121 @@ def _video_url_metadata_query(video_url):
     queries = _video_url_metadata_queries(video_url)
     return queries[0] if queries else ""
 
+
+def _video_title_fallback_query(video_url):
+    """Запасной вариант для YouTube/Rutube/Vimeo и т.п.: очищенное название ролика."""
+    if not _host_in(video_url, VIDEO_TITLE_FALLBACK_HOSTS):
+        return ""
+    try:
+        opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True,
+                "socket_timeout": 10, "retries": 0, "extractor_retries": 0}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(_expand_short_video_url(video_url), download=False) or {}
+    except Exception as e:
+        print(f"Не удалось получить название видео: {e!r}")
+        return ""
+    title = str(info.get("title") or "")
+    title = re.sub(r"[\(\[][^\)\]]*[\)\]]", " ", title)
+    title = re.sub(r"(?i)\b(official|music|video|audio|lyrics?|clip|клип|премьера|hd|4k)\b", " ", title)
+    return " ".join(title.split()).strip(" -–—|")[:160]
+
+
+# --- ПОИСК ПО ССЫЛКЕ НА МУЗЫКАЛЬНЫЙ СЕРВИС / ТРЕК ---
+def _fetch_page_html(url, timeout=10, max_bytes=1024 * 1024):
+    request = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.8,ru;q=0.6",
+    })
+    opener = urllib.request.build_opener(_SupportedVideoRedirectHandler())
+    with opener.open(request, timeout=timeout) as response:
+        raw = response.read(max_bytes)
+        charset = response.headers.get_content_charset() or "utf-8"
+    return raw.decode(charset, errors="replace")
+
+
+def _page_title_query(url):
+    """Достаёт «Исполнитель - Название» из <title>/og:title страницы музыкального сервиса."""
+    page = _fetch_page_html(url)
+    og = (re.search(r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']', page, re.I)
+          or re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']', page, re.I))
+    og_title = unescape(og.group(1)).strip() if og else ""
+    t = re.search(r"<title[^>]*>(.*?)</title>", page, re.I | re.S)
+    page_title = unescape(re.sub(r"\s+", " ", t.group(1))).strip() if t else ""
+
+    service_tail = r"(?:Spotify|Apple Music|Deezer|TIDAL|Bandcamp|Яндекс)"
+    for source in (page_title, og_title):
+        if not source:
+            continue
+        # Spotify: «Song - song and lyrics by Artist | Spotify»; Apple: «Song - Single by Artist»
+        m = re.match(
+            r"^(?P<t>.+?)\s*[-–—]\s*(?:song|single|ep)?(?:\s+and lyrics)?\s*by\s+(?P<a>.+?)\s*(?:[|\-–—].*)?$",
+            source, re.I)
+        if not m:
+            # «Song by Artist - Apple Music»
+            m = re.match(r"^(?P<t>.+?)\s+by\s+(?P<a>.+?)\s*[|\-–—]\s*" + service_tail + r".*$", source, re.I)
+        if m:
+            artist = re.sub(r"\s+on\s+" + service_tail + r".*$", "", m.group("a"), flags=re.I).strip()
+            return f"{artist} - {m.group('t').strip()}"[:160]
+
+    value = og_title or page_title
+    value = re.sub(r"\s*[|\-–—]\s*" + service_tail + r".*$", "", value, flags=re.I)
+    value = re.sub(r"\s*[-–—]\s*(слушать|на Яндекс).*$", "", value, flags=re.I)
+    return re.sub(r"\s+", " ", value).strip(" -–—|")[:160]
+
+
+def _direct_track_from_link(url):
+    """Если ссылка ведёт на конкретный трек SoundCloud / Audius / Internet Archive — возвращает его."""
+    host = (urlparse(url).hostname or "").lower()
+    if host == "soundcloud.com" or host.endswith(".soundcloud.com"):
+        info = resolve_soundcloud_metadata(url)
+        if not info or info.get("entries"):
+            return None
+        return normalize_miniapp_track({
+            "url": info.get("webpage_url") or url,
+            "title": info.get("title"),
+            "uploader": info.get("uploader") or info.get("artist"),
+            "thumbnail": best_soundcloud_thumbnail(info),
+            "duration": info.get("duration"),
+            "source": "soundcloud",
+        })
+    if host == "audius.co" or host.endswith(".audius.co"):
+        raw = _audius_data_track(audius_api_json("/resolve", {"url": url}))
+        cand = audius_candidate(raw) if raw else None
+        return normalize_miniapp_track(cand) if cand else None
+    if host in ("archive.org", "www.archive.org"):
+        parts = [p for p in urlparse(url).path.split("/") if p]
+        if len(parts) >= 2 and parts[0] == "details":
+            cand = internet_archive_candidate(parts[1], internet_archive_metadata(parts[1]))
+            return normalize_miniapp_track(cand) if cand else None
+    return None
+
+
+def _search_by_music_link(url, count):
+    results = []
+    title_query = ""
+    try:
+        direct = _direct_track_from_link(url)
+    except Exception as e:
+        print(f"Прямая ссылка на трек не открылась: {e!r}")
+        direct = None
+    if direct:
+        results.append(direct)
+        title_query = f"{direct.get('uploader', '')} {direct['title']}".strip()
+    else:
+        try:
+            title_query = _page_title_query(url)
+        except Exception as e:
+            print(f"Не удалось прочитать страницу {url}: {e!r}")
+    if title_query:
+        try:
+            results += cached_soundcloud_search(title_query, count, "track")
+        except Exception as e:
+            print(f"Поиск по данным ссылки не удался: {e!r}")
+    return dedupe_tracks(results)[:count]
+
+
+# --- ПОИСК ПО ФРАГМЕНТУ ТЕКСТА ПЕСНИ (Lyrics.com) ---
 def _fetch_lyricscom_html(url, timeout=10, max_bytes=2 * 1024 * 1024):
     request = urllib.request.Request(
         url,
@@ -2735,7 +2934,7 @@ def _fetch_lyricscom_html(url, timeout=10, max_bytes=2 * 1024 * 1024):
 def _lyricscom_song_page_contains_phrase(song_url, phrase):
     """Проверяет совпадение внутри текста на странице, но никогда не отдаёт текст пользователю."""
     try:
-        page = _fetch_lyricscom_html(song_url, timeout=8, max_bytes=1024 * 1024)
+        page = _fetch_lyricscom_html(song_url, timeout=6, max_bytes=1024 * 1024)
         match = re.search(
             r"<(?:pre|div)\b[^>]*id=[\"']lyric-body-text[\"'][^>]*>(.*?)</(?:pre|div)>",
             page,
@@ -2753,11 +2952,12 @@ def _lyricscom_song_page_contains_phrase(song_url, phrase):
 
 def search_song_titles_by_lyric_fragment(phrase, limit=4):
     """
-    Ищет фрагмент непосредственно в базе текстов Lyrics.com.
+    Ищет фрагмент в базе текстов Lyrics.com. Страницы проверяются параллельно
+    (раньше — по очереди, что давало задержку в десятки секунд).
     На выходе только названия песен; полный текст не копируется в результаты бота.
     """
     phrase = " ".join(str(phrase or "").split()).strip()[:160]
-    if len(phrase) < 8 or len(phrase.split()) < 2:
+    if len(phrase) < 8 or len(phrase.split()) < 3:
         return []
 
     search_url = "https://www.lyrics.com/serp.php?" + urlencode({
@@ -2766,7 +2966,7 @@ def search_song_titles_by_lyric_fragment(phrase, limit=4):
     })
 
     try:
-        page = _fetch_lyricscom_html(search_url, timeout=12, max_bytes=3 * 1024 * 1024)
+        page = _fetch_lyricscom_html(search_url, timeout=8, max_bytes=3 * 1024 * 1024)
     except Exception as e:
         print(f"Поиск фразы в Lyrics.com временно недоступен: {e!r}")
         return []
@@ -2790,55 +2990,66 @@ def search_song_titles_by_lyric_fragment(phrase, limit=4):
             continue
         seen_urls.add(song_url)
         matches.append((title[:160], song_url))
-        if len(matches) >= 8:
+        if len(matches) >= 5:
             break
 
-    found_titles = []
-    for title, song_url in matches:
-        if _lyricscom_song_page_contains_phrase(song_url, phrase):
-            found_titles.append(title)
-        if len(found_titles) >= max(1, min(8, int(limit))):
-            break
+    if not matches:
+        return []
 
-    return list(dict.fromkeys(found_titles))
+    with ThreadPoolExecutor(max_workers=len(matches)) as pool:
+        checks = list(pool.map(lambda m: _lyricscom_song_page_contains_phrase(m[1], phrase), matches))
+
+    found_titles = [m[0] for m, ok in zip(matches, checks) if ok]
+    return list(dict.fromkeys(found_titles))[:max(1, min(8, int(limit)))]
 
 
 def unified_music_search(query, count=30):
     """
     Один поиск для бота, inline-режима и Mini App:
+    - ссылка на музыкальный сервис / трек: читаем название со страницы и ищем композицию;
+    - ссылка на видео: музыкальные метаданные → Shazam → название ролика (YouTube и др.);
     - название/исполнитель: стандартный поиск;
-    - фраза из песни: стандартный поиск плюс поиск совпадения в текстах песен;
-    - ссылка на видео: извлечение названия/исполнителя из метаданных и поиск композиции.
+    - фраза из песни: стандартный поиск плюс поиск совпадения в текстах песен.
     """
     query = " ".join(str(query or "").split()).strip()
     count = max(1, min(100, int(count)))
     if not query:
         return []
 
+    music_link = extract_music_link(query)
+    if music_link:
+        return _search_by_music_link(music_link, count)
+
     video_url = extract_video_search_url(query)
     if video_url:
-        # Сначала берём звук, который сам автор прикрепил в TikTok.
-        # yt-dlp извлекает track/artists из music metadata; этот путь не скачивает
-        # видео и поэтому значительно быстрее и стабильнее обычного аудио-распознавания.
         song_queries = []
+        strict_query = ""
         metadata_error = None
+
+        # 1) Музыка, которую сам сервис прикрепил к ролику (быстро, без загрузки).
         try:
             song_queries = _video_url_metadata_queries(video_url)
         except Exception as e:
             metadata_error = e
-            print(f"Не удалось получить название прикреплённого звука TikTok: {e!r}")
+            print(f"Не удалось получить название прикреплённого звука: {e!r}")
 
-        # Если TikTok показывает только 'Original sound' или не отдаёт название,
-        # тогда уже пытаемся определить композицию по самому звучанию через Shazam.
-        recognized_query = ""
+        # 2) Для YouTube и похожих сервисов название ролика надёжнее и быстрее Shazam.
+        if not song_queries and _host_in(video_url, VIDEO_TITLE_FALLBACK_HOSTS):
+            title_query = _video_title_fallback_query(video_url)
+            if title_query:
+                song_queries = [title_query]
+                strict_query = title_query
+
+        # 3) Распознавание по звуку через Shazam.
         if not song_queries:
             recognized_query = _recognize_video_audio_query(video_url)
             if recognized_query:
                 song_queries = [recognized_query]
+                strict_query = recognized_query
 
         if not song_queries:
             if metadata_error:
-                print(f"TikTok metadata unavailable and Shazam found no match: {metadata_error!r}")
+                print(f"Метаданные недоступны, название и Shazam ничего не дали: {metadata_error!r}")
             return []
 
         video_tracks = []
@@ -2861,11 +3072,12 @@ def unified_music_search(query, count=30):
         if video_tracks:
             ranked_video_tracks = score_tracks(video_tracks, song_queries)
             ranked_video_tracks = dedupe_ranked_titles(ranked_video_tracks)
-            if recognized_query:
-                # Не показываем похожие по одному случайному слову композиции.
+            if strict_query:
+                # Название ролика или Shazam могут быть неточными —
+                # не показываем похожие по одному случайному слову композиции.
                 ranked_video_tracks = [
                     (score, track) for score, track in ranked_video_tracks
-                    if _track_matches_track_query(track, recognized_query)
+                    if _track_matches_track_query(track, strict_query)
                 ]
             return [track for _, track in ranked_video_tracks[:count]]
         return []
@@ -2873,10 +3085,10 @@ def unified_music_search(query, count=30):
     # Обычный поиск по названию всегда выполняется первым.
     title_tracks = cached_soundcloud_search(query, count, "track")
 
-    # Поиск в текстах нужен только для достаточно длинных фраз, а не для обычных коротких названий.
+    # Поиск в текстах нужен только для достаточно длинных фраз.
     words = query.split()
     lyric_titles = []
-    if len(query) >= 8 and len(words) >= 2:
+    if len(query) >= 12 and len(words) >= 3:
         lyric_titles = search_song_titles_by_lyric_fragment(query, limit=4)
 
     if not lyric_titles:
@@ -2895,7 +3107,6 @@ def unified_music_search(query, count=30):
                 print(f"Не удалось найти аудио по найденному названию песни: {e!r}")
 
     # Треки, найденные по подтверждённым совпадениям в тексте, показываем раньше.
-    # Обычные совпадения по названию остаются в списке как резерв.
     lyric_ranked = score_tracks(dedupe_tracks(lyric_tracks), lyric_titles)
     lyric_ranked = dedupe_ranked_titles(lyric_ranked)
     lyric_tracks_sorted = [track for _, track in lyric_ranked]
@@ -2904,7 +3115,10 @@ def unified_music_search(query, count=30):
 
 def cached_unified_music_search(query, count=30):
     """TTL-кэш единого поиска: одинаковый запрос не запускает повторный парсинг текстов."""
-    normalized_query = norm_text(query)
+    normalized_query = norm_text(query) or str(query or "").strip().casefold()
+    # Для ссылок нормализация съедает символы — берём исходную строку как ключ.
+    if extract_music_link(query) or extract_video_search_url(query):
+        normalized_query = str(query).strip()
     count = max(1, min(100, int(count)))
     cache_key = (normalized_query, count, "unified")
     now = time.time()
@@ -2923,7 +3137,6 @@ def cached_unified_music_search(query, count=30):
             oldest_key = min(search_results_cache, key=lambda key: search_results_cache[key][0])
             search_results_cache.pop(oldest_key, None)
     return tracks
-
 
 
 def store_tracks(tracks):
@@ -2964,11 +3177,14 @@ def inline_query(query):
             tracks = cached_unified_music_search(search_text, 20)[:10]
 
             inline_tracks_cache[query.from_user.id] = tracks
-            if len(inline_tracks_cache) > 500:
-                inline_tracks_cache.pop(next(iter(inline_tracks_cache)))
+            trim_dict(inline_tracks_cache, 500)
 
             results = []
             for i, track in enumerate(tracks):
+                # Без reply_markup Telegram не присылает inline_message_id в chosen_inline_result,
+                # а значит сообщение потом нельзя отредактировать. Поэтому кнопка обязательна.
+                kb = InlineKeyboardMarkup()
+                kb.add(InlineKeyboardButton("⏳ Загрузка...", callback_data="ignore"))
                 results.append(
                     telebot.types.InlineQueryResultArticle(
                         id=str(i),
@@ -2976,7 +3192,8 @@ def inline_query(query):
                         description=f"Автор: {track['uploader']} | Нажми для отправки",
                         input_message_content=telebot.types.InputTextMessageContent(
                             message_text=f"⏳ Загружаю трек: {track['title'][:40]}..."
-                        )
+                        ),
+                        reply_markup=kb
                     )
                 )
             bot.answer_inline_query(query.id, results, cache_time=1)
@@ -3005,6 +3222,9 @@ def handle_chosen_inline(chosen):
         title = track["title"]
         uploader = track["uploader"]
         inline_msg_id = chosen.inline_message_id
+        if not inline_msg_id:
+            print("chosen_inline_result без inline_message_id — проверь, что у результата есть reply_markup")
+            return
 
         cached = audio_cache.get(track_url)
         if cached and not str(cached).startswith("http"):
@@ -3040,7 +3260,8 @@ def handle_chosen_inline(chosen):
                     if thumb_file:
                         thumb_file.close()
             file_id = backup_msg.audio.file_id
-            audio_cache[track_url] = file_id
+            # Кэшируем только под URL реально отправленного трека, а не подменённого.
+            cache_audio(delivered_track.get("url") or track_url, file_id)
 
             bot.edit_message_media(
                 media=InputMediaAudio(
@@ -3085,7 +3306,7 @@ def stats_command(message):
         f"📊 **Статистика бота:**\n\n"
         f"👥 Активных пользователей: `{recent_users_count}`\n"
         f"⏱ Время работы: `{hours}ч {minutes}м`\n"
-        f"📥 Скачано треков: `{stats_data['total_downloads']}`\n"
+        f"📥 Скачано треков: `{stats_data.get('total_downloads', 0)}`\n"
         f"⚡️ Пинг сервера: `{ping_ms} мс`\n\n"
         f"🟢 Статус: `Онлайн (Render)`"
     )
@@ -3181,6 +3402,7 @@ def got_payment(message):
         bot.reply_to(message, "🎉 Ура! Огромное спасибо за донат! Твоя поддержка бесценна ❤️")
 
 
+# /m, /play, /music — проверка подписки здесь намеренно не добавляется (по запросу владельца)
 @bot.message_handler(commands=['m', 'play', 'music'])
 def handle_group_music(message):
     chat_id = message.chat.id
@@ -3245,6 +3467,9 @@ def handle_discover(message):
 RANDOM_MODIFIERS = ["mix", "2024", "2025", "2026", "playlist", "hits", "top", "remix", "vibes",
                     "chill", "night", "club", "party", "bass", "popular", "edit"]
 
+# Реальные слова из названий треков для фильтров (раньше «speedup» не находил «sped up»)
+FILTER_QUERY = {"speedup": "sped up", "slowed": "slowed reverb"}
+
 
 def random_query(base):
     return f"{base} {random.choice(RANDOM_MODIFIERS)} {random.choice(RANDOM_MODIFIERS)}".strip()
@@ -3290,16 +3515,22 @@ def text_handler(message):
     search_music_by_query(message, query=message.text, user_id=message.from_user.id, page=1, is_new=True)
 
 
+# Размер общей выдачи для постраничной навигации. Фиксированный, чтобы ключ кэша не зависел
+# от номера страницы (раньше страницы могли браться из разных выдач с дублями/пропусками).
+PAGED_FETCH_COUNT = 60
+
+
 def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filter=False,
                           is_random=False, base_query=None):
     chat_id = message.chat.id
     base_query = base_query or query
     original_queries[chat_id] = base_query
+    trim_dict(original_queries, 2000)
 
     if is_new:
-        if extract_video_search_url(query):
-            status_text = "🔗 Получаю звук из видео и распознаю музыку..."
-        elif len(query.split()) >= 2 and len(query) >= 8:
+        if extract_music_link(query) or extract_video_search_url(query):
+            status_text = "🔗 Разбираю ссылку и ищу трек..."
+        elif len(query.split()) >= 3 and len(query) >= 12:
             status_text = "🔎 Ищу по названию и словам песни..."
         else:
             status_text = "🔍 Ищу варианты..."
@@ -3314,19 +3545,18 @@ def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filt
             user_limit = int((user_settings.get(str(user_id)) or {}).get("search_limit", 10))
             effective_limit = max(5, min(max_possible, user_limit))
 
-            # На первой странице используем тот же размер выдачи, что и Mini App.
-            # Для следующих страниц увеличиваем выборку, чтобы работала пагинация.
-            limit_ydl = 50 if is_random else min(100, max(30, effective_limit * max(2, page)))
-            if is_random or is_filter:
-                all_tracks = cached_soundcloud_search(query, limit_ydl, "track")
+            if is_random:
+                all_tracks = cached_soundcloud_search(query, 50, "track", strict=False)
+            elif is_filter:
+                all_tracks = cached_soundcloud_search(query, PAGED_FETCH_COUNT, "track", strict=False)
             else:
-                all_tracks = cached_unified_music_search(query, limit_ydl)
+                all_tracks = cached_unified_music_search(query, PAGED_FETCH_COUNT)
 
             if is_random:
                 if len(all_tracks) >= effective_limit:
                     tracks = random.sample(all_tracks, effective_limit)
                 else:
-                    tracks = all_tracks.copy()
+                    tracks = list(all_tracks)
                     random.shuffle(tracks)
             else:
                 start = (page - 1) * effective_limit
@@ -3351,10 +3581,13 @@ def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filt
                 if page > 1:
                     nav_buttons.append(InlineKeyboardButton(
                         text="⬅️ Назад", callback_data=f"page_{page-1}_{qid(query, base_query)}"))
-                nav_buttons.append(InlineKeyboardButton(
-                    text="🔄 Ещё", callback_data=f"page_{page+1}_{qid(query, base_query)}"))
+                # «Ещё» показываем только если есть следующая страница
+                if page * effective_limit < len(all_tracks):
+                    nav_buttons.append(InlineKeyboardButton(
+                        text="🔄 Ещё", callback_data=f"page_{page+1}_{qid(query, base_query)}"))
 
-            markup.row(*nav_buttons)
+            if nav_buttons:
+                markup.row(*nav_buttons)
 
             if is_filter:
                 markup.row(InlineKeyboardButton(text="🔙 Назад к обычному", callback_data=f"back_{qid(base_query)}"))
@@ -3366,7 +3599,7 @@ def search_music_by_query(message, query, user_id, page=1, is_new=False, is_filt
                 )
 
             prefix = "🎲 Случайная подборка." if is_random else f"🎧 Страница {page}."
-            bot.edit_message_text(f"{prefix} Запрос: {query}", chat_id, msg.message_id, reply_markup=markup)
+            bot.edit_message_text(f"{prefix} Запрос: {query[:200]}", chat_id, msg.message_id, reply_markup=markup)
 
         except Exception as e:
             report_error(f"Ошибка поиска «{query}»", e)
@@ -3411,10 +3644,10 @@ def handle_navigation(call):
                                   is_random=True, base_query=base)
         elif kind == "filter":
             filter_type = data[2] if len(data) >= 3 else "slowed"
-            if filter_type not in ("speedup", "slowed"):
+            if filter_type not in FILTER_QUERY:
                 return
-            search_music_by_query(call.message, query=f"{query} {filter_type}", user_id=user_id, page=1,
-                                  is_filter=True, base_query=query)
+            search_music_by_query(call.message, query=f"{query} {FILTER_QUERY[filter_type]}", user_id=user_id,
+                                  page=1, is_filter=True, base_query=query)
         elif kind == "back":
             search_music_by_query(call.message, query=query, user_id=user_id, page=1)
     except (ValueError, IndexError):
@@ -3451,17 +3684,18 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None, 
                     )
                 else:
                     text = ""
-                text += f"▶️ **Плеер:**\n🎵 {shown_title}\n🧑‍🎤 {shown_uploader}"
+                # Названия треков могут содержать _ * [ ` — поэтому HTML с экранированием, а не Markdown.
+                text += f"▶️ <b>Плеер:</b>\n🎵 {esc(str(shown_title))}\n🧑‍🎤 {esc(str(shown_uploader))}"
                 attribution = audius_attribution_caption(info) if info else None
                 if attribution:
-                    text += "\n\n" + attribution
+                    text += "\n\n" + esc(attribution)
                 bot.edit_message_text(
                     text=text,
                     chat_id=chat_id, message_id=status_msg_id,
-                    parse_mode=None if attribution else "Markdown", reply_markup=markup
+                    parse_mode="HTML", reply_markup=markup
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Не удалось обновить статус плеера: {e!r}")
         elif alternate_used:
             try:
                 bot.send_message(
@@ -3473,7 +3707,7 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None, 
         count_download()
 
     try:
-        # Кэш выбранного результата проверяем первым, как и раньше.
+        # Кэш выбранного результата проверяем первым.
         cached_file_id = audio_cache.get(track_url)
         if effect == "none" and cached_file_id and not str(cached_file_id).startswith("http"):
             try:
@@ -3512,9 +3746,9 @@ def send_track(chat_id, track, effect="none", status_msg_id=None, user_id=None, 
                         thumb_file.close()
 
         if effect == "none":
-            audio_cache[track_url] = sent.audio.file_id
-            if delivered_track.get("url"):
-                audio_cache[delivered_track["url"]] = sent.audio.file_id
+            # Кэшируем только под URL того трека, который реально отправлен.
+            # Раньше file_id подменной версии записывался и под URL исходного трека.
+            cache_audio(delivered_track.get("url") or track_url, sent.audio.file_id)
         finish_ok(out_title, out_uploader, info, delivered_track=delivered_track)
     except Exception as e:
         report_error(f"Ошибка загрузки трека {track_url}", e)
@@ -3576,7 +3810,7 @@ def handle_download_callback(call):
     chat_id = call.message.chat.id
     register_user(chat_id)
 
-    # Проверка подписки (раньше её здесь не было)
+    # Проверка подписки
     if not check_user_subscription(call.from_user.id):
         bot.answer_callback_query(call.id, "❌ Сначала подпишись на группу", show_alert=True)
         send_subscription_prompt(chat_id)
@@ -3608,15 +3842,15 @@ def handle_download_callback(call):
             InlineKeyboardButton("⚡ Nightcore", callback_data=f"dlfx_{sid}_{index}_nightcore"),
         )
         markup.row(InlineKeyboardButton("🔙 К поиску", callback_data="tosearch"))
-        bot.send_message(chat_id, f"🎚 **Выбери звук для:**\n🎵 {title}", parse_mode="Markdown", reply_markup=markup)
+        bot.send_message(chat_id, f"🎚 <b>Выбери звук для:</b>\n🎵 {esc(title)}", parse_mode="HTML", reply_markup=markup)
         return
 
     bot.answer_callback_query(call.id, f"📥 Загружаю: {title[:30]}...")
 
     status_msg = bot.send_message(
         chat_id,
-        f"⏳ **Скачиваю трек:**\n🎵 {title}\n🧑‍🎤 {uploader}\n\n*Подожди пару секунд...*",
-        parse_mode="Markdown"
+        f"⏳ <b>Скачиваю трек:</b>\n🎵 {esc(title)}\n🧑‍🎤 {esc(uploader)}\n\n<i>Подожди пару секунд...</i>",
+        parse_mode="HTML"
     )
     threading.Thread(
         target=send_track,
@@ -3798,8 +4032,6 @@ def handle_miniapp_get_data(handler):
     uid = user["id"]
     settings = get_user_settings(uid)
     changed = False
-    changed |= fill_missing_track_covers(settings.get("favorites", []), max_items=10)
-    changed |= fill_missing_track_covers(settings.get("history", []), max_items=10)
 
     vip = is_user_vip(uid)
     # Если VIP закончился — сбрасываем VIP-тему и лимит
@@ -3823,9 +4055,21 @@ def handle_miniapp_get_data(handler):
         "vip_expires": get_vip_expires(uid),
         "theme": settings.get("theme", "default")
     })
-    favs = settings.get("favorites", [])
-    if favs:
-        threading.Thread(target=prewarm_tracks_stream_urls, args=(favs[:20],), daemon=True).start()
+
+    # Обложки и прогрев ссылок — уже ПОСЛЕ ответа, чтобы приложение открывалось сразу
+    def background():
+        try:
+            covers_changed = fill_missing_track_covers(settings.get("favorites", []), max_items=10)
+            covers_changed |= fill_missing_track_covers(settings.get("history", []), max_items=10)
+            if covers_changed:
+                request_save()
+        except Exception as e:
+            print(f"Фоновое обновление обложек не удалось: {e!r}")
+        favs = settings.get("favorites", [])
+        if favs:
+            prewarm_tracks_stream_urls(favs[:20])
+
+    threading.Thread(target=background, daemon=True).start()
 
 
 def handle_miniapp_search(handler, query_params):
@@ -3836,12 +4080,12 @@ def handle_miniapp_search(handler, query_params):
         return api_json(handler, 403, {
             "error": "Сначала вступи в нашу группу (или купи VIP).",
             "subscription_required": True,
-            "invite_url": "https://t.me/+8JYfdTy2YhE0NDJi"
+            "invite_url": INVITE_URL
         })
     query = str((query_params.get("q") or [""])[0]).strip()[:1200]
     search_type = str((query_params.get("type") or ["track"])[0]).strip().lower()
     if not query:
-        return api_json(handler, 400, {"error": "Введи имя автора или название трека."})
+        return api_json(handler, 400, {"error": "Введи имя автора, название трека или ссылку."})
     settings = get_user_settings(user["id"])
 
     # VIP ЛИМИТ: до 50, обычный до 25
@@ -3914,8 +4158,7 @@ def _validate_stream_metadata(expected_track, actual_info, source_name):
     expected_title = str(expected_track.get("title") or "").strip()
     actual_title = str(actual_info.get("title") or "").strip()
     if expected_title and actual_title:
-        # Используем тот же строгий матчинг, что и в поиске: совпадения
-        # только общих слов вроде «I / go / to» недостаточно.
+        # Тот же строгий матчинг, что и в поиске: совпадения только общих слов недостаточно.
         actual_candidate = {
             "title": actual_title,
             "uploader": actual_info.get("uploader") or actual_info.get("artist") or actual_info.get("creator") or "",
@@ -4024,7 +4267,6 @@ def _get_track_stream_url_single(track):
     raise RuntimeError(f"Неизвестный источник аудио: {source}")
 
 
-
 def _hydrate_stream_track(track):
     """Восстанавливает метаданные по ссылке, когда Mini App передал URL без полей трека."""
     enriched = dict(track or {})
@@ -4080,10 +4322,9 @@ def get_track_stream_url(track):
             f"«{enriched.get('title', '')}» — {enriched.get('uploader', '')}: {e!r}"
         )
         raise RuntimeError(
-            f"Не удалось воспроизвести выбранный трек «{enriched.get('title', 'Без названия')}" 
+            f"Не удалось воспроизвести выбранный трек «{enriched.get('title', 'Без названия')}» "
             f"— {enriched.get('uploader', 'Неизвестен')}». Другой трек вместо него не включён."
         ) from e
-
 
 
 def prewarm_tracks_stream_urls(tracks, max_count=20):
@@ -4126,6 +4367,7 @@ def handle_miniapp_stream(handler, query_params):
     track = _hydrate_stream_track(track)
     try:
         direct_url = get_track_stream_url(track)
+        handler._response_started = True
         handler.send_response(302)
         handler.send_header("Location", direct_url)
         handler.send_header("Cache-Control", "no-store")
@@ -4270,7 +4512,7 @@ def handle_miniapp_post(handler, path, payload):
             return api_json(handler, 403, {
                 "error": "Сначала вступи в нашу группу (или купи VIP).",
                 "subscription_required": True,
-                "invite_url": "https://t.me/+8JYfdTy2YhE0NDJi"
+                "invite_url": INVITE_URL
             })
         track = normalize_miniapp_track(payload.get("track"))
         if not track:
