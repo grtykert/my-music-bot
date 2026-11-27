@@ -2415,6 +2415,8 @@ VIDEO_SEARCH_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
 VIDEO_QUERY_CACHE = {}
 VIDEO_QUERY_CACHE_LOCK = threading.Lock()
 VIDEO_QUERY_CACHE_TTL = 900
+TIKTOK_API_CACHE = {}
+TIKTOK_API_CACHE_TTL = 300
 
 # Ссылки на музыкальные сервисы и прямые ссылки на треки
 MUSIC_LINK_HOSTS = (
@@ -2504,6 +2506,144 @@ def _expand_short_video_url(video_url):
     return original
 
 
+def _tiktok_api_video_data(video_url):
+    """Получает публичные метаданные TikTok через резервный TikWM API."""
+    expanded_url = _expand_short_video_url(video_url)
+    candidates = list(dict.fromkeys((expanded_url, str(video_url or "").strip())))
+
+    for candidate in candidates:
+        if not candidate or not _host_in(candidate, ("tiktok.com",)):
+            continue
+
+        cache_key = candidate.split("?", 1)[0]
+        now = time.time()
+        with VIDEO_QUERY_CACHE_LOCK:
+            cached = TIKTOK_API_CACHE.get(cache_key)
+            if cached and now - cached[0] < TIKTOK_API_CACHE_TTL:
+                return cached[1]
+            if cached:
+                TIKTOK_API_CACHE.pop(cache_key, None)
+
+        try:
+            request = urllib.request.Request(
+                "https://www.tikwm.com/api/",
+                data=urlencode({"url": candidate, "hd": "0"}).encode("utf-8"),
+                headers={
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/128.0 Safari/537.36",
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                    "Origin": "https://www.tikwm.com",
+                    "Referer": "https://www.tikwm.com/",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=12) as response:
+                raw = response.read(2 * 1024 * 1024 + 1)
+            if len(raw) > 2 * 1024 * 1024:
+                raise ValueError("Ответ TikWM превышает допустимый размер")
+
+            payload = json.loads(raw.decode("utf-8", errors="replace"))
+            if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+                message = payload.get("msg", "неизвестная ошибка") if isinstance(payload, dict) else "неверный JSON"
+                raise RuntimeError(f"TikWM API: {message}")
+
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise RuntimeError("TikWM API не вернул данные видео")
+
+            with VIDEO_QUERY_CACHE_LOCK:
+                TIKTOK_API_CACHE[cache_key] = (time.time(), data)
+                while len(TIKTOK_API_CACHE) > 100:
+                    oldest = min(TIKTOK_API_CACHE, key=lambda key: TIKTOK_API_CACHE[key][0])
+                    TIKTOK_API_CACHE.pop(oldest, None)
+            return data
+
+        except Exception as e:
+            print(f"[TIKTOK API] Не удалось получить данные видео: {e!r}")
+
+    return {}
+
+
+def _tiktok_api_music_queries(video_url):
+    """Возвращает название прикреплённой звуковой дорожки TikTok, если оно известно."""
+    data = _tiktok_api_video_data(video_url)
+    music_info = data.get("music_info") if isinstance(data.get("music_info"), dict) else {}
+
+    title = str(
+        music_info.get("title")
+        or data.get("music_title")
+        or data.get("track")
+        or ""
+    ).strip()
+    artist = str(
+        music_info.get("author")
+        or music_info.get("artist")
+        or data.get("music_author")
+        or ""
+    ).strip()
+
+    if not title or _is_generic_music_label(title):
+        return []
+
+    queries = []
+    if artist and not _is_generic_music_label(artist):
+        queries.append(f"{artist} - {title}")
+    queries.append(title)
+    return list(dict.fromkeys(q[:180] for q in queries if q))[:4]
+
+
+def _download_tiktok_api_audio_sample(video_url, workdir):
+    """Скачивает только аудиодорожку, полученную от TikWM, для распознавания Shazam."""
+    data = _tiktok_api_video_data(video_url)
+    music_info = data.get("music_info") if isinstance(data.get("music_info"), dict) else {}
+    audio_url = str(music_info.get("play") or data.get("music") or "").strip()
+    if not audio_url:
+        return None
+
+    parsed = urlparse(audio_url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    allowed_cdn = (
+        "tiktokcdn.com",
+        "tiktokcdn-us.com",
+        "tiktokcdn-eu.com",
+        "tiktokcdn-eu.net",
+    )
+    if parsed.scheme != "https" or not any(host == d or host.endswith("." + d) for d in allowed_cdn):
+        print("[TIKTOK API] Пропущена аудиоссылка с неподдерживаемого домена")
+        return None
+
+    try:
+        request = urllib.request.Request(
+            audio_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/128.0 Safari/537.36",
+                "Referer": "https://www.tiktok.com/",
+                "Accept": "audio/*, application/octet-stream;q=0.9, */*;q=0.8",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            final = urlparse(response.geturl())
+            final_host = (final.hostname or "").lower().rstrip(".")
+            if final.scheme != "https" or not any(
+                final_host == d or final_host.endswith("." + d) for d in allowed_cdn
+            ):
+                raise RuntimeError("Аудиоссылка перенаправлена на неподдерживаемый домен")
+            raw = response.read(20 * 1024 * 1024 + 1)
+
+        if len(raw) <= 1000 or len(raw) > 20 * 1024 * 1024:
+            raise ValueError("Аудиофайл пустой или превышает лимит 20 МБ")
+
+        extension = ".m4a" if final.path.lower().endswith(".m4a") else ".mp3"
+        sample_path = os.path.join(workdir, "audio_sample_tiktok" + extension)
+        with open(sample_path, "wb") as audio_file:
+            audio_file.write(raw)
+        return sample_path
+
+    except Exception as e:
+        print(f"[TIKTOK API] Не удалось получить аудиофрагмент для Shazam: {e!r}")
+        return None
+
+
 def _shazam_result_query(result):
     """Извлекает подтверждённые Shazam название и исполнителя из ответа."""
     track = result.get("track") if isinstance(result, dict) else getattr(result, "track", None)
@@ -2521,7 +2661,7 @@ def _shazam_result_query(result):
 
 
 def _recognize_video_audio_query(video_url):
-    """Быстро распознаёт один 12-секундный фрагмент аудио видео через Shazam."""
+    """Распознаёт звук видео через Shazam; для TikTok сначала пробует аудио TikWM."""
     if Shazam is None:
         print("Shazam не установлен — перехожу к музыкальным метаданным видео")
         return ""
@@ -2530,87 +2670,88 @@ def _recognize_video_audio_query(video_url):
     workdir = tempfile.mkdtemp(prefix="video_music_recognition_")
     sample_path = None
     try:
-        # Не запускаем длинные повторы: TikTok иногда зависает на выдаче метаданных.
-        probe_options = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "noplaylist": True,
-            "socket_timeout": 10,
-            "retries": 0,
-            "extractor_retries": 0,
-            "fragment_retries": 0,
-            "playlistend": 1,
-        }
-        print("🎵 Видео: получаю информацию для распознавания звука...")
-        with yt_dlp.YoutubeDL(probe_options) as ydl:
-            info = ydl.extract_info(expanded_url, download=False)
-        if not isinstance(info, dict):
-            return ""
+        if _host_in(expanded_url, ("tiktok.com",)):
+            sample_path = _download_tiktok_api_audio_sample(expanded_url, workdir)
+            if sample_path:
+                print("✅ TikTok: аудиодорожка получена через резервный API")
 
-        try:
-            duration = float(info.get("duration") or 0)
-        except (TypeError, ValueError):
-            duration = 0
-        if duration and duration < 5:
-            print("Видео слишком короткое для надёжного распознавания музыки")
-            return ""
+        if not sample_path:
+            probe_options = {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "noplaylist": True,
+                "socket_timeout": 10,
+                "retries": 0,
+                "extractor_retries": 0,
+                "fragment_retries": 0,
+                "playlistend": 1,
+            }
+            print("🎵 Видео: получаю информацию для распознавания звука...")
+            with yt_dlp.YoutubeDL(probe_options) as ydl:
+                info = ydl.extract_info(expanded_url, download=False)
+            if not isinstance(info, dict):
+                return ""
 
-        # Shazam использует окно около 12 секунд. Загружаем только один фрагмент.
-        clip_end = min(12.0, duration) if duration else 12.0
-        if clip_end < 5:
-            return ""
+            try:
+                duration = float(info.get("duration") or 0)
+            except (TypeError, ValueError):
+                duration = 0
+            if duration and duration < 5:
+                print("Видео слишком короткое для надёжного распознавания музыки")
+                return ""
 
-        # yt-dlp запускается в отдельном процессе, чтобы можно было жёстко
-        # ограничить общее время загрузки (socket_timeout этого не гарантирует).
-        output_template = os.path.join(workdir, "audio_sample_%(id)s.%(ext)s")
-        download_command = [
-            sys.executable, "-m", "yt_dlp",
-            "--format", "bestaudio/best",
-            "--output", output_template,
-            "--no-playlist",
-            "--quiet",
-            "--no-warnings",
-            "--socket-timeout", "8",
-            "--retries", "0",
-            "--extractor-retries", "0",
-            "--fragment-retries", "0",
-            "--file-access-retries", "0",
-            "--download-sections", f"*0-{clip_end:.1f}",
-            "--no-part",
-            expanded_url,
-        ]
-        print("🎵 Видео: загружаю короткий аудиофрагмент (лимит 30 секунд)...")
-        try:
-            download_result = subprocess.run(
-                download_command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            print("⏱️ Загрузка аудиофрагмента остановлена — превышен лимит 30 секунд")
-            return ""
+            clip_end = min(12.0, duration) if duration else 12.0
+            if clip_end < 5:
+                return ""
 
-        if download_result.returncode != 0:
-            details = (download_result.stderr or download_result.stdout or "").strip()
-            print(f"yt-dlp не смог скачать аудиофрагмент: {details[-1200:]}")
-            return ""
-        print("✅ Аудиофрагмент загружен, передаю его на распознавание")
+            output_template = os.path.join(workdir, "audio_sample_%(id)s.%(ext)s")
+            download_command = [
+                sys.executable, "-m", "yt_dlp",
+                "--format", "bestaudio/best",
+                "--output", output_template,
+                "--no-playlist",
+                "--quiet",
+                "--no-warnings",
+                "--socket-timeout", "8",
+                "--retries", "0",
+                "--extractor-retries", "0",
+                "--fragment-retries", "0",
+                "--file-access-retries", "0",
+                "--download-sections", f"*0-{clip_end:.1f}",
+                "--no-part",
+                expanded_url,
+            ]
+            print("🎵 Видео: загружаю короткий аудиофрагмент (лимит 30 секунд)...")
+            try:
+                download_result = subprocess.run(
+                    download_command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                print("⏱️ Загрузка аудиофрагмента остановлена — превышен лимит 30 секунд")
+                return ""
 
-        media_extensions = (".mp4", ".m4a", ".mp3", ".webm", ".mov", ".mkv", ".ogg", ".wav", ".opus", ".aac")
-        media_files = []
-        for filename in os.listdir(workdir):
-            full_path = os.path.join(workdir, filename)
-            if filename.startswith("audio_sample_") and filename.lower().endswith(media_extensions):
-                if os.path.isfile(full_path) and os.path.getsize(full_path) > 1000:
-                    media_files.append(full_path)
-        if not media_files:
-            print("yt-dlp не сохранил аудиофрагмент")
-            return ""
-        sample_path = max(media_files, key=os.path.getsize)
+            if download_result.returncode != 0:
+                details = (download_result.stderr or download_result.stdout or "").strip()
+                print(f"yt-dlp не смог скачать аудиофрагмент: {details[-1200:]}")
+                return ""
+
+            media_extensions = (".mp4", ".m4a", ".mp3", ".webm", ".mov", ".mkv", ".ogg", ".wav", ".opus", ".aac")
+            media_files = []
+            for filename in os.listdir(workdir):
+                full_path = os.path.join(workdir, filename)
+                if filename.startswith("audio_sample_") and filename.lower().endswith(media_extensions):
+                    if os.path.isfile(full_path) and os.path.getsize(full_path) > 1000:
+                        media_files.append(full_path)
+            if not media_files:
+                print("yt-dlp не сохранил аудиофрагмент")
+                return ""
+            sample_path = max(media_files, key=os.path.getsize)
 
         async def recognize_one_sample():
             async with Shazam() as shazam:
@@ -2618,12 +2759,10 @@ def _recognize_video_audio_query(video_url):
                     try:
                         coro = shazam.recognize(sample_path, max_skew=1e-3)
                     except TypeError:
-                        # В некоторых версиях shazamio параметра max_skew нет.
                         coro = shazam.recognize(sample_path)
                     result = await asyncio.wait_for(coro, timeout=12)
                     return _shazam_result_query(result)
                 except TypeError:
-                    # Ошибка сигнатуры возникла уже при выполнении — повторяем без max_skew.
                     try:
                         result = await asyncio.wait_for(shazam.recognize(sample_path), timeout=12)
                         return _shazam_result_query(result)
@@ -2901,6 +3040,17 @@ def _video_url_metadata_queries(video_url):
             return list(cached_queries) if isinstance(cached_queries, (list, tuple)) else [cached_queries]
         if cached:
             VIDEO_QUERY_CACHE.pop(cache_key, None)
+
+    if _host_in(expanded_url, ("tiktok.com",)):
+        tikwm_queries = _tiktok_api_music_queries(expanded_url)
+        if tikwm_queries:
+            with VIDEO_QUERY_CACHE_LOCK:
+                VIDEO_QUERY_CACHE[cache_key] = (time.time(), tuple(tikwm_queries))
+                while len(VIDEO_QUERY_CACHE) > 200:
+                    oldest_key = min(VIDEO_QUERY_CACHE, key=lambda key: VIDEO_QUERY_CACHE[key][0])
+                    VIDEO_QUERY_CACHE.pop(oldest_key, None)
+            print(f"[VIDEO SEARCH] TikTok: музыка получена через резервный API: {tikwm_queries}")
+            return tikwm_queries
 
     options = {
         "quiet": True,
